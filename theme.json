@@ -1,0 +1,34 @@
+{
+  "name": "spyder/dark-bright",
+  "ui": {
+    "BG_COLOR": "#19232D",
+    "PANEL_BG": "#252f38",
+    "TEXT_BG": "#19232D",
+    "TEXT_FG": "#ffffff",
+    "BORDER_CLR": "#41515e",
+    "ACCENT_BG": "#0e6c75",
+    "ACCENT_FG": "#ffffff",
+    "INSERT_FG": "#ffffff",
+    "SELECT_BG": "#2f587a",
+    "SELECT_FG": "#ffffff"
+  },
+  "hl": {
+    "Token": "#ffffff",
+    "Token.Punctuation": "#ffffff",
+    "Token.Operator": "#ffffff",
+    "Token.Operator.Word": "#c577f1",
+    "Token.Comment": "#9aa7b0",
+    "Token.Keyword": "#c577f1",
+    "Token.Keyword.Constant": "#e1a66e",
+    "Token.String": "#b2f187",
+    "Token.String.Interpol": "#b2f187",
+    "Token.Name.Decorator": "#f57380",
+    "Token.Name.Class": "#5ce1fa",
+    "Token.Name.Function": "#5ce1fa",
+    "Token.Name.Builtin.Pseudo": "#f57380",
+    "Token.Name.Builtin": "#e1a66e",
+    "Token.Name.Exception": "#e1a66e",
+    "Token.Number": "#ffdd1a",
+    "Token.Name.Variable": "#ffffff"
+  }
+}
