@@ -21,7 +21,7 @@
 サーバー、PC A（GUI）、PC B（Watcher）それぞれでリポジトリを取得します。
 
 ```bash
-git clone git@github.com:<your-account>/SyncTerm-IDE.git
+git clone https://github.com/ri0097fx/SyncTerm-IDE.git
 cd SyncTerm-IDE
 ```
 
