@@ -150,10 +150,6 @@ python gui_terminal.py
 
 ## ⚠️ 注意事項（必ずお読みください）
 
-- **公開用設定ファイルの扱い**
-  - リポジトリには `config.example.ini` を置き、実運用の `config.ini` はコミットしないでください（`.gitignore` 推奨）。
-  - `sessions/`、`_registry/`、`gui_local_mirror/`、`watcher_local_mirror/`、各種 `*.log` など **実行や作業内容が残るものは公開しない** でください。
-
 - **信頼境界と権限**
   - 本ツールは **クライアント発の `ssh/rsync` のみ** で同期します。**サーバーからローカルへはプッシュしません。**
   - サーバー上の `{base_path}` は専用ユーザ＋厳しめパーミッションで運用してください。第三者が `commands.txt` 等に書ける構成は危険です。
