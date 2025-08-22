@@ -1,5 +1,7 @@
 # SyncTerm-IDE
 
+> 🚧 **Experimental / Beta**: 本プロジェクトは**実験段階のプロトタイプ**です。動作が不安定になることがあります。仕様は予告なく変更される可能性があります。重要データ・本番環境での利用は避け、検証環境でお試しください。
+
 *A lightweight multi‑tab editor + terminal for remote development with a neutral relay server*
 
 SyncTerm‑IDE は、**GUI（PC A）** と **Watcher（PC B/C, …）** が別ネットワークにあっても、両者が **同じ中継サーバーへ SSH / rsync 可能なら制御できる** 軽量リモート開発環境です。サーバーは **中継専用（プッシュしない）** で、各クライアント（GUI / Watcher）が **常にクライアント発の rsync / ssh** で同期します。
