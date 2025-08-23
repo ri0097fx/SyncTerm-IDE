@@ -1,0 +1,7 @@
+# Python dependencies for SyncTerm-IDE
+Pygments>=2.16
+Pillow>=10.0.0
+
+# Note:
+# - tkinter は標準ライブラリですが OS 側の Tk が必要です（例: Ubuntu系 `sudo apt-get install python3-tk`）。
+# - rsync / ssh は外部コマンドです（例: macOS `brew install rsync`, Ubuntu系 `sudo apt-get install rsync openssh-client`）。
