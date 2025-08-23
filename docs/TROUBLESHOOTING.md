@@ -1,6 +1,6 @@
 # SyncTerm-IDE — Troubleshooting
 
-このドキュメントは、**SyncTerm-IDE** の導入・運用時によくある問題の切り分け手順と対処法をまとめたものです。GUI（`gui_terminal.py`）と Watcher（`watcher_manager.sh` / `command_watcher.py`）は**別ネットワークにあっても**、双方が中継サーバー（`server = user@xxx.xxx.xxx.xxx`）に SSH できれば動作します。
+このドキュメントは、**SyncTerm-IDE** の利用時に遭遇しやすい問題の切り分け手順と対処法をまとめたものである。症状に最も近い項目から確認すること。
 
 ---
 
@@ -30,57 +30,26 @@ rsync -azv user@203.0.113.10:/home/user/remote_dev/_registry/ ~/gui_local_mirror
 
 > 0-2/0-3 のどちらかでも失敗する場合は **SSH 鍵設定**・**パス**・**権限**・**ファイアウォール**を確認してください。
 
+> 注: 本ドキュメントは現在 **macOS** を主対象として記述しています。**Windows/Linux での動作確認は未実施**です（動作可否や表示差は未検証）。
+
 ---
 
 ## 1. Watcher が GUI のプルダウンに出てこない
 
 **症状**
 
-* GUI の「Watcher」コンボに何も表示されない / 期待の Watcher が出ない。
+* Watcher を起動しているのに、GUI の Watcher 一覧に見つからない。
 
 **確認ポイント**
 
-1. **サーバー上のレジストリにハートビートがあるか**
-
-```bash
-ssh user@203.0.113.10 'ls -l /home/user/remote_dev/_registry/'
-# 例: pc-b.json, pc-c.json などが数十秒以内に更新されていること
-```
-
-2. **Watcher 側（PC B/C）のプロセスが生きているか**
-
-* `watcher_manager.sh` を使う場合：
-
-```bash
-ps aux | grep watcher_manager.sh
-```
-
-* 直接 `command_watcher.py` を起動する場合：
-
-```bash
-ps aux | grep command_watcher.py
-```
-
-3. **`config.ini` の `base_path` とディレクトリ名が全マシンで一致**
-
-* `[structure] sessions_dir_name = sessions`
-* `[structure] registry_dir_name = _registry`
+* Watcher 側で `watcher_manager.sh` が動いているか（`ps` / ログ確認）。
+* `config.ini` の `server` / `base_path` が GUI 側と一致しているか。
+* サーバー上の `_registry/` に Watcher のハートビートが作成・更新されているか。
 
 **対処**
 
-* Watcher 側で再起動（ログを別途保存しておくと原因特定に役立ちます）
-
-```bash
-# 例: systemd や nohup など、運用方法に合わせて
-pkill -f command_watcher.py || true
-nohup ./watcher_manager.sh <watcher_id> "Display Name" > watcher.log 2>&1 &
-```
-
-* レジストリが古い/壊れている場合は削除して再生成（※運用に応じて慎重に）
-
-```bash
-ssh user@203.0.113.10 'rm -rf /home/user/remote_dev/_registry && mkdir -p /home/user/remote_dev/_registry'
-```
+* `watcher_manager.sh` を再起動する。
+* サーバーへの SSH/rsync を再確認（鍵・防火壁・ユーザー権限）。
 
 ---
 
@@ -89,72 +58,73 @@ ssh user@203.0.113.10 'rm -rf /home/user/remote_dev/_registry && mkdir -p /home/
 **症状**
 
 * GUI を起動してもプロンプトが表示されない。
-* `Clear log file` やモード切替（Local → Remote）をすると `$` は出るが `user@host` が出ない。
+* `Clear log file` やモード切替（Local → Remote）後に固まる。
 
 **確認ポイント**
 
-1. **セッション切替が完了しているか**（Watcher/Session を選択後）
-
-* GUI のステータスバーにエラーが出ていないか確認。
-
-2. **サーバー上のセッションディレクトリに `commands.log` が存在するか**
-
-```bash
-ssh user@203.0.113.10 'ls -l /home/user/remote_dev/sessions/<watcher_id>/<session_name>/commands.log'
-```
-
-3. **` .watcher_status.json` が更新されているか**
-
-* Watcher 側の Agent が出力し、サーバーのセッションフォルダへ同期されます。
-
-```bash
-ssh user@203.0.113.10 'cat /home/user/remote_dev/sessions/<watcher_id>/<session_name>/.watcher_status.json'
-```
-
-* `user`, `host`, `cwd`, `conda_env` などが入っていること。
+* サーバーのセッションディレクトリに `.watcher_status.json` が生成されているか。
+* `base_path` とパーミッションが正しいか（GUI/Watcher ともに書込権限があるか）。
 
 **対処**
 
-* GUI で一度 `Mode: Local` に切替 → `Mode: Remote` に戻す。
-* `Clear log file` を押して、**EOC マーカー**（`__CMD_EXIT_CODE__::`）がログに現れるか確認。現れなければ Watcher 側でログ出力が止まっている可能性があります。
-* Watcher 側ログ（例：`watcher.log`）に例外が出ていないか確認。
+* Watcher を再起動し、数秒待ってから接続し直す。
+* `config.ini` の `sessions_dir_name` / `registry_dir_name` を既定から変更している場合は、全マシンで一致させる。
 
 ---
 
 ## 3. コマンドが実行されない / 反応が遅い
 
+**症状**
+
+* リモートコマンドを送っても結果が返らない。
+* ログの更新が止まる / 遅延する。
+
 **確認ポイント**
 
-* サーバー上の `commands.txt` が更新されているか：
-
-```bash
-ssh user@203.0.113.10 'tail -n 50 /home/user/remote_dev/sessions/<watcher_id>/<session_name>/commands.txt'
-```
-
-* Watcher 側が `commands.txt` を取り込み、`commands.log` に出力しているか。
-* 回線状態（往復レイテンシ、`rsync` の頻度）
+* ネットワーク品質（遅延・パケットロス・帯域）。
+* Watcher 側で長時間ブロッキングするコマンドを実行していないか。
+* rsync の差分が巨大でないか（大量の小ファイル）。
 
 **対処**
 
-* 大量のファイルがミラーに混入していると rsync が重くなります。不要ファイルを `.rsyncignore` 的に除外する、セッション専用の軽いディレクトリを使うなどの工夫を。
-* `LOG_FETCH_INTERVAL_MS`（GUI）や Watcher 側のポーリング間隔を適切に調整。
+* 長い処理はステップに分割する／チェックポイントを出力する。
+* `rsync -n`（ドライラン）で差分規模を把握してから実行する。
+
+## 3-1) リンクの展開が遅い / “Loading.” から進まない
+
+**症状**
+
+* File Explorer に追加したリンクの三角を開いても “Loading.” のまま。
+* 展開に極端に時間がかかる。
+
+**確認ポイント**
+
+* **大規模フォルダ**をリンクしていないか（初回の一覧取得とキャッシュ準備に時間がかかることがあります）。
+* 入力した **Source Path**（Watcher 側パス）が存在・読取可能か（権限・パス綴り）。
+* **Link Name** にスラッシュ（`/` `\`）が含まれていないか（無効）。
+
+**対処**
+
+* まずサブフォルダだけをリンクして検証 → 問題がなければ段階的に範囲を広げる。
+* しばらく待っても進まない場合、GUI を再起動し、リンクを作り直す。
+* ネットワーク遅延や I/O が高負荷の可能性もあるため、回線状況・ディスク使用率を確認する。
 
 ---
 
 ## 4. 同期されない / 片方向のみ同期される
 
-**前提**：本システムは**クライアント主体**で rsync を実行します。**サーバーからクライアントへプッシュはしません**。GUI/Watcher がそれぞれ **サーバーから“取得”** することで最新化します。
+**症状**
+
+* 片側で更新したはずのファイルが、もう片側に現れない。
 
 **確認ポイント**
 
-* GUI 側：`rsync` でサーバーのレジストリ・セッションを**取得**しているか。
-* Watcher 側：`rsync` でサーバーのセッションを**取得**→コマンドを実行→結果を**アップロード**しているか。
+* `server` / `base_path` の設定が全マシンで一致しているか。
+* 同期の向き（pull/push）の誤解がないか（本システムはサーバーからのプッシュはしない）。
 
 **対処**
 
-* 双方で `config.ini` の `base_path` が同じか再確認。
-* `rsync` のコマンドで**末尾スラッシュ**の有無に注意（`src/` と `src` は挙動が異なる）。
-* パーミッション（サーバー上の `base_path` に書き込み権限があるか）。
+* `rsync -azv` を手動実行して疎通と差分を確認する。
 
 ---
 
@@ -162,84 +132,89 @@ ssh user@203.0.113.10 'tail -n 50 /home/user/remote_dev/sessions/<watcher_id>/<s
 
 **確認ポイント**
 
-* クライアント（GUI/Watcher）マシンで鍵があるか：`~/.ssh/id_ed25519` / `id_ed25519.pub`
-* `~/.ssh/config` に対象サーバーの設定があるか（`IdentityFile` を指定）
-* サーバー側 `~/.ssh/authorized_keys` に **公開鍵** を登録済みか
+* GUI 側からサーバーへ `ssh -T` が成功するか。
+* `~/.ssh/authorized_keys` とパーミッション（600/700）。
 
-**対処**（概要）
+**対処**
 
-```bash
-# 鍵作成（未作成なら）
-ssh-keygen -t ed25519 -C "SyncTerm-IDE"
-
-# 公開鍵をサーバーへ登録（初回のみ）
-ssh-copy-id -i ~/.ssh/id_ed25519.pub user@203.0.113.10
-
-# または手動で authorized_keys に追記
-```
-
-> くわしい手順は `docs/SETUP.md` を参照。
+* `ssh -vvv` で詳細ログを確認。
+* `~/.ssh/config` の `Host` セクションを見直し（`HostName` / `User` / `IdentityFile`）。
 
 ---
 
 ## 6. rsync エラーの典型例
 
-* `No such file or directory`：`base_path` やサブディレクトリが未作成。`mkdir -p` で作ってから再試行。
-* `Permission denied`：サーバー側のパーミッション不備。
-* `rsync: connection unexpectedly closed`：ネットワーク断・Firewall・SSH ポート変更など。
+**よくある例**
 
-**役立つオプション**
+* `rsync: failed: Permission denied`
+* `rsync: connection unexpectedly closed`
 
-```bash
-# 詳細表示
-rsync -azv ...
-# 転送しないで検証
-rsync -azvn ...
-```
+**対処**
+
+* まず `-n`（ドライラン）で確認。
+* 絶対パス/相対パスの取り違いに注意。
 
 ---
 
 ## 7. GUI 表示・操作まわりのトラブル
 
-* **タブの × ボタンが表示されない / 歪む**：
+**症状例**
 
-  * OS の Tk バージョン差や PNG のデコード差が原因の場合あり。`Pillow` 経由で読み込むフォールバックを利用してください（既定コードに含まれています）。
-  * それでも崩れる場合は 1 色アイコン（GIF など）に差し替えると安定します。
+* テーマが崩れる、フォントが化ける。
+* エディタが重い、ハイライトが遅い。
 
-* **`TclError: Invalid -children value`（Notebook タブのレイアウト）**：
+**対処**
 
-  * `style.layout("Closable.TNotebook.Tab", [...])` の配列構造・キー名が崩れている可能性。最新版コードへ更新してください。
+* `theme.json` を簡素化する／フォントを標準的なものに。
+* 大きなファイルは分割する。
 
-* **行数が極端に多いと重い**：
+### 画像プレビューが表示されない / プレースホルダのまま
 
-  * `MAX_TERMINAL_LINES` を下げる・エディタで大規模ファイルを開きすぎない。
+**確認ポイント**
+
+* 画像プレビューには **Pillow** が必要です。`pip install pillow` を GUI 実行環境に対して実行してください。
+* 対応拡張子は `png` / `jpg` / `jpeg` / `gif` / `bmp` / `webp` です（それ以外はエディタで開くか無視されます）。
+* リンク配下の画像は **ダブルクリックで一度ローカル編集キャッシュに取得**してから表示します。取得中はタイムラグが発生します。
+
+**対処**
+
+* Pillow 導入後に GUI を再起動する。
+* 超大きな画像は読み込みに時間がかかるため、必要に応じてサイズを落とす。
 
 ---
 
 ## 8. きれいに“初期化”したい（ローカルのみ）
 
-```bash
-# GUI を終了してから実施
-rm -rf ~/gui_local_mirror/_probe_registry ~/gui_local_mirror/sessions
-rm -f  <GUIディレクトリ>/session_state.json
-# 必要に応じて再起動
-python gui_terminal.py
-```
+**手順**
+
+* GUI を終了。
+* `~/gui_local_mirror/` 配下の対象セッションフォルダを削除（必要に応じてバックアップ）。
 
 ---
 
-## 9. それでも解決しない場合
+## 9. 実行途中の経過がターミナルに表示されない（仕様）
 
-* 実行環境（OS/バージョン）、`config.ini`（サーバーアドレスなどは伏せて）、発生手順、ログ（サーバー・GUI・Watcher）を添えて Issue を作成してください。
-* ログ取得のコツ：
+**症状**
 
-  * Watcher 側：`nohup` の標準出力/標準エラーを `watcher.log` に流す
-  * GUI 側：ターミナルのログ（`commands.log`）と、コンソール出力があればそれも
+* 長いコマンドを実行しても、GUI のターミナルに途中経過が流れない。
+
+**原因（仕様）**
+
+* Watcher はコマンド実行中の標準出力/標準エラーを逐次送信せず、**処理完了後にまとめてログ（例: `commands.log`）へ書き込みます**。そのため **途中経過は GUI では見えません**。
+
+**回避策の例**
+
+* 長い処理は **ステップに分割** して実行する（各ステップ終了ごとにログが反映される）。
+* 処理側で **チェックポイントファイル** を出力する（例：`echo step1 > status.txt`）。ファイルを開き直して進捗を確認する。
+* 先に **Local モード**で動作時間を見積もり、Remote 実行は必要最小限にする。
 
 ---
 
-### 参考リンク
+## 10. それでも解決しない場合
 
-* `docs/SETUP.md` — SSH 鍵・`~/.ssh/config`・サーバー準備
-* `docs/USAGE.md` — 基本操作とワークフロー
-* `README.md` — プロジェクト概要とアーキテクチャ
+**情報を添えて Issue を作成してください**
+
+* どの項目（番号）を試し、どこで躓いたか。
+* 利用 OS / Python / rsync / OpenSSH のバージョン。
+* `config.ini` の主要項目（秘匿情報は伏せる）。
+* エラーログ（末尾 200 行程度）。

@@ -9,6 +9,7 @@ import getpass
 import socket
 import subprocess
 import argparse
+import shutil
 from pathlib import Path
 from typing import List, Tuple
 
@@ -19,21 +20,16 @@ COMMAND_FILE = (BASE_DIR / "commands.txt").resolve()
 LOG_FILE     = (BASE_DIR / "commands.log").resolve()
 OFFSET_FILE  = (BASE_DIR / ".commands.offset").resolve()
 STATUS_FILE  = (BASE_DIR / ".watcher_status.json").resolve()
+LS_RESULT_FILE = (BASE_DIR / ".ls_result.txt").resolve() # New file for ls results
 
 # ===== Registration Settings =====
-# `watcher_manager.sh`から渡される環境変数を使って、堅牢なパス解決を行う
 REMOTE_SESSIONS_ROOT = os.environ.get("REMOTE_SESSIONS_ROOT")
-# config.iniで定義されたregistry_dir_nameを取得。なければ_registryをデフォルト値とする
 REGISTRY_DIR_NAME = os.environ.get("REGISTRY_DIR_NAME", "_registry")
 
 if not REMOTE_SESSIONS_ROOT:
-    # 環境変数が設定されていない場合のためのフォールバック（旧来の不安定な方法）
-    # 本来はエラー終了が望ましい
     print(f"[Watcher] WARNING: REMOTE_SESSIONS_ROOT is not set. Using fallback path discovery.")
     REGISTRY_DIR = BASE_DIR.parent.parent.parent / REGISTRY_DIR_NAME
 else:
-    # 環境変数から取得したセッションのルートパス (`.../sessions`) の親ディレクトリを基準に、
-    # レジストリディレクトリ (`.../_registry`) のパスを解決する
     REGISTRY_DIR = Path(REMOTE_SESSIONS_ROOT).parent / REGISTRY_DIR_NAME
 
 HEARTBEAT_INTERVAL_SEC = 4.0
@@ -47,7 +43,15 @@ KEEP_ANSI = os.environ.get("KEEP_ANSI", "0") == "1"
 # ==========================
 
 ANSI_ESCAPE = re.compile(r'\x1B\[[0-?]*[ -/]*[@-~]')
-CURRENT_CWD = Path.cwd()
+
+# --- Set CWD to BASE_DIR on startup ---
+try:
+    os.chdir(BASE_DIR)
+except FileNotFoundError:
+    print(f"[Watcher] ERROR: Session directory not found, cannot chdir to {BASE_DIR}")
+    exit(1)
+CURRENT_CWD = BASE_DIR
+# ---
 
 def update_registration(unique_id: str, display_name: str):
     try:
@@ -71,12 +75,11 @@ def _host_short() -> str:
     return socket.gethostname().split('.')[0]
 
 def update_status_file():
-    """CWDやユーザー情報、Conda環境などプロンプト表示用の情報を更新する"""
     status_data = {
         "user": getpass.getuser(),
         "host": _host_short(),
         "cwd": str(CURRENT_CWD),
-        "conda_env": os.environ.get("CONDA_DEFAULT_ENV") # Conda環境名を追加
+        "conda_env": os.environ.get("CONDA_DEFAULT_ENV")
     }
     try:
         STATUS_FILE.write_text(json.dumps(status_data, ensure_ascii=False), encoding="utf-8")
@@ -170,21 +173,118 @@ def process_new_commands():
             if not cmd or cmd.startswith("#"):
                 continue
 
-            if cmd == "_internal_clear_log":
+            # --- 全てのコマンド処理を一つの if/elif/else チェーンに統一 ---
+
+            if cmd.startswith("_internal_delete_path::"):
+                try:
+                    _, rel_path_str = cmd.split("::", 1)
+                    target_path = (BASE_DIR / rel_path_str).resolve()
+
+                    if not str(target_path).startswith(str(BASE_DIR.resolve())):
+                        log_append_output(f"[Watcher] ERROR: Invalid path. Deletion outside session directory is not allowed: {rel_path_str}", exit_code=1)
+                    elif target_path.exists() or target_path.is_symlink():
+                        if target_path.is_dir() and not target_path.is_symlink():
+                             shutil.rmtree(target_path)
+                        else:
+                            target_path.unlink()
+                        log_append_output(f"[Watcher] Deleted: {rel_path_str}", exit_code=0)
+                    else:
+                        log_append_output(f"[Watcher] INFO: Path not found, nothing to delete: {rel_path_str}", exit_code=0)
+                except Exception as e:
+                    log_append_output(f"[Watcher] ERROR: Failed to delete path '{rel_path_str}'. Reason: {e}", exit_code=1)
+                finally:
+                    write_offset(offset)
+                    continue
+
+            elif cmd.startswith("_internal_stage_file_for_download::"):
+                try:
+                    _, rel_path_str = cmd.split("::", 1)
+                    source_file_path = (BASE_DIR / rel_path_str).resolve()
+                    if not source_file_path.is_file():
+                       raise ValueError(f"Resolved path is not a file: {source_file_path}")
+
+                    staging_file_path = BASE_DIR / ".staged_for_download"
+                    shutil.copy(source_file_path, staging_file_path)
+                    log_append_output(f"[Watcher] Staged file '{rel_path_str}' for download.", exit_code=0)
+                except Exception as e:
+                    log_append_output(f"[Watcher] ERROR: Failed to stage file for download. Reason: {e}", exit_code=1)
+                finally:
+                    write_offset(offset)
+                    continue
+            elif cmd.startswith("_internal_move_staged_file::"):
+                try:
+                    _, rel_dest_path_str = cmd.split("::", 1)
+                    
+                    staged_file = BASE_DIR / ".staged_for_upload"
+                    if not staged_file.exists():
+                        raise FileNotFoundError("Staged file '.staged_for_upload' not found.")
+                        
+                    final_dest_path = (BASE_DIR / rel_dest_path_str).resolve()
+
+                    final_dest_path.parent.mkdir(parents=True, exist_ok=True)
+                    
+                    shutil.move(str(staged_file), str(final_dest_path))
+                    
+                    log_append_output(f"[Watcher] Moved staged file to '{rel_dest_path_str}'.", exit_code=0)
+
+                except Exception as e:
+                    log_append_output(f"[Watcher] ERROR: Failed to move staged file. Reason: {e}", exit_code=1)
+                finally:
+                    write_offset(offset)
+                    continue
+            elif cmd.startswith("_internal_create_link::"):
+                try:
+                    _, source_path, link_name = cmd.split('::', 2)
+                    destination_path = BASE_DIR / link_name
+                    final_cmd = f"ln -sfn '{source_path}' '{destination_path}'"
+                    proc = subprocess.run(final_cmd, shell=True, capture_output=True, text=True, cwd=BASE_DIR, encoding='utf-8', errors='replace')
+                    combined_output = (f"[Watcher] Executed: {final_cmd}\n" + (proc.stdout or "") + (proc.stderr or ""))
+                    log_append_output(combined_output, exit_code=proc.returncode)
+                except Exception as e:
+                    log_append_output(f"[Watcher] Failed to process _internal_create_link: {e}", exit_code=1)
+                finally:
+                    write_offset(offset)
+                    continue
+
+            elif cmd.startswith("_internal_list_dir::"):
+                try:
+                    _, target_path_str = cmd.split('::', 1)
+                    path_to_list = (BASE_DIR / target_path_str).resolve()
+                    ls_cmd = f"ls -p '{path_to_list}'"
+                    proc = subprocess.run(ls_cmd, shell=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
+                    
+                    if proc.returncode == 0:
+                        LS_RESULT_FILE.write_text(proc.stdout, encoding="utf-8")
+                        log_append_output(f"__LS_DONE__::{target_path_str}", exit_code=0)
+                    else:
+                        LS_RESULT_FILE.write_text(f"ERROR:\n{proc.stderr}", encoding="utf-8")
+                        log_append_output(f"__LS_DONE__::{target_path_str}", exit_code=proc.returncode)
+                except Exception as e:
+                    log_append_output(f"[Watcher] Failed to process _internal_list_dir: {e}", exit_code=1)
+                finally:
+                    write_offset(offset)
+                    continue
+            
+            elif cmd == "_internal_clear_log":
                 LOG_FILE.write_text("", encoding="utf-8")
                 log_append_output("[Watcher] Log file cleared.", exit_code=0)
                 update_status_file()
                 write_offset(offset)
                 continue
-
-            if not allowed_to_run(cmd):
+            
+            # 修正: if -> elif に変更し、全ての条件分岐を一つに繋げる
+            elif not allowed_to_run(cmd):
                 log_append_output(f"[Watcher] Command not allowed: {cmd}", exit_code=126)
                 continue
                 
-            if cmd.startswith("cd"):
+            # 修正: if -> elif に変更
+            elif cmd.startswith("cd"):
                 _handle_cd(cmd)
+
+            # 最終的にどの条件にも一致しない場合のみ、通常のコマンドとして実行
             else:
                 run_command_local(cmd)
+                
         except Exception as e:
             log_append_output(f"[ERROR] Failed to process command '{cmd}': {e}", exit_code=1)
         finally:
@@ -198,9 +298,9 @@ def main():
     unique_id = BASE_DIR.parent.name
     
     print(f"[Watcher] Starting up...")
-    print(f"[Watcher]  BASE_DIR    = {BASE_DIR}")
-    print(f"[Watcher]  UNIQUE_ID   = {unique_id}")
-    print(f"[Watcher]  DISPLAY_NAME= {args.name}")
+    print(f"[Watcher]  BASE_DIR     = {BASE_DIR}")
+    print(f"[Watcher]  UNIQUE_ID    = {unique_id}")
+    print(f"[Watcher]  DISPLAY_NAME = {args.name}")
     
     ensure_files()
     process_new_commands()
