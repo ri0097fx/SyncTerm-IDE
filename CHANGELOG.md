@@ -22,6 +22,20 @@
 
 ---
 
+## [2.2.1] - 2025-08-25
+
+### Added
+- **DirectoryPicker（カスタム）**：ダークテーマに合わせたフォルダ選択ダイアログを追加。`_askdirectory_styled()` から利用可能（エントリ／ドロップダウン／ホバーの視認性を改善）。
+
+### Changed
+- OS ネイティブの `filedialog.askdirectory` は配色の上書きができない旨をドキュメントへ明記（必要に応じてカスタムへ切替可能）。
+
+### Docs
+- README/USAGE/TROUBLESHOOTING を更新。
+
+
+---
+
 ## [2.2.0] - 2025-08-25
 
 ### Added
@@ -84,7 +98,9 @@
 
 ---
 
-[Unreleased]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.2.0...HEAD
+[Unreleased]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.2.1...HEAD
+
+[2.2.1]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.2.0...v2.2.1
 
 [2.2.0]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.1.1...v2.2.0
 [2.2.0-release]: https://github.com/ri0097fx/SyncTerm-IDE/releases/tag/v2.2.0
