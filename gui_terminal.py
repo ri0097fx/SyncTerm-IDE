@@ -11,9 +11,9 @@ Integrated Terminal & Editor (Spyder-like) with Session Support (Multi-Watcher E
 - MODIFIED: On-demand file editing via symlink expansion in file tree.
 - ADDED  : Right-side image preview pane with header ellipsis and fixed close button.
 """
-
+from __future__ import annotations
 import os
-import sys  # <--- (修正) sysモジュールをインポート
+import sys
 import time
 import json
 import getpass
