@@ -25,7 +25,7 @@
 ## [2.2.0] - 2025-08-25
 
 ### Added
-- **Preferences（設定）**を追加：セッションバー右端の **⚙︎** ボタンから開くダイアログで、**Editor / Terminal のフォントファミリとサイズ**を変更可能。
+- **Preferences（設定）** を追加：セッションバー右端の **⚙︎** ボタンから開くダイアログで、**Editor / Terminal のフォントファミリとサイズ**を変更可能。
 - **即時反映＋永続化**：**Apply** で即時、**Save & Close** で `STATE_JSON_PATH` の `prefs` に保存し、次回起動時に復元。
 - **`Dark.TSpinbox`** スタイルを追加し、数値入力の背景色を Watcher / Session と統一。
 
