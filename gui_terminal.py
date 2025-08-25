@@ -614,9 +614,9 @@ class IntegratedGUI(tk.Tk):
         self.watcher_combo = ttk.Combobox(session_bar, state="readonly", width=24, style="Dark.TCombobox")
         self.watcher_combo.pack(side=tk.LEFT)
         self.watcher_combo.bind("<<ComboboxSelected>>", self._on_watcher_selected)
-        # --- (修正) textに変数を使用 ---
         ttk.Button(session_bar, text=refresh_text, width=4, command=self._update_watcher_list).pack(side=tk.LEFT, padx=(4, 0))
         ttk.Label(session_bar, text="Session:", style="Dark.TLabel").pack(side=tk.LEFT, padx=(10, 4))
+        
         self.session_combo = ttk.Combobox(session_bar, state="readonly", width=20, style="Dark.TCombobox")
         self.session_combo.pack(side=tk.LEFT)
         self.session_combo.bind("<<ComboboxSelected>>", self._on_session_selected)
@@ -624,7 +624,8 @@ class IntegratedGUI(tk.Tk):
         ttk.Label(session_bar, text="New:", style="Dark.TLabel").pack(side=tk.LEFT, padx=(10, 4))
         ttk.Entry(session_bar, textvariable=self.new_session_var, width=16, style="Dark.TEntry").pack(side=tk.LEFT)
         ttk.Button(session_bar, text="Create", command=self._create_session, style="Dark.TButton").pack(side=tk.LEFT, padx=(6, 0))
-    
+        
+        self.btn_pull_session.pack(side=tk.LEFT, padx=(6, 0))
         # --- Main split (vertical) ---
         self.main_pane = ttk.PanedWindow(self, orient=tk.VERTICAL)
         self.main_pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
@@ -647,9 +648,15 @@ class IntegratedGUI(tk.Tk):
         b3 = ttk.Button(file_tree_toolbar, text=jump_home_text, width=4,
                         command=self._jump_to_mirror, style="Dark.TButton")
         b3.pack(side=tk.LEFT, padx=(6,0))
+        b4 = ttk.Button(
+            file_tree_toolbar, text="↻", width=3,
+            style="Dark.TButton", command=lambda: self._sync_current_session_dir(delete=True)
+        )
+        b4.pack(side=tk.LEFT, padx=(6,0))
         self._tooltip(b1, "Open Folder")
         self._tooltip(b2, "Remote Link Folder")
         self._tooltip(b3, "Jump Mirror Home")
+        self._tooltip(b4, "Refresh Folder Tree")
 
         tree_scroll_frame = ttk.Frame(file_tree_frame)
         tree_scroll_frame.pack(fill=tk.BOTH, expand=True)
@@ -1007,6 +1014,43 @@ class IntegratedGUI(tk.Tk):
         if selected_path:
             self._populate_file_tree(Path(selected_path))
 
+
+    def _sync_current_session_dir(self, delete=True):
+        """
+        現在選択中の watcher / session をサーバ→ローカルに同期。
+        symlink を保持するため -a（= -rlptgoD）を使う。--delete は完全ミラーにしたい場合のみ。
+        """
+        if not (getattr(self, "current_watcher_id", None) and getattr(self, "current_session_name", None)):
+            # ステータス行があれば軽く表示
+            try:
+                self._set_status("No watcher/session selected")
+            except Exception:
+                pass
+            return
+    
+        wid = Path(self.current_watcher_id).stem  # 万一 "foo.json" が来ても "foo" に矯正
+        remote = f"{REMOTE_SESSIONS_PATH}/{wid}/{self.current_session_name}/"
+        local  = str(LOCAL_SESSIONS_ROOT / wid / self.current_session_name) + "/"
+    
+        args = ["rsync", "-az"]  # -a で symlink 保持、-z 圧縮
+        if delete:
+            args.append("--delete")  # セッション配下をサーバと一致させる
+    
+        try:
+            # 失敗時に例外を投げる既存のラッパを使用（なければ subprocess.run でもOK）
+            self._run_sync_command(args + [f"{REMOTE_SERVER}:{remote}", local],
+                                   check=True, capture_output=True, timeout=10)
+            # ツリーはローカルを見ているので pull 後に更新
+            self._refresh_file_tree()
+            try:
+                self._set_status("Pulled session from server")
+            except Exception:
+                pass
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as e:
+            try:
+                self._set_status(f"Pull failed: {e}")
+            except Exception:
+                pass
 
     def _refresh_file_tree(self):
         if self.current_tree_root and Path(self.current_tree_root).is_dir():
