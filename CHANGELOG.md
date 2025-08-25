@@ -22,6 +22,21 @@
 
 ---
 
+## [2.2.0] - 2025-08-25
+
+### Added
+- **Preferences（設定）**を追加：セッションバー右端の **⚙︎** ボタンから開くダイアログで、**Editor / Terminal のフォントファミリとサイズ**を変更可能。
+- **即時反映＋永続化**：**Apply** で即時、**Save & Close** で `STATE_JSON_PATH` の `prefs` に保存し、次回起動時に復元。
+- **`Dark.TSpinbox`** スタイルを追加し、数値入力の背景色を Watcher / Session と統一。
+
+### Changed
+- セッションバーの **Preferences ボタンをアイコン系に統一**（他ボタンと同じ `Dark.TButton`、幅=3）。
+
+### Fixed
+- なし
+
+---
+
 ## [2.1.1] - 2025-08-25
 
 ### Fixed
@@ -69,8 +84,18 @@
 
 ---
 
-[Unreleased]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.1.1...HEAD
+[Unreleased]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.2.0...HEAD
+
+[2.2.0]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.1.1...v2.2.0
+[2.2.0-release]: https://github.com/ri0097fx/SyncTerm-IDE/releases/tag/v2.2.0
+
 [2.1.1]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.1.0...v2.1.1
+[2.1.1-release]: https://github.com/ri0097fx/SyncTerm-IDE/releases/tag/v2.1.1
+
 [2.1.0]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.0.0...v2.1.0
-[2.0.0]: https://github.com/ri0097fx/SyncTerm-IDE/releases/tag/v2.0.0
+[2.1.0-release]: https://github.com/ri0097fx/SyncTerm-IDE/releases/tag/v2.1.0
+
+[2.0.0]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v1.0.0...v2.0.0
+[2.0.0-release]: https://github.com/ri0097fx/SyncTerm-IDE/releases/tag/v2.0.0
+
 [1.0.0]: https://github.com/ri0097fx/SyncTerm-IDE/releases/tag/v1.0.0

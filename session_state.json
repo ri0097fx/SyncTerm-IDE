@@ -1,7 +1,15 @@
 {
-  "open_files": [],
-  "active_file": null,
-  "last_tree_root": "/home/ishibashi/gui_local_mirror/sessions/rtx5090/default",
-  "main_sash_pos": 322,
+  "open_files": [
+    "/Users/ishibashiryuto/Desktop/SyncTerm-IDE-re/CHANGELOG.md"
+  ],
+  "active_file": "/Users/ishibashiryuto/Desktop/SyncTerm-IDE-re/CHANGELOG.md",
+  "last_tree_root": null,
+  "prefs": {
+    "editor_family": "Menlo",
+    "editor_size": 12,
+    "term_family": "Menlo",
+    "term_size": 12
+  },
+  "main_sash_pos": 502,
   "editor_sash_pos": 258
 }

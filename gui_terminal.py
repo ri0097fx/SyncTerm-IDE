@@ -91,6 +91,14 @@ class IntegratedGUI(tk.Tk):
         style.map("DarkCompact.TButton", background=[('active', COMBO_BG)])
 
         style.configure("Dark.TEntry", fieldbackground=COMBO_BG, foreground=COMBO_FG)
+        style.configure("Dark.TSpinbox", fieldbackground=COMBO_BG, foreground=COMBO_FG, bordercolor=self.BORDER_CLR)
+        # （必要に応じて active 時の色も合わせたい場合）
+        try:
+            style.map("Dark.TSpinbox",
+                      fieldbackground=[('!disabled', COMBO_BG), ('readonly', COMBO_BG)],
+                      foreground=[('!disabled', COMBO_FG)])
+        except tk.TclError:
+            pass
         style.configure("TScrollbar", troughcolor=self.TEXT_BG, background=SCROLLBAR_THUMB_COLOR, relief='flat', borderwidth=0, bordercolor=self.BORDER_CLR, arrowcolor=self.BORDER_CLR)
         style.map("TScrollbar", background=[('disabled', SCROLLBAR_THUMB_COLOR), ('active', '#8A98A8')], troughcolor=[('disabled', self.BORDER_CLR)], arrowcolor=[('disabled', self.BORDER_CLR)])
         style.configure("TPanedWindow", background=self.BG_COLOR)
@@ -190,6 +198,12 @@ class IntegratedGUI(tk.Tk):
         self._preview_original_image = None
         self._preview_photo = None
         
+        self.prefs = {
+            "editor_family": (self.mono_font[0] if isinstance(self.mono_font, tuple) else "Menlo"),
+            "editor_size":   (self.mono_font[1] if isinstance(self.mono_font, tuple) else 12),
+            "term_family":   (self.mono_font[0] if isinstance(self.mono_font, tuple) else "Menlo"),
+            "term_size":     (self.mono_font[1] if isinstance(self.mono_font, tuple) else 12),
+        }
         self._create_widgets()
         self._bind_global_keys()
 
@@ -224,6 +238,7 @@ class IntegratedGUI(tk.Tk):
             "open_files": open_files, "active_file": active_file,
             "last_tree_root": str(self.current_tree_root) if self.current_tree_root else None
         }
+        state_data["prefs"] = self.prefs
         try:
             state_data["main_sash_pos"] = self.main_pane.sashpos(0)
             state_data["editor_sash_pos"] = self.editor_pane.sashpos(0)
@@ -246,6 +261,16 @@ class IntegratedGUI(tk.Tk):
             # last_root = state.get("last_tree_root")
             # if last_root and Path(last_root).is_dir():
             #     self._populate_file_tree(Path(last_root))
+            # --- load prefs ---
+            
+            prefs = state.get("prefs")
+            if isinstance(prefs, dict):
+                self.prefs.update({
+                    "editor_family": prefs.get("editor_family", self.prefs["editor_family"]),
+                    "editor_size":   int(prefs.get("editor_size",   self.prefs["editor_size"])),
+                    "term_family":   prefs.get("term_family",   self.prefs["term_family"]),
+                    "term_size":     int(prefs.get("term_size",     self.prefs["term_size"])),
+                })
 
             open_files = state.get("open_files", [])
             if not open_files: self._create_new_tab()
@@ -268,6 +293,8 @@ class IntegratedGUI(tk.Tk):
             print(f"Failed to load session state: {e}"); self._create_new_tab()
         
         if not sash_loaded: self.after(100, self._set_initial_sash_position)
+        self._apply_font_prefs()
+
 
     def _on_closing(self):
         dirty_files = [data["filepath"].name for data in self.tabs.values() if data["is_dirty"]]
@@ -530,10 +557,18 @@ class IntegratedGUI(tk.Tk):
         open_folder_text = "Open" if is_linux else "📁"
         create_link_text = "Link" if is_linux else "🔗"
         jump_home_text = "Home" if is_linux else "🏠"
+        prefs_text = "Prefs" if is_linux else "\u2699\ufe0f"
         
         # --- Session bar ---
         session_bar = ttk.Frame(self, style="Dark.TFrame", padding=(10, 8))
         session_bar.pack(side=tk.TOP, fill=tk.X)
+        # --- Preferences button (右端) ---
+        # 右端にアイコンボタンを追加（他のアイコン系と同じスタイル/幅）
+        gear_btn = ttk.Button(session_bar, text=prefs_text, width=3,  # ほかの 📁/🔗/🏠 と同等の幅
+                              command=self.open_preferences, style="Dark.TButton")
+        gear_btn.pack(side=tk.RIGHT, padx=(6, 0))
+        self._tooltip(gear_btn, "Preferences")
+
         ttk.Label(session_bar, text="Watcher:", style="Dark.TLabel").pack(side=tk.LEFT, padx=(0, 4))
         self.watcher_combo = ttk.Combobox(session_bar, state="readonly", width=24, style="Dark.TCombobox")
         self.watcher_combo.pack(side=tk.LEFT)
@@ -1583,6 +1618,98 @@ class IntegratedGUI(tk.Tk):
         if self.completion_popup:
             self.completion_popup.destroy(); self.completion_popup = None
         if tab_data: self.after_idle(tab_data["text"].focus_set)
+    
+    # ---------------------------
+    # Preferences（フォント設定）
+    # ---------------------------
+    def _apply_font_prefs(self):
+        """prefs に基づき、エディタ／ターミナルのフォントを即時適用"""
+        ed_family = self.prefs["editor_family"]; ed_size = int(self.prefs["editor_size"])
+        tm_family = self.prefs["term_family"];   tm_size = int(self.prefs["term_size"])
+
+        # 新規エディタ既定フォント（将来のタブ用）
+        self.mono_font = (ed_family, ed_size)
+
+        # 既存エディタタブに反映
+        try:
+            for tab_data in self.tabs.values():
+                text = tab_data.get("text")
+                if text:
+                    f = tkfont.Font(font=text.cget("font"))
+                    f.configure(family=ed_family, size=ed_size)
+                    text.configure(font=f)
+        except Exception:
+            pass
+
+        # ターミナルに反映
+        try:
+            if self.terminal and getattr(self.terminal, "view", None):
+                tv = self.terminal.view
+                f = tkfont.Font(font=tv.cget("font"))
+                f.configure(family=tm_family, size=tm_size)
+                tv.configure(font=f)
+        except Exception:
+            pass
+
+    def open_preferences(self):
+        """設定ダイアログを開く"""
+        dlg = tk.Toplevel(self)
+        dlg.title("Preferences")
+        dlg.configure(bg=self.BG_COLOR)
+        dlg.transient(self); dlg.grab_set()
+        frm = ttk.Frame(dlg, style="Dark.TFrame", padding=14)
+        frm.pack(fill=tk.BOTH, expand=True)
+
+        fams = sorted(set(tkfont.families()))
+        # よく使う等幅の候補を前に
+        prefer = ["Menlo", "Consolas", "Courier New", "Monaco"]
+        fams = prefer + [f for f in fams if f not in prefer]
+
+        ed_family = tk.StringVar(value=self.prefs["editor_family"])
+        ed_size   = tk.IntVar(value=int(self.prefs["editor_size"]))
+        tm_family = tk.StringVar(value=self.prefs["term_family"])
+        tm_size   = tk.IntVar(value=int(self.prefs["term_size"]))
+
+        # Editor
+        ttk.Label(frm, text="Editor Font", style="Dark.TLabel").grid(row=0, column=0, sticky="w")
+        ed_cb = ttk.Combobox(frm, values=fams, textvariable=ed_family, width=30, state="readonly", style="Dark.TCombobox")
+        ed_cb.grid(row=0, column=1, sticky="ew", padx=(8,0))
+        ed_sp = ttk.Spinbox(frm, from_=8, to=48, textvariable=ed_size, width=5, style="Dark.TSpinbox")
+        ed_sp.grid(row=0, column=2, padx=(8,0))
+
+        # Terminal
+        ttk.Label(frm, text="Terminal Font", style="Dark.TLabel").grid(row=1, column=0, sticky="w", pady=(8,0))
+        tm_cb = ttk.Combobox(frm, values=fams, textvariable=tm_family, width=30, state="readonly", style="Dark.TCombobox")
+        tm_cb.grid(row=1, column=1, sticky="ew", padx=(8,0), pady=(8,0))
+        tm_sp = ttk.Spinbox(frm, from_=8, to=48, textvariable=tm_size, width=5, style="Dark.TSpinbox")
+        tm_sp.grid(row=1, column=2, padx=(8,0), pady=(8,0))
+
+        frm.grid_columnconfigure(1, weight=1)
+
+        # Buttons
+        btns = ttk.Frame(frm, style="Dark.TFrame")
+        btns.grid(row=3, column=0, columnspan=3, sticky="e", pady=(12,0))
+        def do_apply():
+            self.prefs.update({
+                "editor_family": ed_family.get(),
+                "editor_size":   int(ed_size.get()),
+                "term_family":   tm_family.get(),
+                "term_size":     int(tm_size.get()),
+            })
+            self._apply_font_prefs()
+
+        def do_save_close():
+            do_apply()
+            # save state
+            try:
+                self._save_state()
+            except Exception:
+                pass
+            dlg.destroy()
+
+        ttk.Button(btns, text="Apply", style="Dark.TButton", command=do_apply).pack(side=tk.RIGHT)
+        ttk.Button(btns, text="Save & Close", style="Dark.TButton", command=do_save_close).pack(side=tk.RIGHT, padx=(8,0))
+        ttk.Button(btns, text="Cancel", style="Dark.TButton", command=dlg.destroy).pack(side=tk.RIGHT, padx=(8,0))
 
 # ---------------------------
 # 起動
