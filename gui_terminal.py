@@ -625,7 +625,6 @@ class IntegratedGUI(tk.Tk):
         ttk.Entry(session_bar, textvariable=self.new_session_var, width=16, style="Dark.TEntry").pack(side=tk.LEFT)
         ttk.Button(session_bar, text="Create", command=self._create_session, style="Dark.TButton").pack(side=tk.LEFT, padx=(6, 0))
         
-        self.btn_pull_session.pack(side=tk.LEFT, padx=(6, 0))
         # --- Main split (vertical) ---
         self.main_pane = ttk.PanedWindow(self, orient=tk.VERTICAL)
         self.main_pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
