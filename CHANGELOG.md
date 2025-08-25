@@ -22,6 +22,18 @@
 
 ---
 
+## [2.2.2] - 2025-08-25
+
+### Fixed
+- **Registry の上書き問題**：`_registry/` をディレクトリごと同期して他 Watcher の JSON を消す不具合を修正。  
+  各 Watcher は **`<watcher_id>.json` に `watcher_id / display_name / last_heartbeat` を出力し、ファイル単位で rsync（`--delete` 不使用）** するよう変更。  
+  これにより、**複数 Watcher が常に正しく一覧表示**されます。
+
+### Chore
+- 終了時のクリーンアップで **自分の JSON のみ** を削除するように整理。
+
+---
+
 ## [2.2.1] - 2025-08-25
 
 ### Added
@@ -98,8 +110,9 @@
 
 ---
 
-[Unreleased]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.2.1...HEAD
+[Unreleased]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.2.2...HEAD
 
+[2.2.2]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.2.1...v2.2.2
 [2.2.1]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.2.0...v2.2.1
 
 [2.2.0]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.1.1...v2.2.0

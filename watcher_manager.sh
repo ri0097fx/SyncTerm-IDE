@@ -7,7 +7,7 @@
 # - rsync/ssh を非対話・安定化 (BatchMode, accept-new)
 # - トレーリングスラッシュ等を明示
 
-$1shopt -s nullglob
+shopt -s nullglob
 
 # ===== 引数処理 =====
 WATCHER_ID="${1:?引数1: WatcherのユニークIDを指定してください}"
@@ -65,7 +65,7 @@ LOCAL_REGISTRY_DIR="$LOCAL_BASE/$REGISTRY_DIR_NAME"
 RSYNC_SSH_OPTS="-o BatchMode=yes -o StrictHostKeyChecking=accept-new"
 RSYNC_PUSH=(rsync -az -e "ssh $RSYNC_SSH_OPTS")
 RSYNC_PULL_SAFE=(rsync -azvu --inplace -e "ssh $RSYNC_SSH_OPTS")
-RSYNC_REG_PUSH=(rsync -az --delete -e "ssh $RSYNC_SSH_OPTS")
+RSYNC_REG_PUSH=(rsync -az -e "ssh $RSYNC_SSH_OPTS")
 
 # ===== 関数定義 =====
 start_watcher_process() {
@@ -99,10 +99,8 @@ cleanup() {
     rm -rf "$PID_DIR"
   fi
   # 登録解除のために、対応するレジストリファイルを削除
-  rm -f "$LOCAL_REGISTRY_DIR/$WATCHER_ID"
-  # サーバーに最後の状態を同期して削除を反映
-  ssh -o BatchMode=yes "$SERVER" "mkdir -p '$REMOTE_REGISTRY_DIR'"
-  "${RSYNC_REG_PUSH[@]}" "$LOCAL_REGISTRY_DIR/" "$SERVER:$REMOTE_REGISTRY_DIR/"
+  rm -f "$LOCAL_REGISTRY_DIR/${WATCHER_ID}.json"
+  ssh -o BatchMode=yes "$SERVER" "rm -f '$REMOTE_REGISTRY_DIR/${WATCHER_ID}.json'"
   echo "[MANAGER] Cleanup finished."
 }
 trap cleanup EXIT
@@ -121,8 +119,6 @@ while true; do
   echo "[MANAGER] Syncing to server (sessions/logs first)..."
   "${RSYNC_PUSH[@]}" --exclude '*/commands.txt' "$LOCAL_WATCHER_DIR/" "$SERVER:$REMOTE_WATCHER_DIR/"
 
-  # レジストリは削除反映も必要（ハートビートの古いものを消す）
-  "${RSYNC_REG_PUSH[@]}" "$LOCAL_REGISTRY_DIR/" "$SERVER:$REMOTE_REGISTRY_DIR/"
 
   # --- ステップ2: 同期後の状態でプロセスを管理 ---
   echo "[MANAGER] Managing processes..."
@@ -153,10 +149,18 @@ while true; do
 
   # --- ステップ2.5: Watcher自身の生存登録（ハートビート） ---
   current_time=$(date +%s)
-  json_content=$(printf '{"display_name": "%s", "last_heartbeat": %s}' "$DISPLAY_NAME" "$current_time")
-  echo "$json_content" > "$LOCAL_REGISTRY_DIR/$WATCHER_ID"
-  # すぐに反映
-  "${RSYNC_REG_PUSH[@]}" "$LOCAL_REGISTRY_DIR/" "$SERVER:$REMOTE_REGISTRY_DIR/"
+  # DISPLAY_NAME に " が含まれても壊れないようエスケープ
+  display_escaped=${DISPLAY_NAME//\"/\\\"}
+
+  # ローカルの _registry に <id>.json を作成
+  # mkdir -p "$LOCAL_REGISTRY_DIR"
+  json_path="$LOCAL_REGISTRY_DIR/${WATCHER_ID}.json"
+  printf '{"watcher_id":"%s","display_name":"%s","last_heartbeat":%s}\n' \
+    "$WATCHER_ID" "$display_escaped" "$current_time" > "$json_path"
+
+  # すぐに反映（★ディレクトリではなく“ファイル単位”で送る。--delete は使わない）
+  ssh -o BatchMode=yes "$SERVER" "mkdir -p '$REMOTE_REGISTRY_DIR'"
+  rsync -az -e "ssh $RSYNC_SSH_OPTS" "$json_path" "$SERVER:$REMOTE_REGISTRY_DIR/"
 
   # --- ステップ3: pull（サーバ→ローカル）は安全に（新しいローカルは保護） ---
   echo "[MANAGER] Syncing from server (preserve newer local)..."
