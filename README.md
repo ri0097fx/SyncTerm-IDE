@@ -8,7 +8,7 @@ SyncTerm‑IDE は、**GUI（PC A）** と **Watcher（PC B/C, …）** が別�
 
 > ℹ️ **Active development:** 本プロジェクトは継続的に開発・改善中です。今後、デバッガ連携、LSP などの機能を順次追加予定です。
 
-> 📣 What's New — v2.1.0: ターミナルで `conda` コマンドに対応。詳細は [CHANGELOG.md](CHANGELOG.md) を参照。
+> 📣 What's New — **v2.2.0**: Preferences（設定）ダイアログを追加。Editor / Terminal のフォント設定が可能に。詳細は [CHANGELOG.md](CHANGELOG.md) を参照。
 
 ---
 
@@ -21,7 +21,7 @@ SyncTerm‑IDE は、**GUI（PC A）** と **Watcher（PC B/C, …）** が別�
 * **プッシュしない安全設計**：サーバー側からローカルへは送らず、**常にクライアント側が取得（pull）**
 * **複数 Watcher**：GUI から切り替えて操作可能
 * **リンク編集（Watcher 連携）**：Watcher 上の任意フォルダを **セッション直下にシンボリックリンクとして作成**し、ファイルツリーから仮想展開 → ダブルクリックでローカルキャッシュに自動取得して編集できる。
-* **画像プレビュー（右ペイン）**：対応拡張子（`png` `jpg` `jpeg` `gif` `bmp` `webp`）をダブルクリックでプレビュー表示。ヘッダーは末尾優先の省略表示、✕ ボタンで閉じられる（詳細は USAGE を参照）。
+* **画像プレビュー**：対応拡張子（`png` `jpg` `jpeg` `gif` `bmp` `webp`）をダブルクリックでプレビュー表示。ヘッダーは末尾優先の省略表示、✕ ボタンで閉じられる（詳細は USAGE を参照）。
 
 ---
 
@@ -157,8 +157,11 @@ python gui_terminal.py
 ---
 
 ## Changelog
+
 詳しくは [CHANGELOG.md](CHANGELOG.md) を参照。
 
+* **ver.2.2.0**: Preferences（設定）ダイアログを追加（Editor / Terminal フォント設定、即時反映＋保存、アイコン統一）。
+* **ver.2.1.1**: Python のバージョン差で型アノテーションが無効になる環境に対応（`from __future__ import annotations`）。
 * **ver.2.1.0**: ターミナルで `conda` コマンドに対応（`conda activate` など）。軽微な修正を含む。
 * **ver.2.0.0**: Watcher フォルダのリンク編集に対応。画像プレビューを追加。
 * **ver.1.0.0**: 初期リリース。
