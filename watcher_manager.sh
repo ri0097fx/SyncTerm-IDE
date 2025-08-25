@@ -1,20 +1,23 @@
 #!/usr/bin/env bash
-# watcher_manager.sh (同期機能統合・設定ファイル分離・自己登録対応版)
-#
-# 変更点（要旨）:
-# - 「push を先、pull を後」に変更してローカルの最新ログを保護
-# - サーバ→ローカルの同期は -u/--inplace を採用（新しいローカルを上書きしない）
-# - rsync/ssh を非対話・安定化 (BatchMode, accept-new)
-# - トレーリングスラッシュ等を明示
+# watcher_manager.sh
+# - セッションは「push を先、pull を後」
+# - pull は commands.txt のみ（原子的置換）。.commands.offset は Watcher が正：pull しない
+# - レジストリは <watcher_id>.json のみ push（--delete 禁止）
+# - rsync/ssh は非対話化、ディレクトリは常に末尾 / を付与
 
+set -euo pipefail
 shopt -s nullglob
 
 # ===== 引数処理 =====
 WATCHER_ID="${1:?引数1: WatcherのユニークIDを指定してください}"
-DISPLAY_NAME="${2:?引数2: GUIに表示するWatcherの基本名(例: 'GPU-Server')を指定してください}"
+DISPLAY_NAME="${2:?引数2: GUIに表示するWatcherの表示名を指定してください}"
 
-# ===== 設定ファイルのパス =====
-# このスクリプトと同じディレクトリにあるconfig.iniを指す
+# 誤って "foo.json" が来ても "foo" に矯正。スラッシュ等はアンダースコア化
+WATCHER_ID="${WATCHER_ID%.json}"
+WATCHER_ID="${WATCHER_ID//\//_}"
+WATCHER_ID="${WATCHER_ID//\\/_}"
+
+# ===== 設定ファイル =====
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 CONFIG_FILE="$SCRIPT_DIR/config.ini"
 if [ ! -f "$CONFIG_FILE" ]; then
@@ -22,61 +25,49 @@ if [ ! -f "$CONFIG_FILE" ]; then
   exit 1
 fi
 
-# ===== 設定の読み込み =====
-# config.iniから設定を読み込む。`xargs`で前後の空白を除去
-SERVER=$(grep -E '^server\s*=' "$CONFIG_FILE" | cut -d '=' -f 2- | xargs)
-BASE_REMOTE_ROOT=$(grep -E '^base_path\s*=' "$CONFIG_FILE" | cut -d '=' -f 2- | xargs)
-SESSIONS_DIR_NAME=$(grep -E '^sessions_dir_name\s*=' "$CONFIG_FILE" | cut -d '=' -f 2- | xargs)
-REGISTRY_DIR_NAME=$(grep -E '^registry_dir_name\s*=' "$CONFIG_FILE" | cut -d '=' -f 2- | xargs)
-# Watcherマネージャー専用のミラーパスを読み込む
-WATCHER_MIRROR_DIR_RAW=$(grep -E '^watcher_mirror_dir\s*=' "$CONFIG_FILE" | cut -d '=' -f 2- | xargs)
+# ===== 設定読み込み =====
+trim() { sed -E 's/^[[:space:]]+|[[:space:]]+$//g'; }
+getv() { grep -E "^$1[[:space:]]*=" "$CONFIG_FILE" | cut -d '=' -f 2- | trim; }
 
-# 必須項目が設定されていなければエラーで終了
-: "${SERVER:?serverがconfig.iniに設定されていません}"
-: "${BASE_REMOTE_ROOT:?base_pathがconfig.iniに設定されていません}"
+SERVER="$(getv server)"
+BASE_REMOTE_ROOT="$(getv base_path)"
+SESSIONS_DIR_NAME="$(getv sessions_dir_name)"; : "${SESSIONS_DIR_NAME:=sessions}"
+REGISTRY_DIR_NAME="$(getv registry_dir_name)"; : "${REGISTRY_DIR_NAME:=_registry}"
+WATCHER_MIRROR_DIR_RAW="$(getv watcher_mirror_dir || true)"
 
-# 設定値がなければデフォルト値を割り当て
-SESSIONS_DIR_NAME=${SESSIONS_DIR_NAME:-sessions}
-REGISTRY_DIR_NAME=${REGISTRY_DIR_NAME:-_registry}
+: "${SERVER:?server が config.ini に必要です}"
+: "${BASE_REMOTE_ROOT:?base_path が config.ini に必要です}"
 
-# リモートのフルパスを構築
-BASE_REMOTE="$BASE_REMOTE_ROOT/$SESSIONS_DIR_NAME"
+# パス構築
+BASE_REMOTE="$BASE_REMOTE_ROOT/$SESSIONS_DIR_NAME"            # 例：/home/user/remote_dev/sessions
+REMOTE_WATCHER_DIR="$BASE_REMOTE/$WATCHER_ID"                 # 例：.../sessions/<id>
+REMOTE_REGISTRY_DIR="$BASE_REMOTE_ROOT/$REGISTRY_DIR_NAME"    # 例：.../_registry
 
-# ===== プロセス管理設定 =====
-WATCHER_SCRIPT_PATH="$SCRIPT_DIR/command_watcher.py"
-INTERVAL=${INTERVAL:-5}   # 同期とプロセスチェックの間隔（秒）。環境変数で上書き可
-
-# ===== ローカルパス設定 =====
-# 設定ファイルの '~' を $HOME に置換
 WATCHER_MIRROR_DIR="${WATCHER_MIRROR_DIR_RAW/#\~/$HOME}"
-# 環境変数 WATCHER_LOCAL_DIR があれば優先し、なければ設定ファイルの値、それもなければデフォルト値を使用
 LOCAL_BASE="${WATCHER_LOCAL_DIR:-${WATCHER_MIRROR_DIR:-$HOME/watcher_local_mirror}}"
 LOCAL_SESSIONS_ROOT="$LOCAL_BASE/$SESSIONS_DIR_NAME"
-PID_DIR="/tmp/watcher_pids_${WATCHER_ID}"
-
-# --- 同期用パス設定 ---
-REMOTE_WATCHER_DIR="$BASE_REMOTE/$WATCHER_ID"
 LOCAL_WATCHER_DIR="$LOCAL_SESSIONS_ROOT/$WATCHER_ID"
-
-REMOTE_REGISTRY_DIR="$BASE_REMOTE_ROOT/$REGISTRY_DIR_NAME"
 LOCAL_REGISTRY_DIR="$LOCAL_BASE/$REGISTRY_DIR_NAME"
 
-# ===== rsync/ssh 共通オプション =====
+# ===== SSH/rsync オプション =====
 RSYNC_SSH_OPTS="-o BatchMode=yes -o StrictHostKeyChecking=accept-new"
-RSYNC_PUSH=(rsync -az -e "ssh $RSYNC_SSH_OPTS")
-RSYNC_PULL_SAFE=(rsync -azvu --inplace -e "ssh $RSYNC_SSH_OPTS")
-RSYNC_REG_PUSH=(rsync -az -e "ssh $RSYNC_SSH_OPTS")
+RSYNC_PUSH=(rsync -az -e "ssh $RSYNC_SSH_OPTS")                  # push 共通
+RSYNC_PULL_CMD=(rsync -az -e "ssh $RSYNC_SSH_OPTS")              # pull（個別フィルタで使う）
+INTERVAL="${INTERVAL:-5}"                                        # ループ間隔（秒）
 
-# ===== 関数定義 =====
+# ===== プロセス管理 =====
+WATCHER_SCRIPT_PATH="$SCRIPT_DIR/command_watcher.py"
+PID_DIR="/tmp/watcher_pids_${WATCHER_ID}"
+
 start_watcher_process() {
   local session="$1"
   local session_dir_local="$LOCAL_WATCHER_DIR/$session"
   local pid_file="$PID_DIR/$session.pid"
   local register_name="$DISPLAY_NAME"
 
-  echo "[MANAGER] Starting watcher process for session '$session'..."
+  mkdir -p "$session_dir_local"
+  echo "[MANAGER] Starting watcher process for session '${session}'..."
 
-  # command_watcher.py にリモートのルートパスとレジストリ名を環境変数で渡す
   (
     COMMANDS_DIR="$session_dir_local" \
     REMOTE_SESSIONS_ROOT="$BASE_REMOTE" \
@@ -87,88 +78,89 @@ start_watcher_process() {
   )
 }
 
+stop_watcher_process() {
+  local session="$1"
+  local pid_file="$PID_DIR/$session.pid"
+  [ -f "$pid_file" ] || return 0
+  local pid; pid="$(cat "$pid_file" 2>/dev/null || true)"
+  if [ -n "${pid:-}" ]; then
+    echo "[MANAGER] Stopping process for session '${session}' (PID $pid)..."
+    kill "$pid" 2>/dev/null || true
+  fi
+  rm -f "$pid_file"
+}
+
 cleanup() {
   echo -e "\n[MANAGER] Cleaning up..."
   if [ -d "$PID_DIR" ]; then
-    for pid_file in "$PID_DIR"/*.pid; do
-      [ -f "$pid_file" ] || continue
-      pid_to_kill=$(cat "$pid_file")
-      echo "[MANAGER] Killing process PID $pid_to_kill."
-      kill "$pid_to_kill" 2>/dev/null || true
+    for pf in "$PID_DIR"/*.pid; do
+      [ -f "$pf" ] || continue
+      stop_watcher_process "$(basename "$pf" .pid)"
     done
     rm -rf "$PID_DIR"
   fi
-  # 登録解除のために、対応するレジストリファイルを削除
-  rm -f "$LOCAL_REGISTRY_DIR/${WATCHER_ID}.json"
-  ssh -o BatchMode=yes "$SERVER" "rm -f '$REMOTE_REGISTRY_DIR/${WATCHER_ID}.json'"
+  # レジストリ削除
+  rm -f "$LOCAL_REGISTRY_DIR/${WATCHER_ID}.json" || true
+  ssh -o BatchMode=yes $SERVER "rm -f '$REMOTE_REGISTRY_DIR/${WATCHER_ID}.json'" || true
   echo "[MANAGER] Cleanup finished."
 }
 trap cleanup EXIT
 
-# ===== メインループ =====
-printf '[MANAGER] Started for WATCHER_ID="%s"\n' "$WATCHER_ID"
-# 必要なディレクトリを最初に作成
+# ===== 初期化 =====
+echo "[MANAGER] Started for WATCHER_ID='${WATCHER_ID}'  DISPLAY_NAME='${DISPLAY_NAME}'"
 mkdir -p "$LOCAL_WATCHER_DIR" "$LOCAL_REGISTRY_DIR" "$PID_DIR"
+ssh -o BatchMode=yes $SERVER "mkdir -p '$REMOTE_WATCHER_DIR' '$REMOTE_REGISTRY_DIR'"
 
-# リモート側の親ディレクトリを用意
-ssh -o BatchMode=yes "$SERVER" \
-  "mkdir -p '$REMOTE_WATCHER_DIR' '$REMOTE_REGISTRY_DIR'"
-
+# ===== メインループ =====
 while true; do
-  # --- ステップ1: まず push（ローカル→サーバ）でログ/変更を失わない ---
-  echo "[MANAGER] Syncing to server (sessions/logs first)..."
-  "${RSYNC_PUSH[@]}" --exclude '*/commands.txt' "$LOCAL_WATCHER_DIR/" "$SERVER:$REMOTE_WATCHER_DIR/"
+  # --- Step 0: Heartbeat を先に書く（直近の生存を示す） ---
+  now_sec=$(date +%s)
+  display_escaped=${DISPLAY_NAME//\"/\\\"}
+  json_path="$LOCAL_REGISTRY_DIR/${WATCHER_ID}.json"
+  printf '{"watcher_id":"%s","display_name":"%s","last_heartbeat":%s}\n' \
+    "$WATCHER_ID" "$display_escaped" "$now_sec" > "$json_path"
 
+  # 自分の JSON だけ push（--delete 禁止）
+  "${RSYNC_PUSH[@]}" "$json_path" "$SERVER:$REMOTE_REGISTRY_DIR/"
 
-  # --- ステップ2: 同期後の状態でプロセスを管理 ---
-  echo "[MANAGER] Managing processes..."
+  # --- Step 1: セッションを push（commands.txt は除外、.commands.offset は送る） ---
+  echo "[MANAGER] Syncing sessions to server (excluding commands.txt)..."
+  "${RSYNC_PUSH[@]}" \
+    --exclude '*/commands.txt' \
+    "$LOCAL_WATCHER_DIR/" "$SERVER:$REMOTE_WATCHER_DIR/"
+
+  # --- Step 2: commands.txt を pull（原子的に、offset は pull しない） ---
+  echo "[MANAGER] Pulling commands.txt from server (atomic replace)..."
+  "${RSYNC_PULL_CMD[@]}" \
+    --prune-empty-dirs \
+    --include '*/' \
+    --include '*/commands.txt' \
+    --exclude '*' \
+    "$SERVER:$REMOTE_WATCHER_DIR/" "$LOCAL_WATCHER_DIR/"
+
+  # --- Step 3: プロセス管理（pull 後に実施） ---
+  echo "[MANAGER] Managing watcher processes..."
+  # ローカルの <watcher_id> 配下の直下ディレクトリ = セッション名
   server_sessions=$(find "$LOCAL_WATCHER_DIR" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null || true)
 
-  # 起動処理
+  # 起動（未起動のもの）
   for session in $server_sessions; do
     pid_file="$PID_DIR/$session.pid"
     if [ ! -f "$pid_file" ]; then
       start_watcher_process "$session"
-      echo "[MANAGER] Launched new process for session '$session'"
     fi
   done
 
-  # 停止処理
+  # 停止（ディレクトリが消えたもの）
   if [ -d "$PID_DIR" ] && [ -n "$(ls -A "$PID_DIR" 2>/dev/null || true)" ]; then
-    for pid_file in "$PID_DIR"/*.pid; do
-      [ -f "$pid_file" ] || continue
-      session_name=$(basename "$pid_file" .pid)
-      if ! echo "$server_sessions" | grep -qx "$session_name"; then
-        pid_to_kill=$(cat "$pid_file")
-        echo "[MANAGER] Session '$session_name' removed. Stopping process PID $pid_to_kill..."
-        kill "$pid_to_kill" 2>/dev/null || true
-        rm -f "$pid_file"
+    for pf in "$PID_DIR"/*.pid; do
+      [ -f "$pf" ] || continue
+      sess="$(basename "$pf" .pid)"
+      if ! echo "$server_sessions" | grep -qx "$sess"; then
+        stop_watcher_process "$sess"
       fi
     done
   fi
 
-  # --- ステップ2.5: Watcher自身の生存登録（ハートビート） ---
-  current_time=$(date +%s)
-  # DISPLAY_NAME に " が含まれても壊れないようエスケープ
-  display_escaped=${DISPLAY_NAME//\"/\\\"}
-
-  # ローカルの _registry に <id>.json を作成
-  # mkdir -p "$LOCAL_REGISTRY_DIR"
-  json_path="$LOCAL_REGISTRY_DIR/${WATCHER_ID}.json"
-  printf '{"watcher_id":"%s","display_name":"%s","last_heartbeat":%s}\n' \
-    "$WATCHER_ID" "$display_escaped" "$current_time" > "$json_path"
-
-  # すぐに反映（★ディレクトリではなく“ファイル単位”で送る。--delete は使わない）
-  ssh -o BatchMode=yes "$SERVER" "mkdir -p '$REMOTE_REGISTRY_DIR'"
-  rsync -az -e "ssh $RSYNC_SSH_OPTS" "$json_path" "$SERVER:$REMOTE_REGISTRY_DIR/"
-
-  # --- ステップ3: pull（サーバ→ローカル）は安全に（新しいローカルは保護） ---
-  echo "[MANAGER] Syncing from server (preserve newer local)..."
-  ssh -o BatchMode=yes "$SERVER" "mkdir -p '$REMOTE_WATCHER_DIR'"
-  # -u: 受け側(ローカル)が新しければ上書きしない / --inplace: ログ追記と相性が良い
-  "${RSYNC_PULL_SAFE[@]}" --exclude '*/commands.log' "$SERVER:$REMOTE_WATCHER_DIR/" "$LOCAL_WATCHER_DIR/"
-
-  # --- ループの待機 ---
   sleep "$INTERVAL"
-
 done
