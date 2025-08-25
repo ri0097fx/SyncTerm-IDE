@@ -1729,8 +1729,10 @@ class IntegratedGUI(tk.Tk):
         ed_family = self.prefs["editor_family"]; ed_size = int(self.prefs["editor_size"])
         tm_family = self.prefs["term_family"];   tm_size = int(self.prefs["term_size"])
     
-        # 新規タブの既定（既存実装を尊重）
-        self.mono_font = (ed_family, ed_size)
+        self.mono_font = (ed_family, ed_size)  # app 側
+        if hasattr(self, "editor_view"):       # EditorView への参照がある場合
+            self.editor_view.mono_font = self.mono_font
+
     
         try:
             for tab_data in getattr(self, "tabs", {}).values():
