@@ -155,7 +155,8 @@ python gui_terminal.py
 
 ## Changelog
 
-* **ver.2**: Watcher フォルダのリンク編集に対応。画像プレビューを追加。
+* **ver.2.1.0**: ターミナルで `conda` コマンドに対応（`conda activate` など）。軽微な修正を含む。
+* **ver.2.0.0**: Watcher フォルダのリンク編集に対応。画像プレビューを追加。
 
 ---
 
