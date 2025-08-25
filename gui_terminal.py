@@ -594,7 +594,7 @@ class IntegratedGUI(tk.Tk):
     def _create_widgets(self):
         # --- (修正) OS判定によるボタンテキストの定義 ---
         is_linux = sys.platform.startswith("linux")
-        refresh_text = "Sync" if is_linux else "🔄"
+        refresh_text = "↻"
         open_folder_text = "Open" if is_linux else "📁"
         create_link_text = "Link" if is_linux else "🔗"
         jump_home_text = "Home" if is_linux else "🏠"
