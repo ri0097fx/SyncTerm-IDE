@@ -22,17 +22,25 @@
 
 ---
 
+## [2.1.1] - 2025-08-25
+
+### Fixed
+
+* **Python のバージョン差で型アノテーションが無効化される環境に対応**：`config.py` と `gui_terminal.py` に `from __future__ import annotations` を追加し、前方参照の遅延評価を有効化（Py 3.7–3.10 互換性向上／Py 3.11+ では挙動に影響なし）。
+
+---
+
 ## [2.1.0] - 2025-08-25
 
 ### Added
 
 * ターミナルで **`conda` コマンド**に対応（`conda activate` など）。
-* **Linux** における未対応フォントへの **フォールバック** を追加（指定フォントが無効な場合に代替フォントで表示）。
+* **Linux** における未対応フォントへの **フォールバック** を追加。
 
 ### Changed
 
-* **Watcher は `commands.txt` をサーバーへ送信しない**設計に変更（ログ送信の安定化に伴う挙動変更）。
-* **フォルダツリーの自動読み込みを廃止**（大規模フォルダを指定した際に GUI 起動時フリーズを避けるため）。
+* **Watcher は `commands.txt` をサーバーへ送信しない**設計に変更。
+* **フォルダツリーの自動読み込みを廃止**（大規模フォルダでのフリーズ回避）。
 
 ### Fixed
 
@@ -61,7 +69,8 @@
 
 ---
 
-[Unreleased]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.1.0...HEAD
+[Unreleased]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.1.1...HEAD
+[2.1.1]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.1.0...v2.1.1
 [2.1.0]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/ri0097fx/SyncTerm-IDE/releases/tag/v2.0.0
 [1.0.0]: https://github.com/ri0097fx/SyncTerm-IDE/releases/tag/v1.0.0
