@@ -8,6 +8,8 @@ SyncTerm‑IDE は、**GUI（PC A）** と **Watcher（PC B/C, …）** が別�
 
 > ℹ️ **Active development:** 本プロジェクトは継続的に開発・改善中です。今後、デバッガ連携、LSP などの機能を順次追加予定です。
 
+> 📣 What's New — v2.1.0: ターミナルで `conda` コマンドに対応。詳細は [CHANGELOG.md](CHANGELOG.md) を参照。
+
 ---
 
 ## Features
@@ -159,6 +161,7 @@ python gui_terminal.py
 
 * **ver.2.1.0**: ターミナルで `conda` コマンドに対応（`conda activate` など）。軽微な修正を含む。
 * **ver.2.0.0**: Watcher フォルダのリンク編集に対応。画像プレビューを追加。
+* **ver.1.0.0**: 初期リリース。
 
 ---
 
