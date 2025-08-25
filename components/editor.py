@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+import tkinter.font as tkfont
 
 from pygments import lex
 from pygments.lexers import guess_lexer_for_filename, get_lexer_by_name
@@ -101,10 +102,18 @@ class EditorView(ttk.Frame):
         tab_frame = ttk.Frame(self.editor_notebook, style="Dark.TFrame")
         tab_frame.grid_rowconfigure(0, weight=1)
         tab_frame.grid_columnconfigure(1, weight=1)
+        if isinstance(self.mono_font, tkfont.Font):
+            shared_font = self.mono_font
+        else:
+            if isinstance(self.mono_font, tuple) and len(self.mono_font) >= 2:
+                family, size = self.mono_font[0], int(self.mono_font[1])
+            else:
+                family, size = "Consolas", 12
+            shared_font = tkfont.Font(family=family, size=size)
 
         line_numbers = tk.Text(
             tab_frame, width=4, padx=4, takefocus=0, bd=0, bg=self.COMBO_BG, fg="#888888",
-            state="disabled", wrap="none", font=self.mono_font, highlightthickness=3,
+            state="disabled", wrap="none", font=shared_font, highlightthickness=3,
             highlightbackground=self.COMBO_BG
         )
         line_numbers.grid(row=0, column=0, sticky="ns")
@@ -112,7 +121,7 @@ class EditorView(ttk.Frame):
         editor_text = tk.Text(
             tab_frame, wrap="word", undo=True, bg=self.TEXT_BG, fg=self.TEXT_FG,
             insertbackground=self.INSERT_FG, selectbackground=self.SELECT_BG,
-            selectforeground=self.SELECT_FG, font=self.mono_font, highlightthickness=4,
+            selectforeground=self.SELECT_FG, font=shared_font, highlightthickness=4,
             highlightbackground=self.COMBO_BG, highlightcolor="#3B729F",
             relief="flat", borderwidth=0
         )
@@ -138,7 +147,8 @@ class EditorView(ttk.Frame):
             "filepath": filepath, "is_dirty": False, "text": editor_text,
             "line_numbers": line_numbers, "marker_bar": marker_bar, "scrollbar": scrollbar,
             "syntax_tags": set(), "highlight_timer": None, "line_number_timer": None,
-            "selection_timer": None, "remote_path": remote_path, "local_cache_path": filepath
+            "selection_timer": None, "remote_path": remote_path, "local_cache_path": filepath,
+            "shared_font": shared_font,
         }
 
         self._bind_editor_keys(editor_text)

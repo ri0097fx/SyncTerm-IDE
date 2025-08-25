@@ -1639,31 +1639,46 @@ class IntegratedGUI(tk.Tk):
     # Preferences（フォント設定）
     # ---------------------------
     def _apply_font_prefs(self):
-        """prefs に基づき、エディタ／ターミナルのフォントを即時適用"""
+        """prefs に基づき、エディタ／行番号／ターミナルのフォントを即時適用。
+        行番号はエディタと同じ Font オブジェクトを共有させて連動させる。
+        """
         ed_family = self.prefs["editor_family"]; ed_size = int(self.prefs["editor_size"])
         tm_family = self.prefs["term_family"];   tm_size = int(self.prefs["term_size"])
-
-        # 新規エディタ既定フォント（将来のタブ用）
+    
+        # 新規タブの既定（既存実装を尊重）
         self.mono_font = (ed_family, ed_size)
-
-        # 既存エディタタブに反映
+    
         try:
-            for tab_data in self.tabs.values():
+            for tab_data in getattr(self, "tabs", {}).values():
                 text = tab_data.get("text")
-                if text:
-                    f = tkfont.Font(font=text.cget("font"))
-                    f.configure(family=ed_family, size=ed_size)
-                    text.configure(font=f)
+                ln   = tab_data.get("line_numbers")
+                if not text:
+                    continue
+    
+                f = tab_data.get("shared_font")
+                if not isinstance(f, tkfont.Font):
+                    try:
+                        f = tkfont.Font(font=text.cget("font"))
+                    except Exception:
+                        f = tkfont.Font(family=ed_family, size=ed_size)
+                    tab_data["shared_font"] = f  # 以後はこれを共有して使う
+    
+                # 家族とサイズを更新（同じ f を行番号にも適用して連動）
+                f.configure(family=ed_family, size=ed_size)
+                text.configure(font=f)
+                if ln:
+                    ln.configure(font=f)
+    
         except Exception:
             pass
-
+    
         # ターミナルに反映
         try:
             if self.terminal and getattr(self.terminal, "view", None):
                 tv = self.terminal.view
-                f = tkfont.Font(font=tv.cget("font"))
-                f.configure(family=tm_family, size=tm_size)
-                tv.configure(font=f)
+                tf = tkfont.Font(font=tv.cget("font"))
+                tf.configure(family=tm_family, size=tm_size)
+                tv.configure(font=tf)
         except Exception:
             pass
 

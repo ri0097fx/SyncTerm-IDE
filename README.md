@@ -8,7 +8,7 @@ SyncTerm‑IDE は、**GUI（PC A）** と **Watcher（PC B/C, …）** が別�
 
 > ℹ️ **Active development:** 本プロジェクトは継続的に開発・改善中です。今後、デバッガ連携、LSP などの機能を順次追加予定です。
 
-> 📣 What's New — **v2.2.1**: ディレクトリ選択の視認性を改善（カスタム *DirectoryPicker* 追加）。詳細は [CHANGELOG.md](CHANGELOG.md) を参照。
+> 📣 What's New — **v2.2.1**: ディレクトリ選択の視認性を改善（カスタム *DirectoryPicker* 追加）／行番号フォントをエディタに連動。詳細は [CHANGELOG.md](CHANGELOG.md) を参照。
 
 ---
 
@@ -159,7 +159,7 @@ python gui_terminal.py
 ## Changelog
 
 詳しくは [CHANGELOG.md](CHANGELOG.md) を参照。
-* **ver.2.2.1**: ディレクトリ選択の視認性を改善（カスタム *DirectoryPicker* を追加。必要に応じて置き換え可能）。
+* **ver.2.2.1**: ディレクトリ選択の視認性を改善（カスタム *DirectoryPicker*）。行番号フォントをエディタに連動。
 * **ver.2.2.0**: Preferences（設定）ダイアログを追加（Editor / Terminal フォント設定、即時反映＋保存、アイコン統一）。
 * **ver.2.1.1**: Python のバージョン差で型アノテーションが無効になる環境に対応（`from __future__ import annotations`）。
 * **ver.2.1.0**: ターミナルで `conda` コマンドに対応（`conda activate` など）。軽微な修正を含む。

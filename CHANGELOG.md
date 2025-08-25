@@ -25,13 +25,13 @@
 ## [2.2.1] - 2025-08-25
 
 ### Added
-- **DirectoryPicker（カスタム）**：ダークテーマに合わせたフォルダ選択ダイアログを追加。`_askdirectory_styled()` から利用可能（エントリ／ドロップダウン／ホバーの視認性を改善）。
+- **DirectoryPicker（カスタム）**：`_askdirectory_styled()` を追加。ダークテーマに合わせてエントリ／ドロップダウン／ツリーの配色を統一可能。
 
 ### Changed
-- OS ネイティブの `filedialog.askdirectory` は配色の上書きができない旨をドキュメントへ明記（必要に応じてカスタムへ切替可能）。
+- **行番号のフォントをエディタに連動**：エディタ本文と行番号で同一 `tkinter.font.Font` を共有するように変更（Preferences の適用で同期）。
 
-### Docs
-- README/USAGE/TROUBLESHOOTING を更新。
+### Fixed
+- 一部環境でのディレクトリ選択ダイアログの視認性（白文字×白背景）に対する回避策を提供（カスタムダイアログの利用）。
 
 
 ---
