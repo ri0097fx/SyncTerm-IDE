@@ -148,12 +148,14 @@ python gui_terminal.py
 * **SSH キー設定**: [docs/SSH-SETUP.md](docs/SSH-SETUP.md)
 * **操作ガイド**: [docs/USAGE.md](docs/USAGE.md)
 * **トラブルシュート**: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)
+* **Changelog**: [CHANGELOG.md](CHANGELOG.md)
 
 > まずは SSH キー手順（`ssh-keygen -t ed25519` → 公開鍵をサーバーの `~/.ssh/authorized_keys` へ）を完了してください。詳細は **SSH-SETUP.md** に記載。
 
 ---
 
 ## Changelog
+詳しくは [CHANGELOG.md](CHANGELOG.md) を参照。
 
 * **ver.2.1.0**: ターミナルで `conda` コマンドに対応（`conda activate` など）。軽微な修正を含む。
 * **ver.2.0.0**: Watcher フォルダのリンク編集に対応。画像プレビューを追加。
