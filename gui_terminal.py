@@ -13,7 +13,7 @@ Integrated Terminal & Editor (Spyder-like) with Session Support (Multi-Watcher E
 """
 
 import os
-import sys
+import sys  # <--- (修正) sysモジュールをインポート
 import time
 import json
 import getpass
@@ -242,9 +242,10 @@ class IntegratedGUI(tk.Tk):
         sash_loaded = False
         try:
             state = json.load(STATE_JSON_PATH.open("r", encoding="utf-8"))
-            last_root = state.get("last_tree_root")
-            if last_root and Path(last_root).is_dir():
-                self._populate_file_tree(Path(last_root))
+            # 大規模なツリー読み込みによるフリーズ回避
+            # last_root = state.get("last_tree_root")
+            # if last_root and Path(last_root).is_dir():
+            #     self._populate_file_tree(Path(last_root))
 
             open_files = state.get("open_files", [])
             if not open_files: self._create_new_tab()
@@ -523,6 +524,13 @@ class IntegratedGUI(tk.Tk):
     # UI構築
     # ---------------------------
     def _create_widgets(self):
+        # --- (修正) OS判定によるボタンテキストの定義 ---
+        is_linux = sys.platform.startswith("linux")
+        refresh_text = "Sync" if is_linux else "🔄"
+        open_folder_text = "Open" if is_linux else "📁"
+        create_link_text = "Link" if is_linux else "🔗"
+        jump_home_text = "Home" if is_linux else "🏠"
+        
         # --- Session bar ---
         session_bar = ttk.Frame(self, style="Dark.TFrame", padding=(10, 8))
         session_bar.pack(side=tk.TOP, fill=tk.X)
@@ -530,7 +538,8 @@ class IntegratedGUI(tk.Tk):
         self.watcher_combo = ttk.Combobox(session_bar, state="readonly", width=24, style="Dark.TCombobox")
         self.watcher_combo.pack(side=tk.LEFT)
         self.watcher_combo.bind("<<ComboboxSelected>>", self._on_watcher_selected)
-        ttk.Button(session_bar, text="🔄", width=3, command=self._update_watcher_list).pack(side=tk.LEFT, padx=(4, 0))
+        # --- (修正) textに変数を使用 ---
+        ttk.Button(session_bar, text=refresh_text, width=4, command=self._update_watcher_list).pack(side=tk.LEFT, padx=(4, 0))
         ttk.Label(session_bar, text="Session:", style="Dark.TLabel").pack(side=tk.LEFT, padx=(10, 4))
         self.session_combo = ttk.Combobox(session_bar, state="readonly", width=20, style="Dark.TCombobox")
         self.session_combo.pack(side=tk.LEFT)
@@ -551,14 +560,15 @@ class IntegratedGUI(tk.Tk):
         file_tree_frame = ttk.Frame(self.editor_pane, style="Dark.TFrame")
         file_tree_toolbar = ttk.Frame(file_tree_frame, style="Dark.TFrame", padding=(8, 6))
         file_tree_toolbar.pack(side=tk.TOP, fill=tk.X)
-        # Browse/Link/Mirror（アイコン化）
-        b1 = ttk.Button(file_tree_toolbar, text="📁", width=3,
+        
+        # --- (修正) textに変数を使用 ---
+        b1 = ttk.Button(file_tree_toolbar, text=open_folder_text, width=4,
                         command=self._browse_file_tree_root, style="Dark.TButton")
         b1.pack(side=tk.LEFT, padx=(6,0))
-        b2 = ttk.Button(file_tree_toolbar, text="🔗", width=4,
+        b2 = ttk.Button(file_tree_toolbar, text=create_link_text, width=4,
                         command=self._prompt_create_symlink, style="Dark.TButton")
         b2.pack(side=tk.LEFT, padx=(6,0))
-        b3 = ttk.Button(file_tree_toolbar, text="🏠", width=4,
+        b3 = ttk.Button(file_tree_toolbar, text=jump_home_text, width=4,
                         command=self._jump_to_mirror, style="Dark.TButton")
         b3.pack(side=tk.LEFT, padx=(6,0))
         self._tooltip(b1, "Open Folder")
@@ -642,6 +652,10 @@ class IntegratedGUI(tk.Tk):
         """右側にプレビュー用ペインを作成（なければ）"""
         if self.preview_frame and self.preview_frame.winfo_exists():
             return
+        
+        # --- (修正) OS判定による閉じるボタンのテキスト定義 ---
+        is_linux = sys.platform.startswith("linux")
+        close_btn_text = "X" if is_linux else "✕"
 
         # プレビューフレーム作成
         self.preview_frame = ttk.Frame(self.editor_right_pane, style="Dark.TFrame")
@@ -654,11 +668,12 @@ class IntegratedGUI(tk.Tk):
         self.image_preview_label = ttk.Label(top, textvariable=self._preview_label_var, style="Dark.TLabel", anchor="w")
         self.image_preview_label.grid(row=0, column=0, sticky="ew", padx=(0, 8))
 
+        # --- (修正) textに変数を使用 ---
         close_btn = ttk.Button(
-            top, text="✕", width=3, style="Dark.TButton",
+            top, text=close_btn_text, width=3, style="Dark.TButton",
             command=self._hide_image_preview, takefocus=False
         )
-        close_btn.grid(row=0, column=1, sticky="e")  # ← 表示されるように配置
+        close_btn.grid(row=0, column=1, sticky="e")
         self._set_tooltip_text(close_btn, "Close preview")
 
         # キャンバス本体

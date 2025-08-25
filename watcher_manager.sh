@@ -1,13 +1,13 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # watcher_manager.sh (同期機能統合・設定ファイル分離・自己登録対応版)
 #
-# 機能:
-# 1. config.iniからGUI用とWatcher用の設定を個別に読み込む。
-# 2. 定期的にサーバーと自身のローカルミラーを同期する。
-# 3. 自身の生存を知らせるハートビートファイルを定期的に書き出す (セッション0個問題の解決策)。
-# 4. 同期後のローカルミラーの状態に基づき、セッションごとの command_watcher.py プロセスを起動・維持する。
+# 変更点（要旨）:
+# - 「push を先、pull を後」に変更してローカルの最新ログを保護
+# - サーバ→ローカルの同期は -u/--inplace を採用（新しいローカルを上書きしない）
+# - rsync/ssh を非対話・安定化 (BatchMode, accept-new)
+# - トレーリングスラッシュ等を明示
 
-set -eu
+$1shopt -s nullglob
 
 # ===== 引数処理 =====
 WATCHER_ID="${1:?引数1: WatcherのユニークIDを指定してください}"
@@ -15,10 +15,11 @@ DISPLAY_NAME="${2:?引数2: GUIに表示するWatcherの基本名(例: 'GPU-Serv
 
 # ===== 設定ファイルのパス =====
 # このスクリプトと同じディレクトリにあるconfig.iniを指す
-CONFIG_FILE="$(dirname "$0")/config.ini"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
+CONFIG_FILE="$SCRIPT_DIR/config.ini"
 if [ ! -f "$CONFIG_FILE" ]; then
-    echo "[ERROR] 設定ファイルが見つかりません: $CONFIG_FILE" >&2
-    exit 1
+  echo "[ERROR] 設定ファイルが見つかりません: $CONFIG_FILE" >&2
+  exit 1
 fi
 
 # ===== 設定の読み込み =====
@@ -42,8 +43,8 @@ REGISTRY_DIR_NAME=${REGISTRY_DIR_NAME:-_registry}
 BASE_REMOTE="$BASE_REMOTE_ROOT/$SESSIONS_DIR_NAME"
 
 # ===== プロセス管理設定 =====
-WATCHER_SCRIPT_PATH="$(dirname "$0")/command_watcher.py"
-INTERVAL=5 # 同期とプロセスチェックの間隔
+WATCHER_SCRIPT_PATH="$SCRIPT_DIR/command_watcher.py"
+INTERVAL=${INTERVAL:-5}   # 同期とプロセスチェックの間隔（秒）。環境変数で上書き可
 
 # ===== ローカルパス設定 =====
 # 設定ファイルの '~' を $HOME に置換
@@ -60,6 +61,11 @@ LOCAL_WATCHER_DIR="$LOCAL_SESSIONS_ROOT/$WATCHER_ID"
 REMOTE_REGISTRY_DIR="$BASE_REMOTE_ROOT/$REGISTRY_DIR_NAME"
 LOCAL_REGISTRY_DIR="$LOCAL_BASE/$REGISTRY_DIR_NAME"
 
+# ===== rsync/ssh 共通オプション =====
+RSYNC_SSH_OPTS="-o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+RSYNC_PUSH=(rsync -az -e "ssh $RSYNC_SSH_OPTS")
+RSYNC_PULL_SAFE=(rsync -azvu --inplace -e "ssh $RSYNC_SSH_OPTS")
+RSYNC_REG_PUSH=(rsync -az --delete -e "ssh $RSYNC_SSH_OPTS")
 
 # ===== 関数定義 =====
 start_watcher_process() {
@@ -85,37 +91,38 @@ cleanup() {
   echo -e "\n[MANAGER] Cleaning up..."
   if [ -d "$PID_DIR" ]; then
     for pid_file in "$PID_DIR"/*.pid; do
-      if [ -f "$pid_file" ]; then
-        pid_to_kill=$(cat "$pid_file")
-        echo "[MANAGER] Killing process PID $pid_to_kill."
-        # killコマンドのエラーは無視する（プロセスが既に存在しない場合など）
-        kill "$pid_to_kill" 2>/dev/null || true
-      fi
+      [ -f "$pid_file" ] || continue
+      pid_to_kill=$(cat "$pid_file")
+      echo "[MANAGER] Killing process PID $pid_to_kill."
+      kill "$pid_to_kill" 2>/dev/null || true
     done
     rm -rf "$PID_DIR"
   fi
   # 登録解除のために、対応するレジストリファイルを削除
-  # この削除処理も、最終的にサーバーに同期される
   rm -f "$LOCAL_REGISTRY_DIR/$WATCHER_ID"
   # サーバーに最後の状態を同期して削除を反映
-  rsync -az --delete "$LOCAL_REGISTRY_DIR/" "$SERVER:$REMOTE_REGISTRY_DIR/"
+  ssh -o BatchMode=yes "$SERVER" "mkdir -p '$REMOTE_REGISTRY_DIR'"
+  "${RSYNC_REG_PUSH[@]}" "$LOCAL_REGISTRY_DIR/" "$SERVER:$REMOTE_REGISTRY_DIR/"
   echo "[MANAGER] Cleanup finished."
 }
 trap cleanup EXIT
 
 # ===== メインループ =====
-echo "[MANAGER] Started for WATCHER_ID='$WATCHER_ID'"
+printf '[MANAGER] Started for WATCHER_ID="%s"\n' "$WATCHER_ID"
 # 必要なディレクトリを最初に作成
-mkdir -p "$LOCAL_WATCHER_DIR"
-mkdir -p "$LOCAL_REGISTRY_DIR"
-mkdir -p "$PID_DIR"
+mkdir -p "$LOCAL_WATCHER_DIR" "$LOCAL_REGISTRY_DIR" "$PID_DIR"
+
+# リモート側の親ディレクトリを用意
+ssh -o BatchMode=yes "$SERVER" \
+  "mkdir -p '$REMOTE_WATCHER_DIR' '$REMOTE_REGISTRY_DIR'"
 
 while true; do
-  # --- ステップ1: サーバーからローカルへ同期 ---
-  echo "[MANAGER] Syncing from server..."
-  # 初回起動時にリモートディレクトリが存在しない問題を解決するため、mkdir -p を実行
-  ssh "$SERVER" "mkdir -p '$REMOTE_WATCHER_DIR'"
-  rsync -az --delete "$SERVER:$REMOTE_WATCHER_DIR/" "$LOCAL_WATCHER_DIR/"
+  # --- ステップ1: まず push（ローカル→サーバ）でログ/変更を失わない ---
+  echo "[MANAGER] Syncing to server (sessions/logs first)..."
+  "${RSYNC_PUSH[@]}" --exclude '*/commands.txt' "$LOCAL_WATCHER_DIR/" "$SERVER:$REMOTE_WATCHER_DIR/"
+
+  # レジストリは削除反映も必要（ハートビートの古いものを消す）
+  "${RSYNC_REG_PUSH[@]}" "$LOCAL_REGISTRY_DIR/" "$SERVER:$REMOTE_REGISTRY_DIR/"
 
   # --- ステップ2: 同期後の状態でプロセスを管理 ---
   echo "[MANAGER] Managing processes..."
@@ -131,8 +138,9 @@ while true; do
   done
 
   # 停止処理
-  if [ -d "$PID_DIR" ] && [ -n "$(ls -A "$PID_DIR")" ]; then
+  if [ -d "$PID_DIR" ] && [ -n "$(ls -A "$PID_DIR" 2>/dev/null || true)" ]; then
     for pid_file in "$PID_DIR"/*.pid; do
+      [ -f "$pid_file" ] || continue
       session_name=$(basename "$pid_file" .pid)
       if ! echo "$server_sessions" | grep -qx "$session_name"; then
         pid_to_kill=$(cat "$pid_file")
@@ -143,19 +151,20 @@ while true; do
     done
   fi
 
-  # --- ステップ2.5: Watcher自身の生存登録 ---
-  # セッションが0個でもWatcherがオンラインであることをGUIに知らせるため、
-  # マネージャー自身がハートビートを書き込む。(デッドロック解消策)
+  # --- ステップ2.5: Watcher自身の生存登録（ハートビート） ---
   current_time=$(date +%s)
   json_content=$(printf '{"display_name": "%s", "last_heartbeat": %s}' "$DISPLAY_NAME" "$current_time")
   echo "$json_content" > "$LOCAL_REGISTRY_DIR/$WATCHER_ID"
+  # すぐに反映
+  "${RSYNC_REG_PUSH[@]}" "$LOCAL_REGISTRY_DIR/" "$SERVER:$REMOTE_REGISTRY_DIR/"
 
-  # --- ステップ3: ローカルからサーバーへ同期 ---
-  # ログ、および上で生成したハートビートファイルなどをサーバーにアップロード
-  echo "[MANAGER] Syncing to server..."
-  rsync -az "$LOCAL_WATCHER_DIR/" "$SERVER:$REMOTE_WATCHER_DIR/"
-  rsync -az --delete "$LOCAL_REGISTRY_DIR/" "$SERVER:$REMOTE_REGISTRY_DIR/"
+  # --- ステップ3: pull（サーバ→ローカル）は安全に（新しいローカルは保護） ---
+  echo "[MANAGER] Syncing from server (preserve newer local)..."
+  ssh -o BatchMode=yes "$SERVER" "mkdir -p '$REMOTE_WATCHER_DIR'"
+  # -u: 受け側(ローカル)が新しければ上書きしない / --inplace: ログ追記と相性が良い
+  "${RSYNC_PULL_SAFE[@]}" --exclude '*/commands.log' "$SERVER:$REMOTE_WATCHER_DIR/" "$LOCAL_WATCHER_DIR/"
 
   # --- ループの待機 ---
   sleep "$INTERVAL"
+
 done

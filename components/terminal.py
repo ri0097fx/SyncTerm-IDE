@@ -231,7 +231,8 @@ class TerminalFrame(ttk.Frame):
         if self.input_locked:
             return
     
-        self.view.insert(tk.END, "\n")
+        if self.view.get("end-2c", "end-1c") != '\n':
+            self.view.insert(tk.END, "\n")
     
         try:
             if not (self.app.current_watcher_id and self.app.current_session_name):
@@ -251,27 +252,43 @@ class TerminalFrame(ttk.Frame):
             )
     
             status = json.loads(self.app.status_file.read_text(encoding="utf-8"))
+            
+            # +++ 変更点: conda_env を読み込み、プロンプトの接頭辞を作成 +++
             conda_env = status.get("conda_env")
             conda_prefix = f"({conda_env}) " if conda_env else ""
+            
             user = status.get("user", "u")
             host = status.get("host", "h")
             cwd  = status.get("cwd", "~")
             
             self.app.remote_cwd = cwd
     
-            home_dir = str(Path.home())
-            if isinstance(cwd, str) and cwd.startswith(home_dir):
-                cwd = "~" + cwd[len(home_dir):]
-    
+            # homeディレクトリのパスを短縮表示する処理
+            # 注意: この処理はローカルのhomeパスに依存するため、リモートとユーザが違うと正しく機能しない可能性があります
+            try:
+                # 簡易的に、'~'で始まるか、フルパスかを判定
+                if not cwd.startswith('/'):
+                    pass # 相対パスなどはそのまま表示
+                elif cwd.startswith(f"/home/{user}"):
+                    cwd = "~" + cwd[len(f"/home/{user}"):]
+                elif len(cwd) > 20: # 長すぎるパスは末尾を省略
+                    cwd = "..." + cwd[-17:]
+            except Exception:
+                pass
+
+            # +++ 変更点: プロンプトの先頭に conda_prefix を追加 +++
             self.view.insert(tk.END, f"[Remote] {conda_prefix}")
+            
             tag_start = self.view.index("end-1c")
             self.view.insert(tk.END, f"{user}@{host}")
             tag_end = self.view.index("end-1c")
             self.view.tag_add("prompt_user_host", tag_start, tag_end)
             self.view.insert(tk.END, f":{cwd}$ ")
     
-        except Exception:
-            self.view.insert(tk.END, "$ ")
+        except Exception as e:
+            # エラーが発生した場合もプロンプトは表示する
+            print(f"Error updating remote prompt: {e}")
+            self.view.insert(tk.END, "[Remote] Error$ ")
     
         self.view.mark_set("input_start", self.view.index("end-1c"))
         self.view.mark_set(tk.INSERT, "end-1c")

@@ -53,6 +53,9 @@ except FileNotFoundError:
 CURRENT_CWD = BASE_DIR
 # ---
 
+# +++ 修正1: Conda環境の初期値を "base" に設定 +++
+ACTIVE_CONDA_ENV: str | None = "base"
+
 def update_registration(unique_id: str, display_name: str):
     try:
         REGISTRY_DIR.mkdir(parents=True, exist_ok=True)
@@ -79,7 +82,7 @@ def update_status_file():
         "user": getpass.getuser(),
         "host": _host_short(),
         "cwd": str(CURRENT_CWD),
-        "conda_env": os.environ.get("CONDA_DEFAULT_ENV")
+        "conda_env": ACTIVE_CONDA_ENV
     }
     try:
         STATUS_FILE.write_text(json.dumps(status_data, ensure_ascii=False), encoding="utf-8")
@@ -131,8 +134,13 @@ def allowed_to_run(cmdline: str) -> bool:
         return False
 
 def run_command_local(cmdline: str):
+    final_cmd = cmdline
+    # base環境の場合は conda run を使わない (システムのPATHが優先されるように)
+    if ACTIVE_CONDA_ENV and ACTIVE_CONDA_ENV != "base":
+        final_cmd = f"conda run -n {ACTIVE_CONDA_ENV} {cmdline}"
+
     proc = subprocess.run(
-        cmdline, shell=True, capture_output=True, text=True,
+        final_cmd, shell=True, capture_output=True, text=True,
         cwd=CURRENT_CWD, encoding='utf-8', errors='replace'
     )
     combined_output = (proc.stdout or "") + (proc.stderr or "")
@@ -158,6 +166,30 @@ def _handle_cd(cmd: str):
     else:
         log_append_output(f"cd: no such file or directory: {parts[1] if len(parts)>1 else ''}", exit_code=1)
     
+    update_status_file()
+
+def _handle_conda_activate(cmd: str):
+    global ACTIVE_CONDA_ENV
+    try:
+        parts = shlex.split(cmd)
+        # parts は ["conda", "activate", "env_name"] のようになる
+        if len(parts) > 2:
+            env_name = parts[2]  # 3番目の要素が環境名
+            ACTIVE_CONDA_ENV = env_name
+            log_append_output(f"[Watcher] Switched to conda environment: {env_name}", exit_code=0)
+        else:
+            log_append_output("conda activate: Please specify an environment name.", exit_code=1)
+    except Exception as e:
+        log_append_output(f"conda activate: Failed to parse command. {e}", exit_code=1)
+    update_status_file()
+
+def _handle_conda_deactivate():
+    global ACTIVE_CONDA_ENV
+    if ACTIVE_CONDA_ENV and ACTIVE_CONDA_ENV != "base":
+        log_append_output(f"[Watcher] Deactivated conda environment: {ACTIVE_CONDA_ENV}, returning to base.", exit_code=0)
+        ACTIVE_CONDA_ENV = "base"
+    else:
+        log_append_output("[Watcher] Already in base conda environment.", exit_code=0)
     update_status_file()
 
 def process_new_commands():
@@ -272,16 +304,18 @@ def process_new_commands():
                 write_offset(offset)
                 continue
             
-            # 修正: if -> elif に変更し、全ての条件分岐を一つに繋げる
             elif not allowed_to_run(cmd):
                 log_append_output(f"[Watcher] Command not allowed: {cmd}", exit_code=126)
                 continue
                 
-            # 修正: if -> elif に変更
             elif cmd.startswith("cd"):
                 _handle_cd(cmd)
 
-            # 最終的にどの条件にも一致しない場合のみ、通常のコマンドとして実行
+            elif cmd.strip().startswith("conda activate"):
+                _handle_conda_activate(cmd)
+            
+            elif cmd.strip() == "conda deactivate":
+                _handle_conda_deactivate()
             else:
                 run_command_local(cmd)
                 
