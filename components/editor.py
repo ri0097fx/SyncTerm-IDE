@@ -103,7 +103,7 @@ class EditorView(ttk.Frame):
         tab_frame.grid_rowconfigure(0, weight=1)
         tab_frame.grid_columnconfigure(1, weight=1)
         if isinstance(self.mono_font, tkfont.Font):
-            shared_font = self.mono_font
+            shared_font = getattr(self.app, "mono_font", self.mono_font)
         else:
             if isinstance(self.mono_font, tuple) and len(self.mono_font) >= 2:
                 family, size = self.mono_font[0], int(self.mono_font[1])
