@@ -8,7 +8,7 @@ SyncTerm‑IDE は、**GUI（PC A）** と **Watcher（PC B/C, …）** が別�
 
 > ℹ️ **Active development:** 本プロジェクトは継続的に開発・改善中です。今後、デバッガ連携、LSP などの機能を順次追加予定です。
 
-> 📣 What's New — **v2.2.1**: ディレクトリ選択の視認性を改善（カスタム *DirectoryPicker* 追加）／行番号フォントをエディタに連動。詳細は [CHANGELOG.md](CHANGELOG.md) を参照。
+> 📣 What's New — **v2.2.2**: Registry 同期の不具合を修正（`<watcher_id>.json` をファイル単位で同期／`--delete` 廃止）。複数 Watcher が安定して候補に並ぶようになりました。詳細は [CHANGELOG.md](CHANGELOG.md) を参照。
 
 ---
 
@@ -113,7 +113,8 @@ nohup ./watcher_manager.sh pc-b "PC B" > watcher.log 2>&1 &
 
 * `watcher_id` は GUI のプルダウンで識別するための一意名。
 * `Display Name` は GUI に表示されるラベル。
-* Watcher はサーバー上の `{base_path}/_registry/` にハートビートを書き、`{base_path}/sessions/<watcher_id>/...` に各セッションのログ / 状態を保存します。
+* Watcher はサーバー上の `{base_path}/_registry/` に **`<watcher_id>.json`** を書き込み、**そのファイルのみ**を rsync でアップロードします（**`--delete` は使用しません**）。
+* セッションのデータは `{base_path}/sessions/<watcher_id>/...` に保存されます。
 
 ### 2) GUI を起動（PC A）
 
@@ -159,6 +160,8 @@ python gui_terminal.py
 ## Changelog
 
 詳しくは [CHANGELOG.md](CHANGELOG.md) を参照。
+
+* **ver.2.2.2**: Registry 同期の不具合を修正（`_registry` ディレクトリのディレクトリ単位同期による上書きを解消。`<watcher_id>.json` をファイル単位で同期）。
 * **ver.2.2.1**: ディレクトリ選択の視認性を改善（カスタム *DirectoryPicker*）。行番号フォントをエディタに連動。
 * **ver.2.2.0**: Preferences（設定）ダイアログを追加（Editor / Terminal フォント設定、即時反映＋保存、アイコン統一）。
 * **ver.2.1.1**: Python のバージョン差で型アノテーションが無効になる環境に対応（`from __future__ import annotations`）。
@@ -174,11 +177,6 @@ python gui_terminal.py
 
   * 本ツールは **クライアント発の `ssh/rsync` のみ** で同期します。**サーバーからローカルへはプッシュしません。**
   * サーバー上の `{base_path}` は専用ユーザ＋厳しめパーミッションで運用してください。第三者が `commands.txt` 等に書ける構成は危険です。
-
-* **`rsync --delete` のリスク**
-
-  * パスを誤ると消失事故に直結します。重要ディレクトリで実行する前に `-n`（dry-run）で確認を推奨します。
-  * 例: `rsync -az --delete -n SRC/ DEST/` で差分だけ先に確認。
 
 * **リアルタイム性について（設計上の制約）**
 
