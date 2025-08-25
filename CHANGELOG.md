@@ -114,13 +114,11 @@
 
 [2.2.2]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.2.1...v2.2.2
 [2.2.1]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.2.0...v2.2.1
-
 [2.2.0]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.1.1...v2.2.0
+
 [2.2.0-release]: https://github.com/ri0097fx/SyncTerm-IDE/releases/tag/v2.2.0
 
 [2.1.1]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.1.0...v2.1.1
-[2.1.1-release]: https://github.com/ri0097fx/SyncTerm-IDE/releases/tag/v2.1.1
-
 [2.1.0]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.0.0...v2.1.0
 [2.1.0-release]: https://github.com/ri0097fx/SyncTerm-IDE/releases/tag/v2.1.0
 

@@ -319,42 +319,83 @@ class IntegratedGUI(tk.Tk):
         finally: self._hide_sync_indicator()
 
     def _update_watcher_list(self):
+        # サーバー → ローカルに _registry を取得（ローカルのみ --delete はOK）
         try:
             LOCAL_REGISTRY_DIR.mkdir(parents=True, exist_ok=True)
             self._run_sync_command(
-                ["rsync", "-az", "--delete", f"{REMOTE_SERVER}:{REMOTE_REGISTRY_PATH}", f"{str(LOCAL_REGISTRY_DIR)}/"],
+                ["rsync", "-az", "--delete",
+                 f"{REMOTE_SERVER}:{REMOTE_REGISTRY_PATH}",
+                 f"{str(LOCAL_REGISTRY_DIR)}/"],
                 check=True, capture_output=True, timeout=5
             )
         except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
             return
-
-        online_watchers = {}
+    
         now = time.time()
-        for reg_file in LOCAL_REGISTRY_DIR.glob('*'):
-            if not reg_file.is_file() or reg_file.name.startswith('.'): 
-                continue
+        HB_KEYS = ("last_heartbeat", "last_seen", "heartbeat_ts")
+    
+        # 重要: *.json のみ、かつ名前順で安定化
+        files = sorted(LOCAL_REGISTRY_DIR.glob("*.json"), key=lambda p: p.name.lower())
+    
+        watchers_by_label = {}
+        labels_seen = set()
+        choices = []
+    
+        for reg_file in files:
             try:
                 data = json.loads(reg_file.read_text("utf-8"))
-                if (now - data.get("last_heartbeat", 0)) < WATCHER_HEARTBEAT_TIMEOUT_SEC:
-                    display_name = data.get("display_name", reg_file.name)
-                    online_watchers[display_name] = {"id": reg_file.name}
-            except (json.JSONDecodeError, KeyError):
+            except Exception:
                 continue
-        
-        self.watchers = online_watchers
-        current_selection = self.watcher_combo.get()
-        watcher_names = sorted(self.watchers.keys())
-        if tuple(self.watcher_combo['values']) != tuple(watcher_names):
-            self.watcher_combo["values"] = watcher_names
-        if current_selection and current_selection in watcher_names:
-            if self.watcher_combo.get() != current_selection:
-                self.watcher_combo.set(current_selection)
-        elif current_selection not in watcher_names:
-            self.watcher_combo.set(""); self.session_combo.set(""); self.session_combo["values"] = []
-            if watcher_names:
-                self.watcher_combo.set(watcher_names[0]); self._on_watcher_selected()
-        elif not self.watcher_combo.get() and watcher_names:
-            self.watcher_combo.set(watcher_names[0]); self._on_watcher_selected()
+    
+            # ハートビート時刻（欠損時は mtime を使用）
+            ts = None
+            for k in HB_KEYS:
+                if k in data:
+                    ts = data.get(k)
+                    break
+            if ts is None:
+                ts = reg_file.stat().st_mtime
+            try:
+                ts = float(ts)
+            except Exception:
+                continue
+            if now - ts > WATCHER_HEARTBEAT_TIMEOUT_SEC:
+                continue  # タイムアウト
+    
+            # ★ ここが肝: 拡張子を外して watcher_id にする
+            watcher_id = Path(reg_file).stem
+            display_name = data.get("display_name") or watcher_id
+    
+            # 表示ラベルのユニーク化（同名がいれば "(id)" を付与）
+            label = display_name if display_name not in labels_seen else f"{display_name} ({watcher_id})"
+            labels_seen.add(label)
+    
+            watchers_by_label[label] = {"id": watcher_id, "display_name": display_name}
+            choices.append(label)
+    
+        # UI 反映（選択は id ベースで復元）
+        prev_id = getattr(self, "current_watcher_id", None)
+        self.watchers = watchers_by_label
+        self.watcher_combo["values"] = choices
+    
+        if prev_id:
+            for lab, info in watchers_by_label.items():
+                if info["id"] == prev_id:
+                    self.watcher_combo.set(lab)
+                    break
+            else:
+                # 既存 id が見つからなければ初期選択
+                if choices:
+                    self.watcher_combo.set(choices[0])
+                    self._on_watcher_selected()
+                else:
+                    self.watcher_combo.set("")
+                    self.session_combo.set("")
+                    self.session_combo["values"] = []
+        else:
+            if choices and not self.watcher_combo.get():
+                self.watcher_combo.set(choices[0])
+                self._on_watcher_selected()
     
     def _on_watcher_selected(self, event=None):
         watcher_name = self.watcher_combo.get()
