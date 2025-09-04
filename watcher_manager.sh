@@ -129,12 +129,14 @@ while true; do
     --exclude '*/commands.txt' \
     "$LOCAL_WATCHER_DIR/" "$SERVER:$REMOTE_WATCHER_DIR/"
 
-  # --- Step 2: commands.txt を pull（原子的に、offset は pull しない） ---
+  # --- Step 2: commands.txt と .staged_for_upload を pull
   echo "[MANAGER] Pulling commands.txt from server (atomic replace)..."
   "${RSYNC_PULL_CMD[@]}" \
     --prune-empty-dirs \
     --include '*/' \
     --include '*/commands.txt' \
+    --include '*/.staged_for_upload' \  #future warning
+    --include '*/.staged_uploads/**' \  
     --exclude '*' \
     "$SERVER:$REMOTE_WATCHER_DIR/" "$LOCAL_WATCHER_DIR/"
 

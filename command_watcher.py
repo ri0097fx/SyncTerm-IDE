@@ -56,6 +56,11 @@ CURRENT_CWD = BASE_DIR
 # +++ 修正1: Conda環境の初期値を "base" に設定 +++
 ACTIVE_CONDA_ENV: str | None = "base"
 
+def _validate_safe_relpath(rel: str) -> None:
+    p = Path(rel)
+    if p.is_absolute() or any(part == ".." for part in p.parts):
+        raise ValueError(f"unsafe relpath: {rel!r}")
+
 def update_registration(unique_id: str, display_name: str):
     try:
         REGISTRY_DIR.mkdir(parents=True, exist_ok=True)
@@ -243,27 +248,56 @@ def process_new_commands():
                 finally:
                     write_offset(offset)
                     continue
+                
             elif cmd.startswith("_internal_move_staged_file::"):
                 try:
-                    _, rel_dest_path_str = cmd.split("::", 1)
-                    
-                    staged_file = BASE_DIR / ".staged_for_upload"
+                    # 受理するのは新形式のみ:
+                    #   _internal_move_staged_file::<token>::<rel_dest_path>
+                    payload = cmd.split("::", 1)[1]
+                    if "::" not in payload:
+                        raise ValueError("invalid syntax (missing token or relpath)")
+            
+                    token, rel_dest_path_str = payload.split("::", 1)
+                    if not token or not rel_dest_path_str:
+                        raise ValueError("invalid syntax (empty token or relpath)")
+            
+                    # パス検証（ベストプラクティス）
+                    try:
+                        _validate_safe_relpath(rel_dest_path_str)  # 実装していない場合は簡易チェックに置換してください
+                    except NameError:
+                        # 簡易ガード（_validate_safe_relpath 未実装時）
+                        p = Path(rel_dest_path_str)
+                        if p.is_absolute() or any(part == ".." for part in p.parts):
+                            raise ValueError(f"unsafe relpath: {rel_dest_path_str!r}")
+            
+                    staged_file = BASE_DIR / ".staged_uploads" / token
                     if not staged_file.exists():
-                        raise FileNotFoundError("Staged file '.staged_for_upload' not found.")
-                        
+                        raise FileNotFoundError(f"staged file not found: {staged_file}")
+            
+                    # 最終書き込み先（symlink 配下であれば実体に反映）
                     final_dest_path = (BASE_DIR / rel_dest_path_str).resolve()
-
                     final_dest_path.parent.mkdir(parents=True, exist_ok=True)
-                    
-                    shutil.move(str(staged_file), str(final_dest_path))
-                    
+            
+                    # 原子的に置換
+                    tmp_path = final_dest_path.with_suffix(final_dest_path.suffix + ".tmp~")
+                    shutil.copy2(staged_file, tmp_path)
+                    os.replace(tmp_path, final_dest_path)
+            
+                    # 後片付け（token 単位で削除）
+                    try:
+                        staged_file.unlink()
+                    except Exception:
+                        pass
+            
                     log_append_output(f"[Watcher] Moved staged file to '{rel_dest_path_str}'.", exit_code=0)
-
+            
                 except Exception as e:
+                    # 旧形式はここで弾かれます（例: invalid syntax）
                     log_append_output(f"[Watcher] ERROR: Failed to move staged file. Reason: {e}", exit_code=1)
                 finally:
                     write_offset(offset)
                     continue
+
             elif cmd.startswith("_internal_create_link::"):
                 try:
                     _, source_path, link_name = cmd.split('::', 2)

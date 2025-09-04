@@ -24,6 +24,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import tkinter.font as tkfont
+import uuid
 
 # --- Optional Pillow for image preview ---
 try:
@@ -1373,6 +1374,49 @@ class IntegratedGUI(tk.Tk):
             self.editor_notebook.tab(tab_id, text=full_title)
         except tk.TclError: pass
 
+    def _upload_cached_remote_file(self, remote_relative_path: str, local_cache_path: Path):
+        """保存後: サーバ <session>/.staged_uploads/<token> に置き、Watcher に移動指示"""
+        if not (self.current_watcher_id and self.current_session_name):
+            return
+    
+        wid  = Path(self.current_watcher_id).stem
+        sess = self.current_session_name
+        token = f"{int(time.time()*1000)}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    
+        remote_session_root = f"{REMOTE_SESSIONS_PATH}/{wid}/{sess}"
+        remote_staged_dir   = f"{remote_session_root}/.staged_uploads"
+    
+        # ディレクトリ作成（サーバ）
+        self._run_sync_command(["ssh", REMOTE_SERVER, f"mkdir -p '{remote_staged_dir}'"],
+                               check=True, capture_output=True, timeout=5)
+    
+        # ファイルを一意名でアップロード
+        self._run_sync_command(
+            ["rsync", "-az", "--inplace", str(local_cache_path),
+             f"{REMOTE_SERVER}:{remote_staged_dir}/{token}"],
+            check=True, capture_output=True, timeout=10
+        )
+    
+        # Watcher に「<token> を <relpath> へ移動せよ」と指示
+        self._send_command_to_watcher(f"_internal_move_staged_file::{token}::{remote_relative_path}")
+    
+        # 任意: 反映ログの即時取得
+        try:
+            self._fetch_log_updates()
+        except Exception:
+            pass
+    
+    def _calc_local_cache_path(self, watcher_id: str, session: str, remote_relative_path: str) -> Path:
+        """
+        リンク経由のリモートファイルを、watcher/session/link/relpath で一意キャッシュ。
+        remote_relative_path は "link_name/sub/dir/file.ext"
+        """
+        wid = Path(watcher_id).stem
+        base = LOCAL_SESSIONS_ROOT / wid / session / "_links_cache"
+        p = (base / remote_relative_path).resolve()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return p
+    
     # --- 検索バー（元コードと同等） ---
     def _show_search_bar(self, event=None):
         tab_data = self._get_current_tab_data()
@@ -1806,6 +1850,7 @@ class IntegratedGUI(tk.Tk):
         # Buttons
         btns = ttk.Frame(frm, style="Dark.TFrame")
         btns.grid(row=3, column=0, columnspan=3, sticky="e", pady=(12,0))
+        
         def do_apply():
             self.prefs.update({
                 "editor_family": ed_family.get(),

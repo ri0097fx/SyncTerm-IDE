@@ -199,22 +199,39 @@ class EditorView(ttk.Frame):
             self._update_line_numbers()
         except Exception as e:
             messagebox.showerror("Error", f"Failed to open file:\n{e}")
+    
+    def _sync_remote_after_save(self, tab_data):
+        rp, fp = tab_data.get("remote_path"), tab_data.get("filepath")
+        if not (rp and fp):  # リンク由来でない or 未保存
+            return
+        try:
+            upload = getattr(self.app, "_upload_cached_remote_file", None)
+            if callable(upload):
+                upload(rp, Path(fp))
+        except Exception as e:
+            messagebox.showerror("Upload Error", f"Failed to upload to remote:\n{e}")
+
+
 
     def editor_save_file(self, event=None):
         tab_data = self._get_current_tab_data()
         if not tab_data:
             return "break"
-
+    
         filepath = tab_data.get("filepath")
         if not filepath:
             return self.editor_save_file_as(event)
-
+    
         try:
             content = tab_data["text"].get("1.0", "end-1c")
             Path(filepath).write_text(content, encoding="utf-8")
             tab_data["is_dirty"] = False
             tab_data["text"].edit_modified(False)
             self._update_editor_title()
+    
+            # ★ リモート反映（リンク由来ファイルのみ）
+            self._sync_remote_after_save(tab_data)
+    
         except Exception as e:
             messagebox.showerror("Save Error", f"Failed to save file:\n{e}")
 
@@ -222,7 +239,7 @@ class EditorView(ttk.Frame):
         tab_data = self._get_current_tab_data()
         if not tab_data:
             return "break"
-
+    
         initial = str(tab_data.get("filepath") or Path.cwd() / "untitled.txt")
         path = filedialog.asksaveasfilename(
             initialfile=os.path.basename(initial),
@@ -236,8 +253,13 @@ class EditorView(ttk.Frame):
             tab_data["is_dirty"] = False
             tab_data["text"].edit_modified(False)
             self._update_editor_title()
+    
+            # ★ リモート反映（リンク由来ファイルのみ）
+            self._sync_remote_after_save(tab_data)
+    
         except Exception as e:
             messagebox.showerror("Save Error", f"Failed to save file:\n{e}")
+
 
     def _update_editor_title(self):
         tab_data = self._get_current_tab_data()
