@@ -135,8 +135,7 @@ while true; do
     --prune-empty-dirs \
     --include '*/' \
     --include '*/commands.txt' \
-    --include '*/.staged_for_upload' \  #future warning
-    --include '*/.staged_uploads/**' \  
+    --include '*/.staged_uploads/**' \
     --exclude '*' \
     "$SERVER:$REMOTE_WATCHER_DIR/" "$LOCAL_WATCHER_DIR/"
 
