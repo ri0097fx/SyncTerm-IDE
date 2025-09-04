@@ -22,6 +22,31 @@
 
 ---
 
+## [2.3.0] - 2025-09-04
+
+### Added
+- **GUI**: リンク経由のファイルを *watcher/session/link/相対パス* で一意にローカルキャッシュ化。
+- **GUI**: 保存後のアップロードを **トークン付きステージング**（`<session>/.staged_uploads/<token>`）に変更し、`_internal_move_staged_file::<token>::<relpath>` を送出。
+
+### Changed
+- **Watcher**: トークン付きステージファイルを **原子的置換**（`copy2 → os.replace`）で適用。相対パスの安全性（絶対/`..` を拒否）を検証。
+
+### Fixed
+- 複数のリンク先ファイルを続けて保存した際に、キャッシュ衝突やステージファイル上書きで**別ファイルが誤上書きされる**問題を解消。
+- 異なるリンク/セッション間で**キャッシュ先が衝突**する可能性を排除。
+
+### Breaking
+- 旧形式の `"_internal_move_staged_file::<relpath>"` と **単一 `.staged_for_upload`** 方式を**廃止**。Watcher は **トークン付きのみ**受理します。
+- `.commands.offset` は **Watcher 側を正** とし、GUI/manager から **pull しない**方針を明確化。
+
+### Migration
+- GUI は保存時に `<session>/.staged_uploads/<token>` へアップロードし、  
+  `"_internal_move_staged_file::<token>::<relpath>"` を送るようにしてください。
+- `watcher_manager.sh` の pull フィルタに **`--include '*/.staged_uploads/**'`**（必要なら互換で `--include '*/.staged_for_upload'` も）を追加。  
+  `.commands.offset` は **除外**のままにしてください。
+
+---
+
 ## [2.2.2] - 2025-08-25
 
 ### Fixed
@@ -109,20 +134,13 @@
 * 初期リリース。
 
 ---
-
-[Unreleased]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.2.2...HEAD
-
+[Unreleased]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.3.0...HEAD
+[2.3.0]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.2.2...v2.3.0
 [2.2.2]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.2.1...v2.2.2
 [2.2.1]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.2.0...v2.2.1
 [2.2.0]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.1.1...v2.2.0
-
-[2.2.0-release]: https://github.com/ri0097fx/SyncTerm-IDE/releases/tag/v2.2.0
-
 [2.1.1]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.1.0...v2.1.1
 [2.1.0]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.0.0...v2.1.0
-[2.1.0-release]: https://github.com/ri0097fx/SyncTerm-IDE/releases/tag/v2.1.0
-
-[2.0.0]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v1.0.0...v2.0.0
-[2.0.0-release]: https://github.com/ri0097fx/SyncTerm-IDE/releases/tag/v2.0.0
-
+[2.0.0]: https://github.com/ri0097fx/SyncTerm-IDE/releases/tag/v2.0.0
 [1.0.0]: https://github.com/ri0097fx/SyncTerm-IDE/releases/tag/v1.0.0
+
