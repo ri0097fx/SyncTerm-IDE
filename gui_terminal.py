@@ -669,6 +669,8 @@ class IntegratedGUI(tk.Tk):
         self.file_tree.pack(fill=tk.BOTH, expand=True)
         self.file_tree.bind("<Double-1>", self._on_file_tree_double_click)
         self.file_tree.bind("<Button-1>", self._on_tree_click)
+        
+        self.file_tree.bind("<<TreeviewOpen>>", self._on_tree_open)
 
         # 右：（Editor + Preview）を入れる右ペイン
         self.editor_right_pane = ttk.PanedWindow(self.editor_pane, orient=tk.HORIZONTAL)
@@ -974,24 +976,50 @@ class IntegratedGUI(tk.Tk):
             messagebox.showerror("エラー", f"コマンドの送信に失敗しました:\n{e}")
 
     def _on_tree_click(self, event):
-        """展開アイコンで symlink を仮想展開"""
+        """展開アイコンクリックで symlink / virtual_dir を仮想展開"""
         region = self.file_tree.identify_region(event.x, event.y)
         if region != "tree":
             return
         item_id = self.file_tree.identify_row(event.y)
         if not item_id:
             return
+    
         tags = self.file_tree.item(item_id, "tags")
         children = self.file_tree.get_children(item_id)
-        if "symlink" not in tags or len(children) != 1 or self.file_tree.item(children[0], "text") != "Loading...":
-            return
-        full_local_path = Path(self.file_tree.item(item_id, "values")[0])
-        relative_path = full_local_path.relative_to(self.current_tree_root)
-        command = f"_internal_list_dir::{str(relative_path)}"
-        self._send_command_to_watcher(command)
-        if self._log_fetch_timer:
-            self.after_cancel(self._log_fetch_timer)
-        self._fetch_log_updates()
+        has_placeholder = bool(children) and self.file_tree.item(children[0], "text") == "Loading..."
+    
+        if (("symlink" in tags) or ("virtual_dir" in tags)) and has_placeholder:
+            full_local_path = Path(self.file_tree.item(item_id, "values")[0])
+            relative_path = full_local_path.relative_to(self.current_tree_root)
+            self._send_command_to_watcher(f"_internal_list_dir::{str(relative_path)}")
+    
+            if self._log_fetch_timer:
+                self.after_cancel(self._log_fetch_timer)
+            self._fetch_log_updates()
+
+        
+    def _on_tree_open(self, event=None):
+        """フォルダ（symlink / virtual_dir）を展開する時に呼ばれる"""
+        try:
+            item_id = self.file_tree.focus()
+            if not item_id:
+                return
+            tags = self.file_tree.item(item_id, "tags")
+            children = self.file_tree.get_children(item_id)
+    
+            # プレースホルダ（Loading...）がぶら下がっている時だけ LIST を要求
+            needs_load = bool(children) and self.file_tree.item(children[0], "text") == "Loading..."
+            if (("virtual_dir" in tags) or ("symlink" in tags)) and needs_load:
+                node_path = Path(self.file_tree.item(item_id, "values")[0])
+                relative_path = node_path.relative_to(self.current_tree_root)
+                self._send_command_to_watcher(f"_internal_list_dir::{str(relative_path)}")
+    
+                # すぐログを取りに行く
+                if self._log_fetch_timer:
+                    self.after_cancel(self._log_fetch_timer)
+                self._fetch_log_updates()
+        except Exception as e:
+            print(f"_on_tree_open error: {e}")
 
     def _browse_file_tree_root(self):
         initial_dir = str(LOCAL_SESSIONS_ROOT / self.current_watcher_id
@@ -1090,21 +1118,37 @@ class IntegratedGUI(tk.Tk):
         """仮想展開結果をツリーに挿入"""
         for child in self.file_tree.get_children(parent_iid):
             self.file_tree.delete(child)
+    
         parent_path_str = self.file_tree.item(parent_iid, "values")[0]
         parent_rel_path = Path(parent_path_str).relative_to(self.current_tree_root)
+    
         lines = sorted(ls_result.strip().splitlines())
-        if not lines: return
+        if not lines:
+            return
+    
         for line in lines:
             is_dir = line.endswith('/')
             name = line.strip('/')
             remote_rel_path = parent_rel_path / name
             local_path_val = self.current_tree_root / remote_rel_path
+    
             tags = ["virtual"]
-            if is_dir: tags.append("virtual_dir")
-            else: tags.append("virtual_file")
-            iid = self.file_tree.insert(parent_iid, "end", text=name, 
-                                  open=False, values=[str(local_path_val)], tags=tags)
+            tags.append("virtual_dir" if is_dir else "virtual_file")
+    
+            iid = self.file_tree.insert(
+                parent_iid, "end", text=name, open=False,
+                values=[str(local_path_val)], tags=tags
+            )
             self.path_to_iid[str(local_path_val)] = iid
+    
+            if is_dir:
+                # ★ これを追加：展開トリガ用のダミー子
+                self.file_tree.insert(
+                    iid, "end", text="Loading...",
+                    values=[str(local_path_val / "__loading__")],
+                    tags=["placeholder"]
+                )
+
 
     def _on_file_tree_double_click(self, event=None):
         try:

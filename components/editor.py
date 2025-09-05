@@ -100,61 +100,63 @@ class EditorView(ttk.Frame):
 
     def _create_new_tab(self, filepath=None, remote_path=None):
         tab_frame = ttk.Frame(self.editor_notebook, style="Dark.TFrame")
-        tab_frame.grid_rowconfigure(0, weight=1)
+        tab_frame.grid_rowconfigure(0, weight=1)   # エディタ本体
+        tab_frame.grid_rowconfigure(1, weight=0)   # 横スクロールバー行
         tab_frame.grid_columnconfigure(1, weight=1)
-        if isinstance(self.mono_font, tkfont.Font):
-            shared_font = getattr(self.app, "mono_font", self.mono_font)
-        else:
-            if isinstance(self.mono_font, tuple) and len(self.mono_font) >= 2:
-                family, size = self.mono_font[0], int(self.mono_font[1])
-            else:
-                family, size = "Consolas", 12
-            shared_font = tkfont.Font(family=family, size=size)
-
+    
+        # 行番号（従来通り wrap なし）
         line_numbers = tk.Text(
             tab_frame, width=4, padx=4, takefocus=0, bd=0, bg=self.COMBO_BG, fg="#888888",
-            state="disabled", wrap="none", font=shared_font, highlightthickness=3,
+            state="disabled", wrap="none", font=self.mono_font, highlightthickness=3,
             highlightbackground=self.COMBO_BG
         )
         line_numbers.grid(row=0, column=0, sticky="ns")
-
+    
+        # ★ エディタ本体：wrap を none にして折り返し無効
         editor_text = tk.Text(
-            tab_frame, wrap="word", undo=True, bg=self.TEXT_BG, fg=self.TEXT_FG,
+            tab_frame, wrap="none", undo=True, bg=self.TEXT_BG, fg=self.TEXT_FG,
             insertbackground=self.INSERT_FG, selectbackground=self.SELECT_BG,
-            selectforeground=self.SELECT_FG, font=shared_font, highlightthickness=4,
+            selectforeground=self.SELECT_FG, font=self.mono_font, highlightthickness=4,
             highlightbackground=self.COMBO_BG, highlightcolor="#3B729F",
             relief="flat", borderwidth=0
         )
         editor_text.grid(row=0, column=1, sticky="nsew")
         editor_text.tag_configure("search_highlight", background="#D8A01D", foreground="#000000")
         editor_text.tag_configure("selection_match_highlight", background="#4A4A4A")
-
+    
         marker_bar = tk.Canvas(tab_frame, width=10, bg=self.COMBO_BG, highlightthickness=0)
         marker_bar.grid(row=0, column=2, sticky="ns")
-        marker_bar.bind("<Button-1>", self._on_marker_bar_click)
-
+    
+        # 縦スクロールバー（見た目を合わせるため row をまたいで配置）
         scrollbar = ttk.Scrollbar(tab_frame, orient="vertical", command=self._on_scrollbar_move)
-        scrollbar.grid(row=0, column=3, sticky="ns")
-
+        scrollbar.grid(row=0, column=3, sticky="ns", rowspan=2)
+    
+        # ★ 横スクロールバーの追加
+        hscrollbar = ttk.Scrollbar(tab_frame, orient="horizontal", command=editor_text.xview)
+        hscrollbar.grid(row=1, column=1, sticky="ew")
+    
+        # スクロール連携
         editor_text['yscrollcommand'] = self._on_text_scroll
         line_numbers['yscrollcommand'] = self._on_text_scroll
-
+        editor_text['xscrollcommand'] = hscrollbar.set  # ★ 横スクロール反映
+    
         tab_title = os.path.basename(filepath or remote_path) if (filepath or remote_path) else "Untitled"
         self.editor_notebook.add(tab_frame, text=tab_title)
         tab_id = self.editor_notebook.tabs()[-1]
-
+    
         self.tabs[tab_id] = {
             "filepath": filepath, "is_dirty": False, "text": editor_text,
             "line_numbers": line_numbers, "marker_bar": marker_bar, "scrollbar": scrollbar,
+            "hscrollbar": hscrollbar,  # ★ 参照を保持（必要なら）
             "syntax_tags": set(), "highlight_timer": None, "line_number_timer": None,
-            "selection_timer": None, "remote_path": remote_path, "local_cache_path": filepath,
-            "shared_font": shared_font,
+            "selection_timer": None, "remote_path": remote_path, "local_cache_path": filepath
         }
-
+    
         self._bind_editor_keys(editor_text)
         self.editor_notebook.select(tab_id)
         editor_text.focus_set()
         return tab_id
+
 
     def _get_current_tab_data(self):
         try:

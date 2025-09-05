@@ -22,6 +22,23 @@
 
 ---
 
+## [2.3.1] - 2025-09-05
+
+### Added
+- **Editor**: 横方向スクロールバーを追加。長い行は折り返さず横にスクロールして閲覧可能に。
+- **File Tree（リンク内）**: リンク配下の**サブフォルダ展開**に対応。リンク直下だけでなく、階層を辿ってファイルを開けるように。
+
+### Changed
+- **Editor**: 既定の折り返しを無効化（`wrap="none"`）。行番号ガターとのスクロール同期を強化。
+
+### Fixed
+- **行番号のズレ**: 長い行が折り返されるケースで、行番号と本文のスクロール位置がずれることがあった問題を解消。
+
+### Notes
+- 破壊的変更なし（設定・保存の互換性に影響なし）。
+
+---
+
 ## [2.3.0] - 2025-09-04
 
 ### Added
@@ -134,7 +151,8 @@
 * 初期リリース。
 
 ---
-[Unreleased]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.3.0...HEAD
+[Unreleased]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.3.1...HEAD
+[2.3.1]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.3.0...v2.3.1
 [2.3.0]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.2.2...v2.3.0
 [2.2.2]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.2.1...v2.2.2
 [2.2.1]: https://github.com/ri0097fx/SyncTerm-IDE/compare/v2.2.0...v2.2.1

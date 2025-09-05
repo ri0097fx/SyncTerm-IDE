@@ -8,7 +8,7 @@ SyncTerm‑IDE は、**GUI（PC A）** と **Watcher（PC B/C, …）** が別�
 
 > ℹ️ **Active development:** 本プロジェクトは継続的に開発・改善中です。今後、デバッガ連携、LSP などの機能を順次追加予定です。
 
-> 📣 What's New — **v2.3.0**: リンクファイル保存の**トークン化アップロード**で別ファイルの上書きする問題を解消／Watcher は旧形式を廃止。詳細は [CHANGELOG.md](CHANGELOG.md) を参照。
+> 📣 What's New — **v2.3.1**: Editor に**横スクロール**を追加（折り返し無効）。File Tree で**リンク内サブフォルダの展開**に対応。詳細は [CHANGELOG.md](CHANGELOG.md) を参照。
 
 ---
 
@@ -160,7 +160,7 @@ python gui_terminal.py
 ## Changelog
 
 詳しくは [CHANGELOG.md](CHANGELOG.md) を参照。
-
+* **ver.2.3.1**: Editor に横スクロールを追加（折り返し無効化）。File Tree のリンク配下でサブフォルダ展開に対応。
 * **ver.2.3.0**: 保存ごとの**トークン化ステージング**を導入し、複数リンク保存時の取り違えを解消。Watcher は旧形式を廃止し、原子的置換＋パス検証を実装。
 * **ver.2.2.2**: Registry 同期の不具合を修正（`_registry` ディレクトリのディレクトリ単位同期による上書きを解消。`<watcher_id>.json` をファイル単位で同期）。
 * **ver.2.2.1**: ディレクトリ選択の視認性を改善（カスタム *DirectoryPicker*）。行番号フォントをエディタに連動。
