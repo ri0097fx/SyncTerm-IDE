@@ -126,6 +126,8 @@ class EditorView(ttk.Frame):
     
         marker_bar = tk.Canvas(tab_frame, width=10, bg=self.COMBO_BG, highlightthickness=0)
         marker_bar.grid(row=0, column=2, sticky="ns")
+        marker_bar.bind("<Button-1>", self._on_marker_bar_click)
+        marker_bar.bind("<B1-Motion>", self._on_marker_bar_click)  # 任意
     
         # 縦スクロールバー（見た目を合わせるため row をまたいで配置）
         scrollbar = ttk.Scrollbar(tab_frame, orient="vertical", command=self._on_scrollbar_move)

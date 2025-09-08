@@ -5,20 +5,16 @@
 > 詳細は GitHub Releases を参照。ここでは要点のみを簡潔に列挙する。
 
 ---
-
 ## [Unreleased]
+- (Next changes go here)
 
-### Added
+---
 
-* なし
-
-### Changed
-
-* なし
+## [2.3.2] - 2025-09-08
 
 ### Fixed
-
-* なし
+- Editor: 右側の検索マーカー（marker bar）をクリックしても対象行へジャンプしない問題を修正（`_on_marker_bar_click` の再バインド）。  
+- Watcher Manager: 一時的なネットワーク切断（`rsync` / `ssh` エラー）でマネージャープロセスが停止してしまうケースを修正。失敗時もメインループを継続し、次サイクルで再試行するように変更。
 
 ---
 

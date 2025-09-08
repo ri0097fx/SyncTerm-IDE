@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # watcher_manager.sh
 # - セッションは「push を先、pull を後」
-# - pull は commands.txt のみ（原子的置換）。.commands.offset は Watcher が正：pull しない
+# - pull は commands.txt と .staged_uploads/** のみ（.commands.offset は pull しない）
+# - .commands.offset は Watcher が正（push は可）
 # - レジストリは <watcher_id>.json のみ push（--delete 禁止）
-# - rsync/ssh は非対話化、ディレクトリは常に末尾 / を付与
+# - rsync/ssh は非対話化 & タイムアウト/keepalive 付き
+# - ネットワーク失敗時もループ継続（リトライ＋非致命化）
 
 set -euo pipefail
 shopt -s nullglob
@@ -25,20 +27,28 @@ if [ ! -f "$CONFIG_FILE" ]; then
   exit 1
 fi
 
-# ===== 設定読み込み =====
-trim() { sed -E 's/^[[:space:]]+|[[:space:]]+$//g'; }
-getv() { grep -E "^$1[[:space:]]*=" "$CONFIG_FILE" | cut -d '=' -f 2- | trim; }
+# ===== 設定読み込み（未定義でも失敗しない getter） =====
+getv() {
+  # $1=key -> 値（前後空白除去）。見つからなければ空文字を返し、常に rc=0
+  awk -F= -v k="$1" '
+    $0 ~ "^[[:space:]]*"k"[[:space:]]*=" {
+      sub(/^[[:space:]]*[^=]+=[[:space:]]*/, "", $0);
+      sub(/^[[:space:]]+/, "", $0); sub(/[[:space:]]+$/, "", $0);
+      print $0; exit
+    }' "$CONFIG_FILE"
+  return 0
+}
 
 SERVER="$(getv server)"
 BASE_REMOTE_ROOT="$(getv base_path)"
 SESSIONS_DIR_NAME="$(getv sessions_dir_name)"; : "${SESSIONS_DIR_NAME:=sessions}"
 REGISTRY_DIR_NAME="$(getv registry_dir_name)"; : "${REGISTRY_DIR_NAME:=_registry}"
-WATCHER_MIRROR_DIR_RAW="$(getv watcher_mirror_dir || true)"
+WATCHER_MIRROR_DIR_RAW="$(getv watcher_mirror_dir)"
 
 : "${SERVER:?server が config.ini に必要です}"
 : "${BASE_REMOTE_ROOT:?base_path が config.ini に必要です}"
 
-# パス構築
+# ===== パス構築 =====
 BASE_REMOTE="$BASE_REMOTE_ROOT/$SESSIONS_DIR_NAME"            # 例：/home/user/remote_dev/sessions
 REMOTE_WATCHER_DIR="$BASE_REMOTE/$WATCHER_ID"                 # 例：.../sessions/<id>
 REMOTE_REGISTRY_DIR="$BASE_REMOTE_ROOT/$REGISTRY_DIR_NAME"    # 例：.../_registry
@@ -50,10 +60,32 @@ LOCAL_WATCHER_DIR="$LOCAL_SESSIONS_ROOT/$WATCHER_ID"
 LOCAL_REGISTRY_DIR="$LOCAL_BASE/$REGISTRY_DIR_NAME"
 
 # ===== SSH/rsync オプション =====
-RSYNC_SSH_OPTS="-o BatchMode=yes -o StrictHostKeyChecking=accept-new"
-RSYNC_PUSH=(rsync -az -e "ssh $RSYNC_SSH_OPTS")                  # push 共通
-RSYNC_PULL_CMD=(rsync -az -e "ssh $RSYNC_SSH_OPTS")              # pull（個別フィルタで使う）
-INTERVAL="${INTERVAL:-5}"                                        # ループ間隔（秒）
+# keepalive と接続タイムアウトを追加
+RSYNC_SSH_OPTS="-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 -o ServerAliveInterval=15 -o ServerAliveCountMax=2"
+RSYNC_TIMEOUT="${RSYNC_TIMEOUT:-10}"  # rsync I/O timeout
+
+RSYNC_PUSH=(rsync -az --timeout="$RSYNC_TIMEOUT" -e "ssh $RSYNC_SSH_OPTS")     # push 共通
+RSYNC_PULL_CMD=(rsync -az --timeout="$RSYNC_TIMEOUT" -e "ssh $RSYNC_SSH_OPTS") # pull 共通
+INTERVAL="${INTERVAL:-5}"                                                      # ループ間隔（秒）
+
+# ===== 再試行＆非致命化ラッパ =====
+retry() {
+  local max="${RETRY_MAX:-5}" delay="${RETRY_DELAY:-2}" n=1 rc
+  while :; do
+    set +e
+    "$@"; rc=$?
+    set -e
+    if [ "$rc" -eq 0 ]; then return 0; fi
+    echo "[WARN] command failed (rc=$rc), try $n/$max: $*" >&2
+    if [ "$n" -ge "$max" ]; then
+      echo "[WARN] giving up: $*" >&2
+      return "$rc"
+    fi
+    sleep "$delay"
+    n=$((n+1))
+  done
+}
+run_nofail() { retry "$@" || true; }
 
 # ===== プロセス管理 =====
 WATCHER_SCRIPT_PATH="$SCRIPT_DIR/command_watcher.py"
@@ -99,9 +131,9 @@ cleanup() {
     done
     rm -rf "$PID_DIR"
   fi
-  # レジストリ削除
+  # レジストリ削除（失敗しても続行）
   rm -f "$LOCAL_REGISTRY_DIR/${WATCHER_ID}.json" || true
-  ssh -o BatchMode=yes $SERVER "rm -f '$REMOTE_REGISTRY_DIR/${WATCHER_ID}.json'" || true
+  run_nofail ssh -o BatchMode=yes $SERVER "rm -f '$REMOTE_REGISTRY_DIR/${WATCHER_ID}.json'"
   echo "[MANAGER] Cleanup finished."
 }
 trap cleanup EXIT
@@ -109,7 +141,7 @@ trap cleanup EXIT
 # ===== 初期化 =====
 echo "[MANAGER] Started for WATCHER_ID='${WATCHER_ID}'  DISPLAY_NAME='${DISPLAY_NAME}'"
 mkdir -p "$LOCAL_WATCHER_DIR" "$LOCAL_REGISTRY_DIR" "$PID_DIR"
-ssh -o BatchMode=yes $SERVER "mkdir -p '$REMOTE_WATCHER_DIR' '$REMOTE_REGISTRY_DIR'"
+run_nofail ssh -o BatchMode=yes $SERVER "mkdir -p '$REMOTE_WATCHER_DIR' '$REMOTE_REGISTRY_DIR'"
 
 # ===== メインループ =====
 while true; do
@@ -121,17 +153,17 @@ while true; do
     "$WATCHER_ID" "$display_escaped" "$now_sec" > "$json_path"
 
   # 自分の JSON だけ push（--delete 禁止）
-  "${RSYNC_PUSH[@]}" "$json_path" "$SERVER:$REMOTE_REGISTRY_DIR/"
+  run_nofail "${RSYNC_PUSH[@]}" "$json_path" "$SERVER:$REMOTE_REGISTRY_DIR/"
 
   # --- Step 1: セッションを push（commands.txt は除外、.commands.offset は送る） ---
   echo "[MANAGER] Syncing sessions to server (excluding commands.txt)..."
-  "${RSYNC_PUSH[@]}" \
+  run_nofail "${RSYNC_PUSH[@]}" \
     --exclude '*/commands.txt' \
     "$LOCAL_WATCHER_DIR/" "$SERVER:$REMOTE_WATCHER_DIR/"
 
-  # --- Step 2: commands.txt と .staged_for_upload を pull
-  echo "[MANAGER] Pulling commands.txt from server (atomic replace)..."
-  "${RSYNC_PULL_CMD[@]}" \
+  # --- Step 2: commands.txt と .staged_uploads/** を pull（.commands.offset は pull しない） ---
+  echo "[MANAGER] Pulling commands.txt & .staged_uploads from server..."
+  run_nofail "${RSYNC_PULL_CMD[@]}" \
     --prune-empty-dirs \
     --include '*/' \
     --include '*/commands.txt' \
