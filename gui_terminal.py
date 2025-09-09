@@ -55,6 +55,26 @@ import posixpath
 
 IS_WIN = os.name == "nt"
 
+if os.name == "nt":
+    import ctypes
+    from ctypes import wintypes
+
+def _is_windows_reparse_point(path: Path) -> bool:
+    """Windows: ジャンクション/シンボリックリンク等の reparse point を検出"""
+    if os.name != "nt":
+        return False
+    try:
+        FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
+        GetFileAttributesW = ctypes.windll.kernel32.GetFileAttributesW
+        GetFileAttributesW.argtypes = [wintypes.LPCWSTR]
+        GetFileAttributesW.restype  = wintypes.DWORD
+        attrs = GetFileAttributesW(str(path))
+        if attrs == 0xFFFFFFFF:  # INVALID_FILE_ATTRIBUTES
+            return False
+        return bool(attrs & FILE_ATTRIBUTE_REPARSE_POINT)
+    except Exception:
+        return False
+    
 def _wsl_available() -> bool:
     return IS_WIN and shutil.which("wsl") is not None
 
@@ -1256,43 +1276,36 @@ class IntegratedGUI(tk.Tk):
     def _insert_tree_items(self, path: Path, parent_iid: str):
         try:
             if parent_iid not in self.path_to_iid.values():
-                self.path_to_iid[str(path)] = parent_iid
+                 self.path_to_iid[str(path)] = parent_iid
     
-            entries = []
-            with os.scandir(path) as it:
-                for e in it:
-                    # どちらもリンクを辿らない判定
-                    try:
-                        is_link = e.is_symlink()
-                    except OSError:
-                        is_link = False
-                    try:
-                        is_dir_nofollow = e.is_dir(follow_symlinks=False)
-                    except OSError:
-                        is_dir_nofollow = False
+            items = sorted(list(path.iterdir()), key=lambda p: (not p.is_dir(), p.name.lower()))
+            for item in items:
+                tags = []
+                item_icon = ""
     
-                    # ディレクトリ優先でソート（リンクは辿らない判断でOK）
-                    entries.append((not is_dir_nofollow, e.name.lower(), e, is_link, is_dir_nofollow))
+                # ★ ここを強化：Windows の reparse point も「リンク」扱いにする
+                is_link_like = item.is_symlink() or _is_windows_reparse_point(item)
     
-            for _, _, e, is_link, is_dir_nf in sorted(entries, key=lambda t: (t[0], t[1])):
-                tags = ["symlink"] if is_link else []
-                icon = self.symlink_icon if is_link else ""
+                if is_link_like:
+                    tags.append("symlink")
+                    item_icon = self.symlink_icon
+    
                 iid = self.file_tree.insert(
-                    parent_iid, "end", text=e.name, image=icon, open=False,
-                    values=[e.path], tags=tags
+                    parent_iid, "end", text=item.name, image=item_icon,
+                    open=False, values=[str(item)], tags=tags
                 )
-                self.path_to_iid[str(e.path)] = iid
+                self.path_to_iid[str(item)] = iid
     
-                # 通常ディレクトリだけ再帰。リンクは辿らない
-                if is_dir_nf and not is_link:
-                    self._insert_tree_items(Path(e.path), iid)
+                # 通常ディレクトリのみ再帰展開（リンクはしない）
+                if item.is_dir() and not is_link_like:
+                    self._insert_tree_items(item, iid)
     
-                # シンボリックリンクにはダミー子を下げて、展開時にリモートLISTを発火
-                if is_link:
-                    self.file_tree.insert(iid, "end", text="Loading...", tags=["placeholder"])
-        except (PermissionError, FileNotFoundError, OSError):
-            # アクセス不能・壊れたリンクを無視
+                # ★ リンク見なしたものには必ずダミー子をぶら下げる（Windowsでも有効化）
+                if is_link_like:
+                    self.file_tree.insert(iid, "end", text="Loading...")
+        except (PermissionError, FileNotFoundError):
             pass
+
 
 
     def _populate_virtual_tree(self, parent_iid: str, ls_result: str):
