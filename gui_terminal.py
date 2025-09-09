@@ -51,10 +51,22 @@ from config import (
 
 from components.terminal import TerminalFrame
 from components.editor import EditorView 
+import posixpath
 
+def _cmd_exists(name: str) -> bool:
+    return shutil.which(name) is not None
 
+def _unix(p: str) -> str:
+    return str(p).replace("\\", "/")
 
-
+def _wipe_children(path: Path):
+    path.mkdir(parents=True, exist_ok=True)
+    for c in path.iterdir():
+        if c.is_dir() and not c.is_symlink():
+            shutil.rmtree(c, ignore_errors=True)
+        else:
+            try: c.unlink()
+            except: pass
 
 class IntegratedGUI(tk.Tk):
     def __init__(self):
@@ -220,14 +232,7 @@ class IntegratedGUI(tk.Tk):
         self._update_watcher_list()
         self.protocol("WM_DELETE_WINDOW", self._on_closing)
         self.is_loading = False
-        
-    def _rsync(self, *extra_args, **popen_kwargs):
-        ssh_opt = "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
-        base = ["rsync", "-az", "-e", ssh_opt]
-        # rsync 未インストールなら早めに気付けるようにメッセージ
-        if shutil.which("rsync") is None:
-            raise FileNotFoundError("rsync not found on PATH. Install rsync or use WSL/msys2.")
-        return self._run_sync_command(base + list(extra_args), **popen_kwargs)
+    
     # ---------------------------
     # 保存/復元
     # ---------------------------
@@ -320,6 +325,95 @@ class IntegratedGUI(tk.Tk):
         if self._log_fetch_timer: self.after_cancel(self._log_fetch_timer)
         self._save_state()
         self.destroy()
+    
+    def _sync_pull_file(self, remote_file: str, local_file: str, timeout=30):
+        """サーバー -> ローカル（単一ファイル）"""
+        remote_file = _unix(remote_file)
+        local_file  = Path(local_file)
+        local_file.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            return self._run_sync_command(
+                ["rsync", "-az", f"{REMOTE_SERVER}:{remote_file}", str(local_file)],
+                check=True, timeout=timeout
+            )
+        except Exception:
+            if not _cmd_exists("scp"):
+                raise
+            return self._run_sync_command(
+                ["scp", f"{REMOTE_SERVER}:{remote_file}", str(local_file)],
+                check=True, timeout=timeout
+            )
+    
+    def _sync_push_file(self, local_file: str, remote_file: str, timeout=30):
+        """ローカル -> サーバー（単一ファイル）"""
+        local_file  = _unix(local_file)
+        remote_file = _unix(remote_file)
+        try:
+            return self._run_sync_command(
+                ["rsync", "-az", local_file, f"{REMOTE_SERVER}:{remote_file}"],
+                check=True, timeout=timeout
+            )
+        except Exception:
+            if not _cmd_exists("scp"):
+                raise
+            remote_dir = posixpath.dirname(remote_file) or "."
+            self._run_sync_command(
+                ["ssh", REMOTE_SERVER, f"mkdir -p '{remote_dir}'"],
+                check=True, timeout=max(5, timeout//3), capture_output=True
+            )
+            return self._run_sync_command(
+                ["scp", local_file, f"{REMOTE_SERVER}:{remote_file}"],
+                check=True, timeout=timeout
+            )
+    
+    def _sync_pull_dir(self, remote_dir: str, local_dir: str, delete=False, timeout=60):
+        """サーバー -> ローカル（ディレクトリ）"""
+        remote_dir = _unix(remote_dir.rstrip("/") + "/")
+        local_dir  = Path(local_dir)
+        local_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            # まず rsync
+            args = ["rsync", "-az"]
+            if delete: args.append("--delete")
+            return self._run_sync_command(
+                args + [f"{REMOTE_SERVER}:{remote_dir}", str(local_dir) + "/"],
+                check=True, timeout=timeout
+            )
+        except Exception:
+            # rsync 失敗時は scp（delete の厳密一致は不可。必要ならローカルを空にして近似）
+            if not _cmd_exists("scp"):
+                raise
+            if delete:
+                _wipe_children(local_dir)
+            return self._run_sync_command(
+                ["scp", "-r", f"{REMOTE_SERVER}:{remote_dir}.", str(local_dir) + "/"],
+                check=True, timeout=timeout
+            )
+    
+    def _sync_push_dir(self, local_dir: str, remote_dir: str, delete=False, timeout=60):
+        """ローカル -> サーバー（ディレクトリ）"""
+        local_dir  = _unix(local_dir.rstrip("/") + "/")
+        remote_dir = _unix(remote_dir.rstrip("/") + "/")
+        try:
+            # まず rsync
+            args = ["rsync", "-az"]
+            if delete: args.append("--delete")
+            return self._run_sync_command(
+                args + [local_dir, f"{REMOTE_SERVER}:{remote_dir}"],
+                check=True, timeout=timeout
+            )
+        except Exception:
+            # rsync 失敗時は scp（delete 厳密対応なし。上書き/追加のみ）
+            if not _cmd_exists("scp"):
+                raise
+            self._run_sync_command(
+                ["ssh", REMOTE_SERVER, f"mkdir -p '{remote_dir}'"],
+                check=True, timeout=max(5, timeout//3), capture_output=True
+            )
+            return self._run_sync_command(
+                ["scp", "-r", local_dir + ".", f"{REMOTE_SERVER}:{remote_dir}"],
+                check=True, timeout=timeout
+            )
 
     # ---------------------------
     # 同期／Watcher一覧
@@ -335,12 +429,14 @@ class IntegratedGUI(tk.Tk):
         # サーバー → ローカルに _registry を取得（ローカルのみ --delete はOK）
         try:
             LOCAL_REGISTRY_DIR.mkdir(parents=True, exist_ok=True)
-            self._run_sync_command(
-                ["rsync", "-az", "--delete",
-                 f"{REMOTE_SERVER}:{REMOTE_REGISTRY_PATH}",
-                 f"{str(LOCAL_REGISTRY_DIR)}/"],
-                check=True, capture_output=True, timeout=5
-            )
+            # rsync → scp フォールバック
+            # self._run_sync_command(
+            #     ["rsync", "-az", "--delete",
+            #      f"{REMOTE_SERVER}:{REMOTE_REGISTRY_PATH}",
+            #      f"{str(LOCAL_REGISTRY_DIR)}/"],
+            #     check=True, capture_output=True, timeout=5
+            # )
+            self._sync_pull_dir(REMOTE_REGISTRY_PATH, str(LOCAL_REGISTRY_DIR), delete=True, timeout=30)
         except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
             return
     
@@ -421,7 +517,8 @@ class IntegratedGUI(tk.Tk):
         remote_watcher_dir = f"{REMOTE_SESSIONS_PATH}/{watcher_id}/"
         sessions = []
         try:
-            self._run_sync_command(["rsync", "-az", "--delete", f"{REMOTE_SERVER}:{remote_watcher_dir}", f"{str(local_watcher_dir)}/"], check=True, timeout=5)
+            # self._run_sync_command(["rsync", "-az", "--delete", f"{REMOTE_SERVER}:{remote_watcher_dir}", f"{str(local_watcher_dir)}/"], check=True, timeout=5)
+            self._sync_pull_dir(remote_watcher_dir, str(local_watcher_dir), delete=True, timeout=60)
             if local_watcher_dir.is_dir():
                 sessions = sorted([p.name for p in local_watcher_dir.iterdir() if p.is_dir()])
         except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as e:
@@ -458,7 +555,8 @@ class IntegratedGUI(tk.Tk):
             self._run_sync_command(["ssh", REMOTE_SERVER, f"mkdir -p '{remote_watcher_dir}'"], check=True, timeout=5, capture_output=True)
             local_session_path = LOCAL_SESSIONS_ROOT / watcher_id / new_name
             local_session_path.mkdir(parents=True, exist_ok=True)
-            self._run_sync_command(["rsync", "-az", str(local_session_path) + "/", f"{REMOTE_SERVER}:{remote_watcher_dir}/{new_name}/"], check=True, timeout=5)
+            # self._run_sync_command(["rsync", "-az", str(local_session_path) + "/", f"{REMOTE_SERVER}:{remote_watcher_dir}/{new_name}/"], check=True, timeout=5)
+            self._sync_push_dir(str(local_session_path) + "/", f"{remote_watcher_dir}/{new_name}/", delete=False, timeout=120)
         except subprocess.CalledProcessError as e:
             error_details = e.stderr.decode('utf-8', errors='ignore').strip()
             messagebox.showerror("Error", f"サーバーでのセッション作成に失敗しました: {e}\n\n詳細: {error_details}")
@@ -518,7 +616,8 @@ class IntegratedGUI(tk.Tk):
 
         try:
             remote_session_dir = f"{REMOTE_SESSIONS_PATH}/{watcher_id}/{session_name}/"
-            self._run_sync_command(["rsync", "-az", f"{REMOTE_SERVER}:{remote_session_dir}commands.log", f"{str(self.log_file.parent)}/"], timeout=5)
+            # self._run_sync_command(["rsync", "-az", f"{REMOTE_SERVER}:{remote_session_dir}commands.log", f"{str(self.log_file.parent)}/"], timeout=5)
+            self._sync_pull_file(f"{remote_session_dir}commands.log", str(self.log_file), timeout=30)
             if self.log_file.exists():
                 content = self.log_file.read_text(encoding="utf-8", errors="replace")
                 initial_log = "\n".join(content.splitlines()[-INIT_TAIL_LINES:])
@@ -1077,10 +1176,7 @@ class IntegratedGUI(tk.Tk):
             args.append("--delete")  # セッション配下をサーバと一致させる
     
         try:
-            # 失敗時に例外を投げる既存のラッパを使用（なければ subprocess.run でもOK）
-            self._run_sync_command(args + [f"{REMOTE_SERVER}:{remote}", local],
-                                   check=True, capture_output=True, timeout=10)
-            # ツリーはローカルを見ているので pull 後に更新
+            self._sync_pull_dir(remote, local, delete=delete, timeout=120)
             self._refresh_file_tree()
             try:
                 self._set_status("Pulled session from server")
@@ -1237,10 +1333,11 @@ class IntegratedGUI(tk.Tk):
         remote_staged_file = f"{remote_session_root}/.staged_for_download"
         local_cache_path = info["local_cache_path"]
         try:
-            self._run_sync_command(
-                ["rsync", "-az", f"{REMOTE_SERVER}:{remote_staged_file}", str(local_cache_path)],
-                check=True, timeout=10, capture_output=True
-            )
+            # self._run_sync_command(
+            #     ["rsync", "-az", f"{REMOTE_SERVER}:{remote_staged_file}", str(local_cache_path)],
+            #     check=True, timeout=10, capture_output=True
+            # )
+            self._sync_pull_file(remote_staged_file, str(local_cache_path), timeout=60)
         except subprocess.CalledProcessError as e:
             messagebox.showerror("Download Error", f"Failed to download staged file:\n{e.stderr.decode()}")
             return
@@ -1264,7 +1361,8 @@ class IntegratedGUI(tk.Tk):
                 for cmd in commands:
                     f.write(cmd + "\n")
             remote_session_dir = f"{REMOTE_SESSIONS_PATH}/{self.current_watcher_id}/{self.current_session_name}/"
-            self._run_sync_command(["rsync", "-az", str(self.command_file), f"{REMOTE_SERVER}:{remote_session_dir}"], check=True, timeout=5)
+            # self._run_sync_command(["rsync", "-az", str(self.command_file), f"{REMOTE_SERVER}:{remote_session_dir}"], check=True, timeout=5)
+            self._sync_push_file(str(self.command_file), f"{remote_session_dir}commands.txt", timeout=30)
         except Exception as e:
             self.terminal.append_log(f"[GUI] Failed to send command to watcher: {e}\n")
 
@@ -1277,7 +1375,8 @@ class IntegratedGUI(tk.Tk):
         try:
             local_dir = LOCAL_SESSIONS_ROOT / self.current_watcher_id / self.current_session_name
             remote_log_path = f"{REMOTE_SESSIONS_PATH}/{self.current_watcher_id}/{self.current_session_name}/commands.log"
-            self._run_sync_command(["rsync", "-az", f"{REMOTE_SERVER}:{remote_log_path}", str(local_dir)], timeout=5)
+            # self._run_sync_command(["rsync", "-az", f"{REMOTE_SERVER}:{remote_log_path}", str(local_dir)], timeout=5)
+            self._sync_pull_file(remote_log_path, str(self.log_file), timeout=30)
         except Exception as e: 
             print(f"Log sync failed: {e}")
             self._log_fetch_timer = self.after(LOG_FETCH_INTERVAL_MS, self._fetch_log_updates)
@@ -1342,11 +1441,16 @@ class IntegratedGUI(tk.Tk):
                 f"{self.current_watcher_id}/"
                 f"{self.current_session_name}/.ls_result.txt"
             )
-            self._run_sync_command(
-                ["rsync", "-az", f"{REMOTE_SERVER}:{remote_ls_result_path}", str(session_root)],
-                check=True, timeout=5, capture_output=True
-            )
+            # self._run_sync_command(
+            #     # ["rsync", "-az", f"{REMOTE_SERVER}:{remote_ls_result_path}", str(session_root)],
+            #     # check=True, timeout=5, capture_output=True
+            #     # )
+            #     # local_ls_result_file = session_root / ".ls_result.txt"
+            #     # フォールバック版：
+            #     []
+            # )
             local_ls_result_file = session_root / ".ls_result.txt"
+            self._sync_pull_file(remote_ls_result_path, str(local_ls_result_file), timeout=30)
             if not local_ls_result_file.exists():
                 return
             ls_content = local_ls_result_file.read_text(encoding="utf-8", errors="replace")
@@ -1447,11 +1551,7 @@ class IntegratedGUI(tk.Tk):
                                check=True, capture_output=True, timeout=5)
     
         # ファイルを一意名でアップロード
-        self._run_sync_command(
-            ["rsync", "-az", "--inplace", str(local_cache_path),
-             f"{REMOTE_SERVER}:{remote_staged_dir}/{token}"],
-            check=True, capture_output=True, timeout=10
-        )
+        self._sync_push_file(str(local_cache_path), f"{remote_staged_dir}/{token}", timeout=60)
     
         # Watcher に「<token> を <relpath> へ移動せよ」と指示
         self._send_command_to_watcher(f"_internal_move_staged_file::{token}::{remote_relative_path}")
