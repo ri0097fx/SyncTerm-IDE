@@ -25,6 +25,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import tkinter.font as tkfont
 import uuid
+import shutil
 
 # --- Optional Pillow for image preview ---
 try:
@@ -50,6 +51,10 @@ from config import (
 
 from components.terminal import TerminalFrame
 from components.editor import EditorView 
+
+
+
+
 
 class IntegratedGUI(tk.Tk):
     def __init__(self):
@@ -215,7 +220,14 @@ class IntegratedGUI(tk.Tk):
         self._update_watcher_list()
         self.protocol("WM_DELETE_WINDOW", self._on_closing)
         self.is_loading = False
-
+        
+    def _rsync(self, *extra_args, **popen_kwargs):
+        ssh_opt = "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+        base = ["rsync", "-az", "-e", ssh_opt]
+        # rsync 未インストールなら早めに気付けるようにメッセージ
+        if shutil.which("rsync") is None:
+            raise FileNotFoundError("rsync not found on PATH. Install rsync or use WSL/msys2.")
+        return self._run_sync_command(base + list(extra_args), **popen_kwargs)
     # ---------------------------
     # 保存/復元
     # ---------------------------
@@ -322,15 +334,19 @@ class IntegratedGUI(tk.Tk):
     def _update_watcher_list(self):
         # サーバー → ローカルに _registry を取得（ローカルのみ --delete はOK）
         try:
+            self._rsync("--delete",
+                f"{REMOTE_SERVER}:{REMOTE_REGISTRY_PATH}",
+                f"{str(LOCAL_REGISTRY_DIR)}/",
+                check=True, capture_output=True, timeout=15
+            )
+        except FileNotFoundError:
+            # rsync なし → scp で *.json だけ取得
             LOCAL_REGISTRY_DIR.mkdir(parents=True, exist_ok=True)
             self._run_sync_command(
-                ["rsync", "-az", "--delete",
-                 f"{REMOTE_SERVER}:{REMOTE_REGISTRY_PATH}",
-                 f"{str(LOCAL_REGISTRY_DIR)}/"],
-                check=True, capture_output=True, timeout=5
+                ["scp", f"{REMOTE_SERVER}:{REMOTE_REGISTRY_PATH}*.json", str(LOCAL_REGISTRY_DIR)],
+                check=True, timeout=15
             )
-        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
-            return
+
     
         now = time.time()
         HB_KEYS = ("last_heartbeat", "last_seen", "heartbeat_ts")
