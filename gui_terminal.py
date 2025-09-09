@@ -26,6 +26,7 @@ from tkinter import ttk, messagebox, filedialog
 import tkinter.font as tkfont
 import uuid
 import shutil
+import stat
 
 # --- Optional Pillow for image preview ---
 try:
@@ -59,21 +60,23 @@ if os.name == "nt":
     import ctypes
     from ctypes import wintypes
 
-def _is_windows_reparse_point(path: Path) -> bool:
-    """Windows: ジャンクション/シンボリックリンク等の reparse point を検出"""
+def _safe_is_dir(p: Path) -> bool:
+    """例外を握りつぶしてディレクトリ判定。リンクは辿らない前提でOK。"""
+    try:
+        return p.is_dir()
+    except OSError:
+        return False
+
+def _is_windows_reparse_point(p: Path) -> bool:
+    """Windows のジャンクション等（リパースポイント）を検出。"""
     if os.name != "nt":
         return False
     try:
-        FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
-        GetFileAttributesW = ctypes.windll.kernel32.GetFileAttributesW
-        GetFileAttributesW.argtypes = [wintypes.LPCWSTR]
-        GetFileAttributesW.restype  = wintypes.DWORD
-        attrs = GetFileAttributesW(str(path))
-        if attrs == 0xFFFFFFFF:  # INVALID_FILE_ATTRIBUTES
-            return False
-        return bool(attrs & FILE_ATTRIBUTE_REPARSE_POINT)
+        attrs = os.stat(str(p), follow_symlinks=False).st_file_attributes
+        return bool(attrs & stat.FILE_ATTRIBUTE_REPARSE_POINT)
     except Exception:
         return False
+
     
 def _wsl_available() -> bool:
     return IS_WIN and shutil.which("wsl") is not None
@@ -1272,53 +1275,61 @@ class IntegratedGUI(tk.Tk):
         if not root_path or not root_path.is_dir(): return
         root_iid = self.file_tree.insert("", "end", text=str(root_path), open=True)
         self._insert_tree_items(root_path, root_iid)
-
-    def _safe_is_dir(p: Path) -> bool:
-        try:
-            return p.is_dir()
-        except OSError:
-            return False  # アクセス不可/壊れたリンクなどはファイル扱いに
     
     def _insert_tree_items(self, path: Path, parent_iid: str):
         try:
-            if parent_iid not in self.path_to_iid.values():
-                self.path_to_iid[str(path)] = parent_iid
+            # 逆引きマップ更新
+            self.path_to_iid[str(path)] = parent_iid
     
-            # ← path.iterdir() も OSError を投げることがある
-            items = sorted(
-                path.iterdir(),
-                key=lambda p: (not _safe_is_dir(p), p.name.casefold())  # casefold は lower より堅牢
-            )
+            # iterdir 自体が例外になるケースもあるので分離
+            try:
+                entries = list(path.iterdir())
+            except (PermissionError, FileNotFoundError, OSError):
+                return
     
-            for item in items:
+            # ディレクトリ優先 → 名前順（casefold は lower より堅牢）
+            entries.sort(key=lambda p: (not _safe_is_dir(p), p.name.casefold()))
+    
+            for item in entries:
                 tags = []
                 item_icon = ""
-                # （以下は元の処理のまま）
-                is_link_like = False
+    
+                # --- リンク系の検出（Windows のリパースポイントも含める）---
                 try:
                     is_link_like = item.is_symlink()
                 except OSError:
-                    is_link_like = False
-                if os.name == "nt":
-                    is_link_like = is_link_like or _is_windows_reparse_point(item)
+                    # 属性取得すら失敗するケースは「リンク相当」とみなして辿らない
+                    is_link_like = True
+    
+                if os.name == "nt" and not is_link_like:
+                    if _is_windows_reparse_point(item):
+                        is_link_like = True
     
                 if is_link_like:
                     tags.append("symlink")
                     item_icon = self.symlink_icon
     
+                # ノード追加
                 iid = self.file_tree.insert(
-                    parent_iid, "end", text=item.name, image=item_icon,
-                    open=False, values=[str(item)], tags=tags
+                    parent_iid, "end",
+                    text=item.name, image=item_icon, open=False,
+                    values=[str(item)], tags=tags
                 )
                 self.path_to_iid[str(item)] = iid
     
-                if item.is_dir() and not is_link_like:
-                    self._insert_tree_items(item, iid)
                 if is_link_like:
-                    self.file_tree.insert(iid, "end", text="Loading...")
+                    # ★三角を必ず出すためにダミー子を入れる（中身は仮想展開で取得）
+                    self.file_tree.insert(iid, "end", text="Loading...", tags=["placeholder"])
+                    continue
+    
+                # 通常ディレクトリのみ再帰（安全ラッパ経由）
+                if _safe_is_dir(item):
+                    self._insert_tree_items(item, iid)
+    
         except (PermissionError, FileNotFoundError, OSError):
-            # Windows のリパースポイント/アクセス拒否/デバイス未準備などを丸ごと無視
+            # アクセス拒否／未準備／壊れリンクなどは無視
             return
+
 
     def _populate_virtual_tree(self, parent_iid: str, ls_result: str):
         """仮想展開結果をツリーに挿入"""
