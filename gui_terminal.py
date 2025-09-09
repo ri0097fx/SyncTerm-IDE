@@ -1273,18 +1273,34 @@ class IntegratedGUI(tk.Tk):
         root_iid = self.file_tree.insert("", "end", text=str(root_path), open=True)
         self._insert_tree_items(root_path, root_iid)
 
+    def _safe_is_dir(p: Path) -> bool:
+        try:
+            return p.is_dir()
+        except OSError:
+            return False  # アクセス不可/壊れたリンクなどはファイル扱いに
+    
     def _insert_tree_items(self, path: Path, parent_iid: str):
         try:
             if parent_iid not in self.path_to_iid.values():
-                 self.path_to_iid[str(path)] = parent_iid
+                self.path_to_iid[str(path)] = parent_iid
     
-            items = sorted(list(path.iterdir()), key=lambda p: (not p.is_dir(), p.name.lower()))
+            # ← path.iterdir() も OSError を投げることがある
+            items = sorted(
+                path.iterdir(),
+                key=lambda p: (not _safe_is_dir(p), p.name.casefold())  # casefold は lower より堅牢
+            )
+    
             for item in items:
                 tags = []
                 item_icon = ""
-    
-                # ★ ここを強化：Windows の reparse point も「リンク」扱いにする
-                is_link_like = item.is_symlink() or _is_windows_reparse_point(item)
+                # （以下は元の処理のまま）
+                is_link_like = False
+                try:
+                    is_link_like = item.is_symlink()
+                except OSError:
+                    is_link_like = False
+                if os.name == "nt":
+                    is_link_like = is_link_like or _is_windows_reparse_point(item)
     
                 if is_link_like:
                     tags.append("symlink")
@@ -1296,17 +1312,13 @@ class IntegratedGUI(tk.Tk):
                 )
                 self.path_to_iid[str(item)] = iid
     
-                # 通常ディレクトリのみ再帰展開（リンクはしない）
                 if item.is_dir() and not is_link_like:
                     self._insert_tree_items(item, iid)
-    
-                # ★ リンク見なしたものには必ずダミー子をぶら下げる（Windowsでも有効化）
                 if is_link_like:
                     self.file_tree.insert(iid, "end", text="Loading...")
-        except (PermissionError, FileNotFoundError):
-            pass
-
-
+        except (PermissionError, FileNotFoundError, OSError):
+            # Windows のリパースポイント/アクセス拒否/デバイス未準備などを丸ごと無視
+            return
 
     def _populate_virtual_tree(self, parent_iid: str, ls_result: str):
         """仮想展開結果をツリーに挿入"""
