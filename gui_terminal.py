@@ -1256,24 +1256,44 @@ class IntegratedGUI(tk.Tk):
     def _insert_tree_items(self, path: Path, parent_iid: str):
         try:
             if parent_iid not in self.path_to_iid.values():
-                 self.path_to_iid[str(path)] = parent_iid
-            items = sorted(list(path.iterdir()), key=lambda p: (not p.is_dir(), p.name.lower()))
-            for item in items:
-                tags = []
-                item_icon = "" 
-                if item.is_symlink():
-                    tags.append("symlink")
-                    item_icon = self.symlink_icon
-                iid = self.file_tree.insert(parent_iid, "end", text=item.name, 
-                                            image=item_icon,
-                                            open=False, values=[str(item)], tags=tags)
-                self.path_to_iid[str(item)] = iid
-                if item.is_dir() and not item.is_symlink():
-                    self._insert_tree_items(item, iid)
-                if "symlink" in tags:
-                    self.file_tree.insert(iid, "end", text="Loading...")
-        except (PermissionError, FileNotFoundError):
+                self.path_to_iid[str(path)] = parent_iid
+    
+            entries = []
+            with os.scandir(path) as it:
+                for e in it:
+                    # どちらもリンクを辿らない判定
+                    try:
+                        is_link = e.is_symlink()
+                    except OSError:
+                        is_link = False
+                    try:
+                        is_dir_nofollow = e.is_dir(follow_symlinks=False)
+                    except OSError:
+                        is_dir_nofollow = False
+    
+                    # ディレクトリ優先でソート（リンクは辿らない判断でOK）
+                    entries.append((not is_dir_nofollow, e.name.lower(), e, is_link, is_dir_nofollow))
+    
+            for _, _, e, is_link, is_dir_nf in sorted(entries, key=lambda t: (t[0], t[1])):
+                tags = ["symlink"] if is_link else []
+                icon = self.symlink_icon if is_link else ""
+                iid = self.file_tree.insert(
+                    parent_iid, "end", text=e.name, image=icon, open=False,
+                    values=[e.path], tags=tags
+                )
+                self.path_to_iid[str(e.path)] = iid
+    
+                # 通常ディレクトリだけ再帰。リンクは辿らない
+                if is_dir_nf and not is_link:
+                    self._insert_tree_items(Path(e.path), iid)
+    
+                # シンボリックリンクにはダミー子を下げて、展開時にリモートLISTを発火
+                if is_link:
+                    self.file_tree.insert(iid, "end", text="Loading...", tags=["placeholder"])
+        except (PermissionError, FileNotFoundError, OSError):
+            # アクセス不能・壊れたリンクを無視
             pass
+
 
     def _populate_virtual_tree(self, parent_iid: str, ls_result: str):
         """仮想展開結果をツリーに挿入"""
