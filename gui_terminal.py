@@ -82,8 +82,7 @@ def _wsl_available() -> bool:
     return IS_WIN and shutil.which("wsl") is not None
 
 def _should_use_wsl_rsync() -> bool:
-    # Windows で rsync が見つからず、WSL が使えるなら WSL 経由
-    return IS_WIN and shutil.which("rsync") is None and _wsl_available()
+    return IS_WIN and _wsl_available()
 
 def _win_to_wsl_path(p: str) -> str:
     # C:\Users\me\foo -> /mnt/c/Users/me/foo
@@ -368,44 +367,74 @@ class IntegratedGUI(tk.Tk):
         self.destroy()
     
     def _sync_pull_file(self, remote_file: str, local_file: str, timeout=30):
+        """サーバー -> ローカル（単一ファイル）"""
         remote_file = _unix(remote_file)
-        local_file  = Path(local_file)
-        local_file.parent.mkdir(parents=True, exist_ok=True)
+        local_path = Path(local_file)
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+    
         try:
-            return self._run_sync_command(
-                ["rsync", "-az", f"{REMOTE_SERVER}:'{remote_file}'", str(local_file)],
-                check=True, timeout=timeout
-            )
+            if _should_use_wsl_rsync():
+                # WSL rsync を使う（ローカルは /mnt/c/... に変換）
+                dst = _win_to_wsl_path(str(local_path))
+                cmd = ["wsl", "-e", "rsync", "-az", f"{REMOTE_SERVER}:{remote_file}", dst]
+                return self._run_sync_command(cmd, check=True, timeout=timeout)
+            else:
+                # ネイティブ rsync
+                return self._run_sync_command(
+                    ["rsync", "-az", f"{REMOTE_SERVER}:{remote_file}", str(local_path)],
+                    check=True, timeout=timeout
+                )
         except Exception:
-            if not _cmd_exists("scp"):
+            # フォールバック: scp（Windows なら WSL scp を使用）
+            if not _cmd_exists("scp") and not (IS_WIN and _wsl_available()):
                 raise
-            return self._run_sync_command(
-                ["scp", f"{REMOTE_SERVER}:'{remote_file}'", str(local_file)],
-                check=True, timeout=timeout
-            )
+            if IS_WIN:
+                dst = _win_to_wsl_path(str(local_path))
+                return self._run_sync_command(
+                    ["scp", f"{REMOTE_SERVER}:{remote_file}", dst],
+                    check=True, timeout=timeout
+                )
+            else:
+                return self._run_sync_command(
+                    ["scp", f"{REMOTE_SERVER}:{remote_file}", str(local_path)],
+                    check=True, timeout=timeout
+                )
+
     
     def _sync_push_file(self, local_file: str, remote_file: str, timeout=30):
-        local_file  = _unix(local_file)
+        """ローカル -> サーバー（単一ファイル）"""
+        local_file = _unix(local_file)
         remote_file = _unix(remote_file)
         try:
-            return self._run_sync_command(
-                ["rsync", "-az", local_file, f"{REMOTE_SERVER}:'{remote_file}'"],
-                check=True, timeout=timeout
-            )
+            if _should_use_wsl_rsync():
+                src = _win_to_wsl_path(local_file)
+                cmd = ["wsl", "-e", "rsync", "-az", src, f"{REMOTE_SERVER}:{remote_file}"]
+                return self._run_sync_command(cmd, check=True, timeout=timeout)
+            else:
+                return self._run_sync_command(
+                    ["rsync", "-az", local_file, f"{REMOTE_SERVER}:{remote_file}"],
+                    check=True, timeout=timeout
+                )
         except Exception:
-            if not _cmd_exists("scp"):
+            if not _cmd_exists("scp") and not (IS_WIN and _wsl_available()):
                 raise
             remote_dir = posixpath.dirname(remote_file) or "."
+            # mkdir はローカルパス不要なのでそのままでOK（_run_sync_command が WSL に包む）
             self._run_sync_command(
                 ["ssh", REMOTE_SERVER, f"mkdir -p '{remote_dir}'"],
                 check=True, timeout=max(5, timeout//3), capture_output=True
             )
-            return self._run_sync_command(
-                ["scp", local_file, f"{REMOTE_SERVER}:'{remote_file}'"],
-                check=True, timeout=timeout
-            )
-
-
+            if IS_WIN:
+                src = _win_to_wsl_path(local_file)
+                return self._run_sync_command(
+                    ["scp", src, f"{REMOTE_SERVER}:{remote_file}"],
+                    check=True, timeout=timeout
+                )
+            else:
+                return self._run_sync_command(
+                    ["scp", local_file, f"{REMOTE_SERVER}:{remote_file}"],
+                    check=True, timeout=timeout
+                )
     
     def _sync_pull_dir(self, remote_dir: str, local_dir: str, delete=False, timeout=60):
         """サーバー -> ローカル（ディレクトリ）"""
@@ -431,14 +460,22 @@ class IntegratedGUI(tk.Tk):
                     check=True, timeout=timeout
                 )
         except Exception:
-            if not _cmd_exists("scp"):
+            if not _cmd_exists("scp") and not (IS_WIN and _wsl_available()):
                 raise
             if delete:
                 _wipe_children(local_dir_path)
-            return self._run_sync_command(
-                ["scp", "-r", f"{REMOTE_SERVER}:{remote_dir}.", str(local_dir_path) + "/"],
-                check=True, timeout=timeout
-            )
+            if IS_WIN:
+                dst = _win_to_wsl_path(str(local_dir_path)) + "/"
+                return self._run_sync_command(
+                    ["scp", "-r", f"{REMOTE_SERVER}:{remote_dir}.", dst],
+                    check=True, timeout=timeout
+                )
+            else:
+                return self._run_sync_command(
+                    ["scp", "-r", f"{REMOTE_SERVER}:{remote_dir}.", str(local_dir_path) + "/"],
+                    check=True, timeout=timeout
+                )
+
 
     def _sync_push_dir(self, local_dir: str, remote_dir: str, delete=False, timeout=60):
         """ローカル -> サーバー（ディレクトリ）"""
@@ -463,16 +500,25 @@ class IntegratedGUI(tk.Tk):
                     check=True, timeout=timeout
                 )
         except Exception:
-            if not _cmd_exists("scp"):
+            if not _cmd_exists("scp") and not (IS_WIN and _wsl_available()):
                 raise
             self._run_sync_command(
                 ["ssh", REMOTE_SERVER, f"mkdir -p '{remote_dir}'"],
                 check=True, timeout=max(5, timeout//3), capture_output=True
             )
-            return self._run_sync_command(
-                ["scp", "-r", local_dir + ".", f"{REMOTE_SERVER}:{remote_dir}"],
-                check=True, timeout=timeout
-            )
+            if IS_WIN:
+                # 末尾の '.' はディレクトリ内容を送るため
+                src = _win_to_wsl_path(local_dir) + "."
+                return self._run_sync_command(
+                    ["scp", "-r", src, f"{REMOTE_SERVER}:{remote_dir}"],
+                    check=True, timeout=timeout
+                )
+            else:
+                return self._run_sync_command(
+                    ["scp", "-r", local_dir + ".", f"{REMOTE_SERVER}:{remote_dir}"],
+                    check=True, timeout=timeout
+                )
+
 
 
     # ---------------------------
@@ -482,8 +528,18 @@ class IntegratedGUI(tk.Tk):
     def _hide_sync_indicator(self): self.sync_indicator_label.config(text="")
     def _run_sync_command(self, cmd_list, **kwargs):
         self._show_sync_indicator(); self.update_idletasks()
-        try: return subprocess.run(cmd_list, **kwargs)
-        finally: self._hide_sync_indicator()
+        try:
+            if IS_WIN:
+                if not _wsl_available():
+                    raise FileNotFoundError(
+                        "WSL (wsl.exe) が見つかりません。WSL をインストールし、ディストリ内に rsync/ssh/scp を入れてください。"
+                    )
+                if cmd_list and str(cmd_list[0]).lower() not in ("wsl", "wsl.exe"):
+                    cmd_list = ["wsl", "-e"] + list(cmd_list)
+            return subprocess.run(cmd_list, **kwargs)
+        finally:
+            self._hide_sync_indicator()
+
 
     def _update_watcher_list(self):
         # サーバー → ローカルに _registry を取得（ローカルのみ --delete はOK）
@@ -1168,7 +1224,12 @@ class IntegratedGUI(tk.Tk):
                 self.after_cancel(self._log_fetch_timer)
             self._fetch_log_updates()
     def _to_posix_rel(self, rel) -> str:
-        s = rel.as_posix() if isinstance(rel, Path) else str(rel).replace('\\', '/')
+        """Windows の \ 区切りを / に統一。先頭の / は付けずに相対のまま返す。"""
+        if isinstance(rel, Path):
+            s = rel.as_posix()
+        else:
+            s = str(rel).replace('\\', '/')
+        # 相対パスとして扱う想定なので万一先頭に / が来ても外す
         while s.startswith('/'):
             s = s[1:]
         return s
@@ -1638,11 +1699,9 @@ class IntegratedGUI(tk.Tk):
         except tk.TclError: pass
 
     def _upload_cached_remote_file(self, remote_relative_path: str, local_cache_path: Path):
+        """保存後: サーバ <session>/.staged_uploads/<token> に置き、Watcher に移動指示"""
         if not (self.current_watcher_id and self.current_session_name):
             return
-    
-        # ★ 追加: 常に POSIX 相対へ
-        remote_relative_path = self._to_posix_rel(remote_relative_path)
     
         wid  = Path(self.current_watcher_id).stem
         sess = self.current_session_name
@@ -1651,23 +1710,21 @@ class IntegratedGUI(tk.Tk):
         remote_session_root = f"{REMOTE_SESSIONS_PATH}/{wid}/{sess}"
         remote_staged_dir   = f"{remote_session_root}/.staged_uploads"
     
-        # mkdir（remote 側）— quoting あり
-        self._run_sync_command(
-            ["ssh", REMOTE_SERVER, f"mkdir -p '{remote_staged_dir}'"],
-            check=True, capture_output=True, timeout=5
-        )
+        # ディレクトリ作成（サーバ）
+        self._run_sync_command(["ssh", REMOTE_SERVER, f"mkdir -p '{remote_staged_dir}'"],
+                               check=True, capture_output=True, timeout=5)
     
-        # アップロード — リモートパスを必ず quote
+        # ファイルを一意名でアップロード
         self._sync_push_file(str(local_cache_path), f"{remote_staged_dir}/{token}", timeout=60)
     
-        # Watcher に move 指示（POSIX 相対パス）
+        # Watcher に「<token> を <relpath> へ移動せよ」と指示
         self._send_command_to_watcher(f"_internal_move_staged_file::{token}::{remote_relative_path}")
     
+        # 任意: 反映ログの即時取得
         try:
             self._fetch_log_updates()
         except Exception:
             pass
-
     
     def _calc_local_cache_path(self, watcher_id: str, session: str, remote_relative_path: str) -> Path:
         """
