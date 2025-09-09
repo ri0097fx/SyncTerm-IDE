@@ -334,19 +334,15 @@ class IntegratedGUI(tk.Tk):
     def _update_watcher_list(self):
         # サーバー → ローカルに _registry を取得（ローカルのみ --delete はOK）
         try:
-            self._rsync("--delete",
-                f"{REMOTE_SERVER}:{REMOTE_REGISTRY_PATH}",
-                f"{str(LOCAL_REGISTRY_DIR)}/",
-                check=True, capture_output=True, timeout=15
-            )
-        except FileNotFoundError:
-            # rsync なし → scp で *.json だけ取得
             LOCAL_REGISTRY_DIR.mkdir(parents=True, exist_ok=True)
             self._run_sync_command(
-                ["scp", f"{REMOTE_SERVER}:{REMOTE_REGISTRY_PATH}*.json", str(LOCAL_REGISTRY_DIR)],
-                check=True, timeout=15
+                ["rsync", "-az", "--delete",
+                 f"{REMOTE_SERVER}:{REMOTE_REGISTRY_PATH}",
+                 f"{str(LOCAL_REGISTRY_DIR)}/"],
+                check=True, capture_output=True, timeout=5
             )
-
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+            return
     
         now = time.time()
         HB_KEYS = ("last_heartbeat", "last_seen", "heartbeat_ts")
