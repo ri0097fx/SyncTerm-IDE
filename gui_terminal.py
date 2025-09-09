@@ -53,6 +53,22 @@ from components.terminal import TerminalFrame
 from components.editor import EditorView 
 import posixpath
 
+IS_WIN = os.name == "nt"
+
+def _wsl_available() -> bool:
+    return IS_WIN and shutil.which("wsl") is not None
+
+def _should_use_wsl_rsync() -> bool:
+    # Windows で rsync が見つからず、WSL が使えるなら WSL 経由
+    return IS_WIN and shutil.which("rsync") is None and _wsl_available()
+
+def _win_to_wsl_path(p: str) -> str:
+    # C:\Users\me\foo -> /mnt/c/Users/me/foo
+    p = os.path.abspath(p)
+    drive, rest = os.path.splitdrive(p)
+    drive = (drive or "C:").rstrip(":").lower()
+    return rf"/mnt/{drive}{rest.replace('\\', '/')}"
+
 def _cmd_exists(name: str) -> bool:
     return shutil.which(name) is not None
 
@@ -329,30 +345,45 @@ class IntegratedGUI(tk.Tk):
     def _sync_pull_file(self, remote_file: str, local_file: str, timeout=30):
         """サーバー -> ローカル（単一ファイル）"""
         remote_file = _unix(remote_file)
-        local_file  = Path(local_file)
-        local_file.parent.mkdir(parents=True, exist_ok=True)
+        local_path = Path(local_file)
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+    
         try:
-            return self._run_sync_command(
-                ["rsync", "-az", f"{REMOTE_SERVER}:{remote_file}", str(local_file)],
-                check=True, timeout=timeout
-            )
+            if _should_use_wsl_rsync():
+                # WSL rsync を使う（ローカルは /mnt/c/... に変換）
+                dst = _win_to_wsl_path(str(local_path))
+                cmd = ["wsl", "-e", "rsync", "-az", f"{REMOTE_SERVER}:{remote_file}", dst]
+                return self._run_sync_command(cmd, check=True, timeout=timeout)
+            else:
+                # ネイティブ rsync
+                return self._run_sync_command(
+                    ["rsync", "-az", f"{REMOTE_SERVER}:{remote_file}", str(local_path)],
+                    check=True, timeout=timeout
+                )
         except Exception:
+            # フォールバック: Windows の scp
             if not _cmd_exists("scp"):
                 raise
             return self._run_sync_command(
-                ["scp", f"{REMOTE_SERVER}:{remote_file}", str(local_file)],
+                ["scp", f"{REMOTE_SERVER}:{remote_file}", str(local_path)],
                 check=True, timeout=timeout
             )
+
     
     def _sync_push_file(self, local_file: str, remote_file: str, timeout=30):
         """ローカル -> サーバー（単一ファイル）"""
-        local_file  = _unix(local_file)
+        local_file = _unix(local_file)
         remote_file = _unix(remote_file)
         try:
-            return self._run_sync_command(
-                ["rsync", "-az", local_file, f"{REMOTE_SERVER}:{remote_file}"],
-                check=True, timeout=timeout
-            )
+            if _should_use_wsl_rsync():
+                src = _win_to_wsl_path(local_file)
+                cmd = ["wsl", "-e", "rsync", "-az", src, f"{REMOTE_SERVER}:{remote_file}"]
+                return self._run_sync_command(cmd, check=True, timeout=timeout)
+            else:
+                return self._run_sync_command(
+                    ["rsync", "-az", local_file, f"{REMOTE_SERVER}:{remote_file}"],
+                    check=True, timeout=timeout
+                )
         except Exception:
             if not _cmd_exists("scp"):
                 raise
@@ -365,45 +396,64 @@ class IntegratedGUI(tk.Tk):
                 ["scp", local_file, f"{REMOTE_SERVER}:{remote_file}"],
                 check=True, timeout=timeout
             )
+
     
     def _sync_pull_dir(self, remote_dir: str, local_dir: str, delete=False, timeout=60):
         """サーバー -> ローカル（ディレクトリ）"""
         remote_dir = _unix(remote_dir.rstrip("/") + "/")
-        local_dir  = Path(local_dir)
-        local_dir.mkdir(parents=True, exist_ok=True)
+        local_dir_path = Path(local_dir)
+        local_dir_path.mkdir(parents=True, exist_ok=True)
         try:
-            # まず rsync
-            args = ["rsync", "-az"]
-            if delete: args.append("--delete")
-            return self._run_sync_command(
-                args + [f"{REMOTE_SERVER}:{remote_dir}", str(local_dir) + "/"],
-                check=True, timeout=timeout
-            )
+            if _should_use_wsl_rsync():
+                dst = _win_to_wsl_path(str(local_dir_path)) + "/"
+                args = ["wsl", "-e", "rsync", "-az"]
+                if delete:
+                    args.append("--delete")
+                return self._run_sync_command(
+                    args + [f"{REMOTE_SERVER}:{remote_dir}", dst],
+                    check=True, timeout=timeout
+                )
+            else:
+                args = ["rsync", "-az"]
+                if delete:
+                    args.append("--delete")
+                return self._run_sync_command(
+                    args + [f"{REMOTE_SERVER}:{remote_dir}", str(local_dir_path) + "/"],
+                    check=True, timeout=timeout
+                )
         except Exception:
-            # rsync 失敗時は scp（delete の厳密一致は不可。必要ならローカルを空にして近似）
             if not _cmd_exists("scp"):
                 raise
             if delete:
-                _wipe_children(local_dir)
+                _wipe_children(local_dir_path)
             return self._run_sync_command(
-                ["scp", "-r", f"{REMOTE_SERVER}:{remote_dir}.", str(local_dir) + "/"],
+                ["scp", "-r", f"{REMOTE_SERVER}:{remote_dir}.", str(local_dir_path) + "/"],
                 check=True, timeout=timeout
             )
-    
+
     def _sync_push_dir(self, local_dir: str, remote_dir: str, delete=False, timeout=60):
         """ローカル -> サーバー（ディレクトリ）"""
-        local_dir  = _unix(local_dir.rstrip("/") + "/")
+        local_dir = _unix(local_dir.rstrip("/") + "/")
         remote_dir = _unix(remote_dir.rstrip("/") + "/")
         try:
-            # まず rsync
-            args = ["rsync", "-az"]
-            if delete: args.append("--delete")
-            return self._run_sync_command(
-                args + [local_dir, f"{REMOTE_SERVER}:{remote_dir}"],
-                check=True, timeout=timeout
-            )
+            if _should_use_wsl_rsync():
+                src = _win_to_wsl_path(local_dir) + "/"
+                args = ["wsl", "-e", "rsync", "-az"]
+                if delete:
+                    args.append("--delete")
+                return self._run_sync_command(
+                    args + [src, f"{REMOTE_SERVER}:{remote_dir}"],
+                    check=True, timeout=timeout
+                )
+            else:
+                args = ["rsync", "-az"]
+                if delete:
+                    args.append("--delete")
+                return self._run_sync_command(
+                    args + [local_dir, f"{REMOTE_SERVER}:{remote_dir}"],
+                    check=True, timeout=timeout
+                )
         except Exception:
-            # rsync 失敗時は scp（delete 厳密対応なし。上書き/追加のみ）
             if not _cmd_exists("scp"):
                 raise
             self._run_sync_command(
@@ -414,6 +464,7 @@ class IntegratedGUI(tk.Tk):
                 ["scp", "-r", local_dir + ".", f"{REMOTE_SERVER}:{remote_dir}"],
                 check=True, timeout=timeout
             )
+
 
     # ---------------------------
     # 同期／Watcher一覧
