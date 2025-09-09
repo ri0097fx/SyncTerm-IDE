@@ -368,47 +368,30 @@ class IntegratedGUI(tk.Tk):
         self.destroy()
     
     def _sync_pull_file(self, remote_file: str, local_file: str, timeout=30):
-        """サーバー -> ローカル（単一ファイル）"""
         remote_file = _unix(remote_file)
-        local_path = Path(local_file)
-        local_path.parent.mkdir(parents=True, exist_ok=True)
-    
+        local_file  = Path(local_file)
+        local_file.parent.mkdir(parents=True, exist_ok=True)
         try:
-            if _should_use_wsl_rsync():
-                # WSL rsync を使う（ローカルは /mnt/c/... に変換）
-                dst = _win_to_wsl_path(str(local_path))
-                cmd = ["wsl", "-e", "rsync", "-az", f"{REMOTE_SERVER}:{remote_file}", dst]
-                return self._run_sync_command(cmd, check=True, timeout=timeout)
-            else:
-                # ネイティブ rsync
-                return self._run_sync_command(
-                    ["rsync", "-az", f"{REMOTE_SERVER}:{remote_file}", str(local_path)],
-                    check=True, timeout=timeout
-                )
+            return self._run_sync_command(
+                ["rsync", "-az", f"{REMOTE_SERVER}:'{remote_file}'", str(local_file)],
+                check=True, timeout=timeout
+            )
         except Exception:
-            # フォールバック: Windows の scp
             if not _cmd_exists("scp"):
                 raise
             return self._run_sync_command(
-                ["scp", f"{REMOTE_SERVER}:{remote_file}", str(local_path)],
+                ["scp", f"{REMOTE_SERVER}:'{remote_file}'", str(local_file)],
                 check=True, timeout=timeout
             )
-
     
     def _sync_push_file(self, local_file: str, remote_file: str, timeout=30):
-        """ローカル -> サーバー（単一ファイル）"""
-        local_file = _unix(local_file)
+        local_file  = _unix(local_file)
         remote_file = _unix(remote_file)
         try:
-            if _should_use_wsl_rsync():
-                src = _win_to_wsl_path(local_file)
-                cmd = ["wsl", "-e", "rsync", "-az", src, f"{REMOTE_SERVER}:{remote_file}"]
-                return self._run_sync_command(cmd, check=True, timeout=timeout)
-            else:
-                return self._run_sync_command(
-                    ["rsync", "-az", local_file, f"{REMOTE_SERVER}:{remote_file}"],
-                    check=True, timeout=timeout
-                )
+            return self._run_sync_command(
+                ["rsync", "-az", local_file, f"{REMOTE_SERVER}:'{remote_file}'"],
+                check=True, timeout=timeout
+            )
         except Exception:
             if not _cmd_exists("scp"):
                 raise
@@ -418,9 +401,10 @@ class IntegratedGUI(tk.Tk):
                 check=True, timeout=max(5, timeout//3), capture_output=True
             )
             return self._run_sync_command(
-                ["scp", local_file, f"{REMOTE_SERVER}:{remote_file}"],
+                ["scp", local_file, f"{REMOTE_SERVER}:'{remote_file}'"],
                 check=True, timeout=timeout
             )
+
 
     
     def _sync_pull_dir(self, remote_dir: str, local_dir: str, delete=False, timeout=60):
@@ -1184,12 +1168,7 @@ class IntegratedGUI(tk.Tk):
                 self.after_cancel(self._log_fetch_timer)
             self._fetch_log_updates()
     def _to_posix_rel(self, rel) -> str:
-        """Windows の \ 区切りを / に統一。先頭の / は付けずに相対のまま返す。"""
-        if isinstance(rel, Path):
-            s = rel.as_posix()
-        else:
-            s = str(rel).replace('\\', '/')
-        # 相対パスとして扱う想定なので万一先頭に / が来ても外す
+        s = rel.as_posix() if isinstance(rel, Path) else str(rel).replace('\\', '/')
         while s.startswith('/'):
             s = s[1:]
         return s
@@ -1659,9 +1638,11 @@ class IntegratedGUI(tk.Tk):
         except tk.TclError: pass
 
     def _upload_cached_remote_file(self, remote_relative_path: str, local_cache_path: Path):
-        """保存後: サーバ <session>/.staged_uploads/<token> に置き、Watcher に移動指示"""
         if not (self.current_watcher_id and self.current_session_name):
             return
+    
+        # ★ 追加: 常に POSIX 相対へ
+        remote_relative_path = self._to_posix_rel(remote_relative_path)
     
         wid  = Path(self.current_watcher_id).stem
         sess = self.current_session_name
@@ -1670,21 +1651,23 @@ class IntegratedGUI(tk.Tk):
         remote_session_root = f"{REMOTE_SESSIONS_PATH}/{wid}/{sess}"
         remote_staged_dir   = f"{remote_session_root}/.staged_uploads"
     
-        # ディレクトリ作成（サーバ）
-        self._run_sync_command(["ssh", REMOTE_SERVER, f"mkdir -p '{remote_staged_dir}'"],
-                               check=True, capture_output=True, timeout=5)
+        # mkdir（remote 側）— quoting あり
+        self._run_sync_command(
+            ["ssh", REMOTE_SERVER, f"mkdir -p '{remote_staged_dir}'"],
+            check=True, capture_output=True, timeout=5
+        )
     
-        # ファイルを一意名でアップロード
+        # アップロード — リモートパスを必ず quote
         self._sync_push_file(str(local_cache_path), f"{remote_staged_dir}/{token}", timeout=60)
     
-        # Watcher に「<token> を <relpath> へ移動せよ」と指示
+        # Watcher に move 指示（POSIX 相対パス）
         self._send_command_to_watcher(f"_internal_move_staged_file::{token}::{remote_relative_path}")
     
-        # 任意: 反映ログの即時取得
         try:
             self._fetch_log_updates()
         except Exception:
             pass
+
     
     def _calc_local_cache_path(self, watcher_id: str, session: str, remote_relative_path: str) -> Path:
         """
