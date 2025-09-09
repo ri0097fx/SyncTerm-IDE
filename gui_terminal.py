@@ -67,7 +67,9 @@ def _win_to_wsl_path(p: str) -> str:
     p = os.path.abspath(p)
     drive, rest = os.path.splitdrive(p)
     drive = (drive or "C:").rstrip(":").lower()
-    return rf"/mnt/{drive}{rest.replace('\\', '/')}"
+    rest_clean = rest.lstrip('\\/').replace('\\', '/')
+    path_wsl = f"/mnt/{drive.rstrip(':').lower()}/{rest_clean}"
+    return path_wsl
 
 def _cmd_exists(name: str) -> bool:
     return shutil.which(name) is not None
