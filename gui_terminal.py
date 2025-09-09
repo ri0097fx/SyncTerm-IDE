@@ -1450,6 +1450,10 @@ class IntegratedGUI(tk.Tk):
             remote_log_path = f"{REMOTE_SESSIONS_PATH}/{self.current_watcher_id}/{self.current_session_name}/commands.log"
             # self._run_sync_command(["rsync", "-az", f"{REMOTE_SERVER}:{remote_log_path}", str(local_dir)], timeout=5)
             self._sync_pull_file(remote_log_path, str(self.log_file), timeout=30)
+            try:
+                self._sync_pull_file(f"{REMOTE_SESSIONS_PATH}/{self.current_watcher_id}/{self.current_session_name}//.watcher_status.json", str(self.status_file), timeout=10)
+            except Exception:
+                pass  # 無くてもプロンプトはフォールバックさせる
         except Exception as e: 
             print(f"Log sync failed: {e}")
             self._log_fetch_timer = self.after(LOG_FETCH_INTERVAL_MS, self._fetch_log_updates)

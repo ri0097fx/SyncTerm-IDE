@@ -222,18 +222,30 @@ class TerminalFrame(ttk.Frame):
         self.view.mark_set(tk.INSERT, "end-1c"); self.view.see(tk.INSERT)
     
     def _show_remote_prompt(self):
+        # まだセッション未選択なら案内だけ出して終了
         if not self.app.current_session_name or not self.app.status_file:
-            if self.view.get("end-2c", "end-1c") != '\n':
-                 self.view.insert(tk.END, "\n")
+            try:
+                if self.view.index("end-1c") != "1.0" and self.view.get("end-2c", "end-1c") != "\n":
+                    self.view.insert(tk.END, "\n")
+            except tk.TclError:
+                pass
             self.view.insert(tk.END, "[GUI] Please select a watcher and session.$ ")
             self.view.mark_set("input_start", self.view.index("end-1c"))
             return
+    
+        # 入力ロック中はプロンプト更新しない
         if self.input_locked:
             return
     
-        if self.view.get("end-2c", "end-1c") != '\n':
-            self.view.insert(tk.END, "\n")
+        # 必要なら改行（バッファが空や1文字でも安全）
+        try:
+            if self.view.index("end-1c") != "1.0" and self.view.get("end-2c", "end-1c") != "\n":
+                self.view.insert(tk.END, "\n")
+        except tk.TclError:
+            pass
     
+        # ここからステータス取得（無くてもフォールバックで表示）
+        status_data = {}
         try:
             if not (self.app.current_watcher_id and self.app.current_session_name):
                 raise RuntimeError("No remote session selected")
@@ -244,41 +256,40 @@ class TerminalFrame(ttk.Frame):
                 f"{self.app.current_session_name}/.watcher_status.json"
             )
     
-            local_dir = str(self.app.status_file.parent)
-            
-            self.app._run_sync_command(
-                ["rsync", "-az", f"{REMOTE_SERVER}:{remote_status}", f"{local_dir}/"],
-                capture_output=True, timeout=5
-            )
+            # ← 生の rsync を使わず統一ヘルパで取得（Windowsでもフォールバック動作）
+            try:
+                self.app._sync_pull_file(remote_status, str(self.app.status_file), timeout=10)
+            except Exception:
+                # 無ければそのまま続行（フォールバック表示）
+                pass
     
-            status = json.loads(self.app.status_file.read_text(encoding="utf-8"))
-            
-            # +++ 変更点: conda_env を読み込み、プロンプトの接頭辞を作成 +++
-            conda_env = status.get("conda_env")
+            if self.app.status_file.exists():
+                try:
+                    status_text = self.app.status_file.read_text(encoding="utf-8", errors="replace")
+                    status_data = json.loads(status_text) if status_text.strip() else {}
+                except Exception:
+                    status_data = {}
+    
+            conda_env = status_data.get("conda_env")
             conda_prefix = f"({conda_env}) " if conda_env else ""
-            
-            user = status.get("user", "u")
-            host = status.get("host", "h")
-            cwd  = status.get("cwd", "~")
-            
+            user = status_data.get("user") or "u"
+            host = status_data.get("host") or "h"
+            cwd  = status_data.get("cwd")  or "~"
+    
+            # GUI 側の current CWD を更新（次回リンク作成ダイアログ初期値などに使う）
             self.app.remote_cwd = cwd
     
-            # homeディレクトリのパスを短縮表示する処理
-            # 注意: この処理はローカルのhomeパスに依存するため、リモートとユーザが違うと正しく機能しない可能性があります
+            # 見やすくパス短縮
             try:
-                # 簡易的に、'~'で始まるか、フルパスかを判定
-                if not cwd.startswith('/'):
-                    pass # 相対パスなどはそのまま表示
-                elif cwd.startswith(f"/home/{user}"):
+                if cwd.startswith(f"/home/{user}"):
                     cwd = "~" + cwd[len(f"/home/{user}"):]
-                elif len(cwd) > 20: # 長すぎるパスは末尾を省略
-                    cwd = "..." + cwd[-17:]
+                elif len(cwd) > 60:
+                    cwd = "…" + cwd[-57:]
             except Exception:
                 pass
-
-            # +++ 変更点: プロンプトの先頭に conda_prefix を追加 +++
+    
+            # プロンプト描画
             self.view.insert(tk.END, f"[Remote] {conda_prefix}")
-            
             tag_start = self.view.index("end-1c")
             self.view.insert(tk.END, f"{user}@{host}")
             tag_end = self.view.index("end-1c")
@@ -286,10 +297,11 @@ class TerminalFrame(ttk.Frame):
             self.view.insert(tk.END, f":{cwd}$ ")
     
         except Exception as e:
-            # エラーが発生した場合もプロンプトは表示する
+            # 取得に失敗しても簡易プロンプトを必ず出す
             print(f"Error updating remote prompt: {e}")
-            self.view.insert(tk.END, "[Remote] Error$ ")
+            self.view.insert(tk.END, "[Remote] $ ")
     
+        # 入力開始位置のマーク
         self.view.mark_set("input_start", self.view.index("end-1c"))
         self.view.mark_set(tk.INSERT, "end-1c")
         self.view.see(tk.INSERT)
