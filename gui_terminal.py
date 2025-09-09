@@ -1183,30 +1183,38 @@ class IntegratedGUI(tk.Tk):
             if self._log_fetch_timer:
                 self.after_cancel(self._log_fetch_timer)
             self._fetch_log_updates()
-
+    def _to_posix_rel(self, rel) -> str:
+        """Windows の \ 区切りを / に統一。先頭の / は付けずに相対のまま返す。"""
+        if isinstance(rel, Path):
+            s = rel.as_posix()
+        else:
+            s = str(rel).replace('\\', '/')
+        # 相対パスとして扱う想定なので万一先頭に / が来ても外す
+        while s.startswith('/'):
+            s = s[1:]
+        return s
         
     def _on_tree_open(self, event=None):
-        """フォルダ（symlink / virtual_dir）を展開する時に呼ばれる"""
         try:
             item_id = self.file_tree.focus()
             if not item_id:
                 return
             tags = self.file_tree.item(item_id, "tags")
             children = self.file_tree.get_children(item_id)
-    
-            # プレースホルダ（Loading...）がぶら下がっている時だけ LIST を要求
             needs_load = bool(children) and self.file_tree.item(children[0], "text") == "Loading..."
+    
             if (("virtual_dir" in tags) or ("symlink" in tags)) and needs_load:
                 node_path = Path(self.file_tree.item(item_id, "values")[0])
                 relative_path = node_path.relative_to(self.current_tree_root)
-                self._send_command_to_watcher(f"_internal_list_dir::{str(relative_path)}")
+                rel_posix = self._to_posix_rel(relative_path)   # ← 追加
+                self._send_command_to_watcher(f"_internal_list_dir::{rel_posix}")
     
-                # すぐログを取りに行く
                 if self._log_fetch_timer:
                     self.after_cancel(self._log_fetch_timer)
                 self._fetch_log_updates()
         except Exception as e:
             print(f"_on_tree_open error: {e}")
+
 
     def _browse_file_tree_root(self):
         initial_dir = str(LOCAL_SESSIONS_ROOT / self.current_watcher_id
@@ -1374,13 +1382,15 @@ class IntegratedGUI(tk.Tk):
             item_values = self.file_tree.item(item_id, "values")
             tags = self.file_tree.item(item_id, "tags")
             filepath = Path(item_values[0])
-            # virtual（リモート）とローカルで分岐、画像ならプレビュー
+    
             if "virtual_file" in tags:
                 relative_path = filepath.relative_to(self.current_tree_root)
-                if self._is_image_file(Path(relative_path)):
-                    self._open_remote_image_for_preview(str(relative_path))
+                rel_posix = self._to_posix_rel(relative_path)  # ← 追加
+                # 拡張子判定は POSIX でも OK
+                if self._is_image_file(Path(rel_posix)):
+                    self._open_remote_image_for_preview(rel_posix)
                 else:
-                    self._open_remote_file_for_editing(str(relative_path))
+                    self._open_remote_file_for_editing(rel_posix)
             elif filepath.is_file() and "virtual" not in tags:
                 if self._is_image_file(filepath):
                     self._show_image_in_preview(filepath)
@@ -1388,6 +1398,7 @@ class IntegratedGUI(tk.Tk):
                     self.editor_open_file(filepath=filepath)
         except Exception as e:
             print(f"Error opening from tree: {e}")
+
 
     # ---------------------------
     # リモート画像プレビューのためのDL
