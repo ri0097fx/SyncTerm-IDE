@@ -83,7 +83,7 @@ flowchart LR
 
 ### Windows で初めて使う場合（WSL 未導入の方）
 1. **管理者権限 PowerShell を開く**  
-   スタートメニューで **Windows PowerShell** を右クリックし、**「管理者として実行」** を選択してください。
+   スタートメニューで **Windows PowerShell** を右クリックし、**「管理者として実行」** を選択。
 
 2. **WSL + Ubuntu をインストール**
    ```powershell
