@@ -82,7 +82,9 @@ flowchart LR
 > 事前に：GUI 側（PC A）、Watcher 側（PC B/C…）の双方が、**同じサーバーへ SSH / rsync 可能**であること。SSH 鍵の作成と登録は **[docs/SSH-SETUP.md](docs/SSH-SETUP.md)** を参照。
 
 ### Windows で初めて使う場合（WSL 未導入の方）
-1. **管理者権限 PowerShell を開く**
+1. **管理者権限 PowerShell を開く**  
+   スタートメニューで **Windows PowerShell** を右クリックし、**「管理者として実行」** を選択してください。
+
 2. **WSL + Ubuntu をインストール**
    ```powershell
    wsl --install -d Ubuntu
