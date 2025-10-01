@@ -81,6 +81,26 @@ flowchart LR
 
 > 事前に：GUI 側（PC A）、Watcher 側（PC B/C…）の双方が、**同じサーバーへ SSH / rsync 可能**であること。SSH 鍵の作成と登録は **[docs/SSH-SETUP.md](docs/SSH-SETUP.md)** を参照。
 
+### Windows で初めて使う場合（WSL 未導入の方）
+1. **管理者権限 PowerShell を開く**
+2. **WSL + Ubuntu をインストール**
+   ```powershell
+   wsl --install -d Ubuntu
+   ```
+   もしエラーになる場合（古い Windows など）は:
+   ```powershell
+   dism.exe /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart
+   dism.exe /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart
+   ```
+   再起動後に `wsl --install -d Ubuntu` を実行。
+3. **Ubuntu 初期化**（初回起動してユーザ名/パスワードを設定）
+4. **依存の自動導入（初回のみ）**
+   ```powershell
+   # リポジトリ直下から実行
+   .\scripts\wsl\setup.ps1
+   ```
+   このスクリプトは Ubuntu 内で `rsync`/`openssh-client`/`python3` を導入します。
+   
 ### 0) `config.ini` を用意（全マシンで同一）
 
 ```ini
