@@ -47,41 +47,63 @@ class EditorView(ttk.Frame):
         self.tabs: dict[str, dict] = {}
         self.completion_popup = None
         self.search_bar_visible = getattr(app, "search_bar_visible", False)
-        self.search_var = getattr(app, "search_var", tk.StringVar())  # 既存を共有
+        self.search_var = getattr(app, "search_var", tk.StringVar())
+
+        # ★ スタイル定義: 横幅は狭く(2px)、縦幅は標準(4px)
+        style = ttk.Style()
+        style.configure("DarkNarrow.TButton", parent="Dark.TButton", padding=(2, 4, 2, 4))
+        
+        # ★ ホバー時(active)の色を共通設定の self.COMBO_BG に変更
+        style.map("DarkNarrow.TButton",
+            background=[('pressed', '#222222'), ('active', self.COMBO_BG)],
+            foreground=[('disabled', '#555555')]
+        )
 
         # ---- Toolbar ----
         editor_toolbar = ttk.Frame(self, style="Dark.TFrame", padding=(8, 6))
         editor_toolbar.pack(side=tk.TOP, fill=tk.X)
 
         ttk.Button(editor_toolbar, text="Open File", command=self.editor_open_file,
-                   style="Dark.TButton").pack(side=tk.LEFT)
+                   style="DarkNarrow.TButton").pack(side=tk.LEFT)
         ttk.Button(editor_toolbar, text="Save File", command=self.editor_save_file,
-                   style="Dark.TButton").pack(side=tk.LEFT, padx=(6, 0))
+                   style="DarkNarrow.TButton").pack(side=tk.LEFT, padx=(6, 0))
         ttk.Button(editor_toolbar, text="Save As...", command=self.editor_save_file_as,
-                   style="Dark.TButton").pack(side=tk.LEFT, padx=(6, 0))
+                   style="DarkNarrow.TButton").pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(editor_toolbar, text="▶ Run", command=self.app._run_current_python_file,
+                   style="DarkNarrow.TButton").pack(side=tk.LEFT, padx=(6, 0))
 
         self.file_label = ttk.Label(editor_toolbar, text="No file opened", style="Dark.TLabel")
         self.file_label.pack(side=tk.LEFT, padx=(12, 0))
         app.editor_file_label = self.file_label  # 互換公開
 
-        # ---- 検索バー（UIのみ。ロジックは当面 app を使用）----
+        # ---- 検索バー ----
         self.search_frame = ttk.Frame(editor_toolbar, style="Dark.TFrame")
         app.search_frame = self.search_frame  # 互換公開
+        
+        is_linux = sys.platform.startswith("linux")
+        close_btn_text = "X" if is_linux else "✕"
+
+        # Closeボタン（右端固定）
+        ttk.Button(self.search_frame, text=close_btn_text,
+                   command=getattr(app, "_hide_search_bar", lambda: None),
+                   style="DarkNarrow.TButton", width=3).pack(side=tk.RIGHT, padx=(4, 0))
+
+        # 残りの要素（左詰め）
         search_entry = ttk.Entry(self.search_frame, textvariable=self.search_var,
                                  style="Dark.TEntry", width=20)
         search_entry.pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Button(self.search_frame, text="Next ↓",
+        
+        # 検索ボタン群
+        ttk.Button(self.search_frame, text="↓",
                    command=getattr(app, "_find_next", lambda: None),
-                   style="Dark.TButton", width=7).pack(side=tk.LEFT)
-        ttk.Button(self.search_frame, text="Prev ↑",
+                   style="DarkNarrow.TButton", width=4).pack(side=tk.LEFT)
+        ttk.Button(self.search_frame, text="↑",
                    command=getattr(app, "_find_prev", lambda: None),
-                   style="Dark.TButton", width=7).pack(side=tk.LEFT, padx=4)
-        ttk.Button(self.search_frame, text="Highlight",
+                   style="DarkNarrow.TButton", width=4).pack(side=tk.LEFT, padx=4)
+        ttk.Button(self.search_frame, text="HL",
                    command=getattr(app, "_perform_search", lambda: None),
-                   style="Dark.TButton").pack(side=tk.LEFT)
-        ttk.Button(self.search_frame, text="✖",
-                   command=getattr(app, "_hide_search_bar", lambda: None),
-                   style="Dark.TButton", width=3).pack(side=tk.LEFT, padx=4)
+                   style="DarkNarrow.TButton").pack(side=tk.LEFT)
+
         search_entry.bind("<Return>",        lambda e: getattr(app, "_find_next",  lambda: None)())
         search_entry.bind("<Shift-Return>",  lambda e: getattr(app, "_find_prev",  lambda: None)())
         search_entry.bind("<Escape>",        getattr(app, "_hide_search_bar",      lambda e=None: None))
@@ -264,6 +286,16 @@ class EditorView(ttk.Frame):
         except Exception as e:
             messagebox.showerror("Save Error", f"Failed to save file:\n{e}")
 
+    @staticmethod
+    def _truncate_middle(text: str, max_len: int = 60) -> str:
+        """文字列が長すぎる場合、中間を ... で省略する"""
+        if len(text) <= max_len:
+            return text
+        # ... の分(3文字)を除いて、前後をどれくらい残すか計算
+        keep = max(1, max_len - 3)
+        head = keep // 2
+        tail = keep - head
+        return f"{text[:head]}...{text[-tail:]}"
 
     def _update_editor_title(self):
         tab_data = self._get_current_tab_data()
@@ -284,7 +316,13 @@ class EditorView(ttk.Frame):
         dirty_marker = "*" if tab_data["is_dirty"] else ""
         full_title = f"{filename}{dirty_marker}"
 
-        self.file_label.config(text=display_path)
+        # 表示用パスを短縮（ラベル用）
+        # 文字数制限（例: 35文字）
+        truncated_path = self._truncate_middle(display_path, max_len=35)
+        
+        self.file_label.config(text=truncated_path)
+        self.app._set_tooltip_text(self.file_label, display_path) # ツールチップで全体を表示
+
         try:
             tab_id = self.editor_notebook.select()
             self.editor_notebook.tab(tab_id, text=full_title)
@@ -328,7 +366,6 @@ class EditorView(ttk.Frame):
             idx = end
 
         if self.search_var.get():
-            # 検索ハイライトは当面 app 側を呼ぶ（後で移行）
             getattr(self.app, "_perform_search", lambda: None)()
         editor_text.see("insert")
 
@@ -462,13 +499,8 @@ class EditorView(ttk.Frame):
         tab_data = self._get_current_tab_data()
         if tab_data:
             tab_data["text"].focus_set()
-            try:
-                if tab_data.get("remote_path"):
-                    self.editor_notebook.configure(style="Remote.TNotebook")
-                else:
-                    self.editor_notebook.configure(style="Closable.TNotebook")
-            except tk.TclError:
-                pass
+            # ★ 修正: バツボタン消滅バグの原因となっていたスタイル切り替えを削除
+            # self.editor_notebook.configure(style=...)
         self._update_editor_title()
 
     # --------- Scroll linkage ---------

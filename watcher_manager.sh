@@ -1,39 +1,32 @@
 #!/usr/bin/env bash
-# watcher_manager.sh
-# - セッションは「push を先、pull を後」
-# - pull は commands.txt と .staged_uploads/** のみ（.commands.offset は pull しない）
-# - .commands.offset は Watcher が正（push は可）
-# - レジストリは <watcher_id>.json のみ push（--delete 禁止）
-# - rsync/ssh は非対話化 & タイムアウト/keepalive 付き
-# - ネットワーク失敗時もループ継続（リトライ＋非致命化）
+# watcher_manager.sh (Fixed: Prevent Push from deleting staged files)
+# - Step 1 (Push) で .staged_uploads 等を除外設定に追加
 
 set -euo pipefail
 shopt -s nullglob
 
 # ===== 引数処理 =====
 WATCHER_ID="${1:?引数1: WatcherのユニークIDを指定してください}"
-DISPLAY_NAME="${2:?引数2: GUIに表示するWatcherの表示名を指定してください}"
+DISPLAY_NAME="${2:?引数2: GUIに表示するWatcher名を指定してください}"
 
-# 誤って "foo.json" が来ても "foo" に矯正。スラッシュ等はアンダースコア化
 WATCHER_ID="${WATCHER_ID%.json}"
 WATCHER_ID="${WATCHER_ID//\//_}"
 WATCHER_ID="${WATCHER_ID//\\/_}"
 
-# ===== 設定ファイル =====
+# ===== 設定ファイル読み込み =====
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 CONFIG_FILE="$SCRIPT_DIR/config.ini"
-if [ ! -f "$CONFIG_FILE" ]; then
+if [[ ! -f "$CONFIG_FILE" ]]; then
   echo "[ERROR] 設定ファイルが見つかりません: $CONFIG_FILE" >&2
   exit 1
 fi
 
-# ===== 設定読み込み（未定義でも失敗しない getter） =====
 getv() {
-  # $1=key -> 値（前後空白除去）。見つからなければ空文字を返し、常に rc=0
   awk -F= -v k="$1" '
     $0 ~ "^[[:space:]]*"k"[[:space:]]*=" {
       sub(/^[[:space:]]*[^=]+=[[:space:]]*/, "", $0);
-      sub(/^[[:space:]]+/, "", $0); sub(/[[:space:]]+$/, "", $0);
+      sub(/^[[:space:]]+/, "", $0);
+      sub(/[[:space:]]+$/, "", $0);
       print $0; exit
     }' "$CONFIG_FILE"
   return 0
@@ -45,13 +38,18 @@ SESSIONS_DIR_NAME="$(getv sessions_dir_name)"; : "${SESSIONS_DIR_NAME:=sessions}
 REGISTRY_DIR_NAME="$(getv registry_dir_name)"; : "${REGISTRY_DIR_NAME:=_registry}"
 WATCHER_MIRROR_DIR_RAW="$(getv watcher_mirror_dir)"
 
+# --- Docker Config ---
+DOCKER_CONTAINER_NAME="$(getv docker_container_name)"
+DOCKER_IMAGE_NAME="$(getv docker_image_name)"
+DOCKER_WORK_DIR="$(getv docker_work_dir)"; : "${DOCKER_WORK_DIR:=/workspace}"
+
 : "${SERVER:?server が config.ini に必要です}"
 : "${BASE_REMOTE_ROOT:?base_path が config.ini に必要です}"
 
 # ===== パス構築 =====
-BASE_REMOTE="$BASE_REMOTE_ROOT/$SESSIONS_DIR_NAME"            # 例：/home/user/remote_dev/sessions
-REMOTE_WATCHER_DIR="$BASE_REMOTE/$WATCHER_ID"                 # 例：.../sessions/<id>
-REMOTE_REGISTRY_DIR="$BASE_REMOTE_ROOT/$REGISTRY_DIR_NAME"    # 例：.../_registry
+BASE_REMOTE="$BASE_REMOTE_ROOT/$SESSIONS_DIR_NAME"
+REMOTE_WATCHER_DIR="$BASE_REMOTE/$WATCHER_ID"
+REMOTE_REGISTRY_DIR="$BASE_REMOTE_ROOT/$REGISTRY_DIR_NAME"
 
 WATCHER_MIRROR_DIR="${WATCHER_MIRROR_DIR_RAW/#\~/$HOME}"
 LOCAL_BASE="${WATCHER_LOCAL_DIR:-${WATCHER_MIRROR_DIR:-$HOME/watcher_local_mirror}}"
@@ -59,33 +57,35 @@ LOCAL_SESSIONS_ROOT="$LOCAL_BASE/$SESSIONS_DIR_NAME"
 LOCAL_WATCHER_DIR="$LOCAL_SESSIONS_ROOT/$WATCHER_ID"
 LOCAL_REGISTRY_DIR="$LOCAL_BASE/$REGISTRY_DIR_NAME"
 
-# ===== SSH/rsync オプション =====
-# keepalive と接続タイムアウトを追加
-RSYNC_SSH_OPTS="-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 -o ServerAliveInterval=15 -o ServerAliveCountMax=2"
-RSYNC_TIMEOUT="${RSYNC_TIMEOUT:-10}"  # rsync I/O timeout
+# ===== SSH / rsync 設定 =====
+SSH_OPTS="-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 -o ServerAliveInterval=15 -o ServerAliveCountMax=2"
+RSYNC_TIMEOUT="${RSYNC_TIMEOUT:-10}"
+INTERVAL="${INTERVAL:-5}"
 
-RSYNC_PUSH=(rsync -az --timeout="$RSYNC_TIMEOUT" -e "ssh $RSYNC_SSH_OPTS")     # push 共通
-RSYNC_PULL_CMD=(rsync -az --timeout="$RSYNC_TIMEOUT" -e "ssh $RSYNC_SSH_OPTS") # pull 共通
-INTERVAL="${INTERVAL:-5}"                                                      # ループ間隔（秒）
+rsync_push() {
+  rsync -az --timeout="$RSYNC_TIMEOUT" -e "ssh $SSH_OPTS" "$@"
+}
+rsync_pull() {
+  rsync -az --timeout="$RSYNC_TIMEOUT" -e "ssh $SSH_OPTS" "$@"
+}
 
-# ===== 再試行＆非致命化ラッパ =====
 retry() {
   local max="${RETRY_MAX:-5}" delay="${RETRY_DELAY:-2}" n=1 rc
   while :; do
     set +e
     "$@"; rc=$?
     set -e
-    if [ "$rc" -eq 0 ]; then return 0; fi
+    if [[ "$rc" -eq 0 ]]; then return 0; fi
     echo "[WARN] command failed (rc=$rc), try $n/$max: $*" >&2
-    if [ "$n" -ge "$max" ]; then
+    if [[ "$n" -ge "$max" ]]; then
       echo "[WARN] giving up: $*" >&2
       return "$rc"
     fi
     sleep "$delay"
-    n=$((n+1))
+    ((n++))
   done
 }
-run_nofail() { retry "$@" || true; }
+run_nofail() { retry "$@" || echo "[ERROR] Command failed but continuing: $*" >&2; }
 
 # ===== プロセス管理 =====
 WATCHER_SCRIPT_PATH="$SCRIPT_DIR/command_watcher.py"
@@ -95,7 +95,6 @@ start_watcher_process() {
   local session="$1"
   local session_dir_local="$LOCAL_WATCHER_DIR/$session"
   local pid_file="$PID_DIR/$session.pid"
-  local register_name="$DISPLAY_NAME"
 
   mkdir -p "$session_dir_local"
   echo "[MANAGER] Starting watcher process for session '${session}'..."
@@ -104,7 +103,11 @@ start_watcher_process() {
     COMMANDS_DIR="$session_dir_local" \
     REMOTE_SESSIONS_ROOT="$BASE_REMOTE" \
     REGISTRY_DIR_NAME="$REGISTRY_DIR_NAME" \
-    nohup python "$WATCHER_SCRIPT_PATH" --name "$register_name" \
+    DOCKER_CONTAINER_NAME="$DOCKER_CONTAINER_NAME" \
+    DOCKER_IMAGE_NAME="$DOCKER_IMAGE_NAME" \
+    DOCKER_WORK_DIR="$DOCKER_WORK_DIR" \
+    nohup python3 "$WATCHER_SCRIPT_PATH" \
+      --name "$DISPLAY_NAME" \
       >> "/tmp/watcher_${WATCHER_ID}_${session}.log" 2>&1 &
     echo $! > "$pid_file"
   )
@@ -113,9 +116,11 @@ start_watcher_process() {
 stop_watcher_process() {
   local session="$1"
   local pid_file="$PID_DIR/$session.pid"
-  [ -f "$pid_file" ] || return 0
-  local pid; pid="$(cat "$pid_file" 2>/dev/null || true)"
-  if [ -n "${pid:-}" ]; then
+  [[ -f "$pid_file" ]] || return 0
+
+  local pid
+  pid="$(cat "$pid_file" 2>/dev/null || true)"
+  if [[ -n "${pid:-}" ]]; then
     echo "[MANAGER] Stopping process for session '${session}' (PID $pid)..."
     kill "$pid" 2>/dev/null || true
   fi
@@ -124,16 +129,15 @@ stop_watcher_process() {
 
 cleanup() {
   echo -e "\n[MANAGER] Cleaning up..."
-  if [ -d "$PID_DIR" ]; then
+  if [[ -d "$PID_DIR" ]]; then
     for pf in "$PID_DIR"/*.pid; do
-      [ -f "$pf" ] || continue
+      [[ -f "$pf" ]] || continue
       stop_watcher_process "$(basename "$pf" .pid)"
     done
     rm -rf "$PID_DIR"
   fi
-  # レジストリ削除（失敗しても続行）
   rm -f "$LOCAL_REGISTRY_DIR/${WATCHER_ID}.json" || true
-  run_nofail ssh -o BatchMode=yes $SERVER "rm -f '$REMOTE_REGISTRY_DIR/${WATCHER_ID}.json'"
+  run_nofail ssh $SSH_OPTS "$SERVER" "rm -f '$REMOTE_REGISTRY_DIR/${WATCHER_ID}.json'"
   echo "[MANAGER] Cleanup finished."
 }
 trap cleanup EXIT
@@ -141,53 +145,54 @@ trap cleanup EXIT
 # ===== 初期化 =====
 echo "[MANAGER] Started for WATCHER_ID='${WATCHER_ID}'  DISPLAY_NAME='${DISPLAY_NAME}'"
 mkdir -p "$LOCAL_WATCHER_DIR" "$LOCAL_REGISTRY_DIR" "$PID_DIR"
-run_nofail ssh -o BatchMode=yes $SERVER "mkdir -p '$REMOTE_WATCHER_DIR' '$REMOTE_REGISTRY_DIR'"
+run_nofail ssh $SSH_OPTS "$SERVER" "mkdir -p '$REMOTE_WATCHER_DIR' '$REMOTE_REGISTRY_DIR'"
 
 # ===== メインループ =====
 while true; do
-  # --- Step 0: Heartbeat を先に書く（直近の生存を示す） ---
+  # --- Step 0: Heartbeat ---
   now_sec=$(date +%s)
   display_escaped=${DISPLAY_NAME//\"/\\\"}
   json_path="$LOCAL_REGISTRY_DIR/${WATCHER_ID}.json"
   printf '{"watcher_id":"%s","display_name":"%s","last_heartbeat":%s}\n' \
     "$WATCHER_ID" "$display_escaped" "$now_sec" > "$json_path"
 
-  # 自分の JSON だけ push（--delete 禁止）
-  run_nofail "${RSYNC_PUSH[@]}" "$json_path" "$SERVER:$REMOTE_REGISTRY_DIR/"
+  run_nofail rsync_push "$json_path" "$SERVER:$REMOTE_REGISTRY_DIR/"
 
-  # --- Step 1: セッションを push（commands.txt は除外、.commands.offset は送る） ---
-  echo "[MANAGER] Syncing sessions to server (excluding commands.txt)..."
-  run_nofail "${RSYNC_PUSH[@]}" \
+  # --- Step 1: セッションを push（commands.txt などは除外） ---
+  # ★ 修正: GUIから送られるファイル群を push時の削除対象から除外する
+  echo "[MANAGER] Syncing sessions to server..."
+  run_nofail rsync_push --delete\
     --exclude '*/commands.txt' \
+    --exclude '*/.runner_config.json' \
+    --exclude '*/.staged_uploads/' \
+    --exclude '*/.staged_uploads/**' \
     "$LOCAL_WATCHER_DIR/" "$SERVER:$REMOTE_WATCHER_DIR/"
 
-  # --- Step 2: commands.txt と .staged_uploads/** を pull（.commands.offset は pull しない） ---
-  echo "[MANAGER] Pulling commands.txt & .staged_uploads from server..."
-  run_nofail "${RSYNC_PULL_CMD[@]}" \
-    --prune-empty-dirs \
+  # --- Step 2: commands.txt & config & uploads を pull ---
+  echo "[MANAGER] Pulling commands & configs from server..."
+  run_nofail rsync_pull \
     --include '*/' \
     --include '*/commands.txt' \
+    --include '*/.runner_config.json' \
+    --include '*/.docker_images.txt' \
+    --include '*/.docker_containers.txt' \
+    --include '*/.staged_uploads/' \
     --include '*/.staged_uploads/**' \
     --exclude '*' \
     "$SERVER:$REMOTE_WATCHER_DIR/" "$LOCAL_WATCHER_DIR/"
 
-  # --- Step 3: プロセス管理（pull 後に実施） ---
-  echo "[MANAGER] Managing watcher processes..."
-  # ローカルの <watcher_id> 配下の直下ディレクトリ = セッション名
+  # --- Step 3: プロセス管理 ---
+  # echo "[MANAGER] Managing watcher processes..."
   server_sessions=$(find "$LOCAL_WATCHER_DIR" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null || true)
 
-  # 起動（未起動のもの）
   for session in $server_sessions; do
     pid_file="$PID_DIR/$session.pid"
-    if [ ! -f "$pid_file" ]; then
-      start_watcher_process "$session"
-    fi
+    [[ -f "$pid_file" ]] || start_watcher_process "$session"
   done
 
-  # 停止（ディレクトリが消えたもの）
-  if [ -d "$PID_DIR" ] && [ -n "$(ls -A "$PID_DIR" 2>/dev/null || true)" ]; then
+  if [[ -d "$PID_DIR" ]] && [[ -n "$(ls -A "$PID_DIR" 2>/dev/null || true)" ]]; then
     for pf in "$PID_DIR"/*.pid; do
-      [ -f "$pf" ] || continue
+      [[ -f "$pf" ]] || continue
       sess="$(basename "$pf" .pid)"
       if ! echo "$server_sessions" | grep -qx "$sess"; then
         stop_watcher_process "$sess"
