@@ -850,13 +850,13 @@ class IntegratedGUI(tk.Tk, EditorEventHandlerMixin):
         if self.terminal.terminal_mode.get() == "Remote" and self.current_session_name:
             fname = Path(tab.get("remote_path") or tab.get("filepath")).name
             self.terminal._show_remote_prompt()
-            cmd = f"python {shlex.quote(fname)}"
+            cmd = f"python3 {shlex.quote(fname)}"
             self.terminal.append_log(cmd)
             self.watcher_client.send_command(cmd)
             self.watcher_client.fetch_log_updates()
         else:
             if tab.get("filepath"):
-                cmd = f"python {shlex.quote(str(tab['filepath'].resolve()))}"
+                cmd = f"python3 {shlex.quote(str(tab['filepath'].resolve()))}"
                 self.terminal.terminal_mode.set("Local")
                 self.terminal._execute_local_command(cmd)
 
