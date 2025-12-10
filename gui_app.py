@@ -176,12 +176,15 @@ class RunnerConfigDialog(tk.Toplevel):
         self._fetch_remote_list("_internal_get_docker_containers", ".docker_containers.txt", self.container_cb, self.refresh_cont_btn)
 
     def _on_save(self):
+        extra_args = self.args_var.get().strip()
+        use_user_opt = not ("--gpus" in extra_args)
         self.result = {
             "mode": self.mode_var.get(),
             "container_name": self.container_var.get().strip(),
             "image": self.image_var.get().strip(),
             "mount_path": self.mount_path_var.get().strip(),
-            "extra_args": self.args_var.get().strip()
+            "extra_args": extra_args,
+            "use_user_opt": use_user_opt
         }
         if self.app.watcher_client:
              self.app.watcher_client.send_command("_internal_reset_cwd")
@@ -642,7 +645,13 @@ class IntegratedGUI(tk.Tk, EditorEventHandlerMixin):
         cmd.extend([f"{REMOTE_SERVER}:{remote}", local])
         self.sync_manager.run_sync_command_async(cmd, on_done=on_done)
         
-    def _set_status(self, msg): pass 
+    # def _set_status(self, msg): pass 
+    def _set_status(self, msg):
+        if self.sync_indicator_label:
+            self.sync_indicator_label.config(text=msg)
+            
+            if msg == "Synced":
+                self.after(3000, lambda: self.sync_indicator_label.config(text=""))
 
     # --- Compatibility Methods for External Components ---
     

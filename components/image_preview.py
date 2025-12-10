@@ -70,7 +70,7 @@ class ImagePreviewPanel:
         self.canvas = None
         self.original_image = None
 
-    def show_image(self, file_path: Path, remote_path: str | None = None):
+    def show_image(self, file_path: Path, remote_path: str = None):
         self.ensure_visible()
         label_text = str(file_path) if not remote_path else f"[REMOTE] {remote_path}"
         self.full_label_text = label_text

@@ -1,4 +1,5 @@
 # sync_services/client.py
+from __future__ import annotations
 import threading
 import tkinter as tk
 from config import REMOTE_SESSIONS_PATH, LOG_FETCH_INTERVAL_MS, EOC_MARKER_PREFIX
