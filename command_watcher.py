@@ -261,7 +261,7 @@ def _wrap_with_docker_exec_dynamic(cmdline: str, config: dict) -> Tuple[str, str
     """GUI設定ファイルに基づくDocker Exec（自動作成機能付き）"""
     container = config.get("container_name")
     if not container:
-        container = config.get("image") # 互換性
+        container = config.get("image")  # 互換性
     image = config.get("image")
     
     if not container:
@@ -275,9 +275,8 @@ def _wrap_with_docker_exec_dynamic(cmdline: str, config: dict) -> Tuple[str, str
     docker_work_dir = config.get("mount_path") or DOCKER_WORK_DIR
     target_workdir = Path(docker_work_dir) / rel_path
     
-    # 自動作成ロジック: コンテナがない場合に備えてチェック
     mount_opt = f"-v {shlex.quote(str(BASE_DIR))}:{shlex.quote(docker_work_dir)}"
-    use_user = config("use_user_opt", True)
+    use_user = config.get("use_user_opt", True)
     user_opt = f"--user {os.getuid()}:{os.getgid()}" if use_user else ""
     extra_args = config.get("extra_args", "")
     
@@ -298,7 +297,8 @@ def _wrap_with_docker_exec_dynamic(cmdline: str, config: dict) -> Tuple[str, str
 def _wrap_with_docker_run_dynamic(cmdline: str, config: dict) -> Tuple[str, str]:
     """GUI設定ファイルに基づくDocker実行（動的設定）"""
     image = config.get("image")
-    if not image: return cmdline, ""
+    if not image:
+        return cmdline, ""
 
     extra_args = config.get("extra_args", "")
     
@@ -312,7 +312,8 @@ def _wrap_with_docker_run_dynamic(cmdline: str, config: dict) -> Tuple[str, str]
     quoted_cmd = shlex.quote(cmdline)
     
     mount_opt = f"-v {shlex.quote(str(BASE_DIR))}:{shlex.quote(docker_work_dir)}"
-    user_opt = f"--user {os.getuid()}:{os.getgid()}"
+    use_user = config.get("use_user_opt", True)
+    user_opt = f"--user {os.getuid()}:{os.getgid()}" if use_user else ""
     
     cmd = (
         f"docker run --rm -i "
@@ -324,37 +325,6 @@ def _wrap_with_docker_run_dynamic(cmdline: str, config: dict) -> Tuple[str, str]
         f"bash -c {quoted_cmd}"
     )
     return cmd, f"🐳 [Docker Run] {image} 📂 {target_workdir}"
-
-
-def _wrap_with_docker_if_needed(cmdline: str) -> str:
-    """環境変数設定に基づくDocker実行（静的設定・レガシー）"""
-    try:
-        rel_path = CURRENT_CWD.relative_to(BASE_DIR)
-    except ValueError:
-        rel_path = Path(".")
-    target_workdir = Path(DOCKER_WORK_DIR) / rel_path
-    quoted_cmd = shlex.quote(cmdline)
-
-    if DOCKER_CONTAINER_NAME:
-        return (
-            f"docker exec -i "
-            f"-w {shlex.quote(str(target_workdir))} "
-            f"{shlex.quote(DOCKER_CONTAINER_NAME)} "
-            f"bash -c {quoted_cmd}"
-        )
-    elif DOCKER_IMAGE_NAME:
-        mount_opt = f"-v {shlex.quote(str(BASE_DIR))}:{shlex.quote(DOCKER_WORK_DIR)}"
-        user_opt = f"--user {os.getuid()}:{os.getgid()}"
-        return (
-            f"docker run --rm -i "
-            f"{mount_opt} "
-            f"{user_opt} "
-            f"-w {shlex.quote(str(target_workdir))} "
-            f"{shlex.quote(DOCKER_IMAGE_NAME)} "
-            f"bash -c {quoted_cmd}"
-        )
-    return cmdline
-
 
 def _wrap_command_final(cmdline: str) -> Tuple[str, str]:
     config = _get_runner_config()
@@ -369,12 +339,6 @@ def _wrap_command_final(cmdline: str) -> Tuple[str, str]:
     if mode == "host":
         return _wrap_with_conda_if_needed(cmdline), ""
 
-    # Fallback to Env vars
-    if DOCKER_CONTAINER_NAME:
-        return _wrap_with_docker_if_needed(cmdline), f"🐳 [Docker Exec (Env)] {DOCKER_CONTAINER_NAME}"
-    elif DOCKER_IMAGE_NAME:
-        return _wrap_with_docker_if_needed(cmdline), f"🐳 [Docker Run (Env)] {DOCKER_IMAGE_NAME}"
-    
     return _wrap_with_conda_if_needed(cmdline), ""
 
 
