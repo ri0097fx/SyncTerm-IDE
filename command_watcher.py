@@ -277,7 +277,8 @@ def _wrap_with_docker_exec_dynamic(cmdline: str, config: dict) -> Tuple[str, str
     
     # 自動作成ロジック: コンテナがない場合に備えてチェック
     mount_opt = f"-v {shlex.quote(str(BASE_DIR))}:{shlex.quote(docker_work_dir)}"
-    user_opt = f"--user {os.getuid()}:{os.getgid()}"
+    use_user = config("use_user_opt", True)
+    user_opt = f"--user {os.getuid()}:{os.getgid()}" if use_user else ""
     extra_args = config.get("extra_args", "")
     
     if image:

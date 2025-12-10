@@ -560,5 +560,15 @@ class EditorView(ttk.Frame):
                 pass
 
     def _on_marker_bar_click(self, event):
-        # 既存実装へ委譲（後続で移行）
-        return getattr(self.app, "_on_marker_bar_click", lambda e: None)(event)
+        tab_data = self._get_current_tab_data()
+        if not tab_data:
+            return
+
+        bar_height = event.widget.winfo_height()
+        if bar_height <= 0:
+            return
+
+        y = max(0, min(event.y, bar_height))
+        fraction = y / bar_height
+
+        tab_data["text"].yview_moveto(fraction)
