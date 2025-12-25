@@ -72,7 +72,7 @@ class SyncManager:
         threading.Thread(target=worker, daemon=True).start()
 
     def pull_file(self, remote_file: str, local_file: str, timeout=30, lightweight=False):
-        rsync_opt = '--rtlDz'
+        rsync_opt = '-rtlDz'
         if _should_use_wsl_rsync():
             dst = _win_to_wsl_path(local_file)
             cmd = ["rsync", rsync_opt, f"{REMOTE_SERVER}:{remote_file}", dst]
@@ -81,7 +81,7 @@ class SyncManager:
         return self.run_sync_command(cmd, check=True, timeout=timeout, capture_output=True, lightweight=lightweight)
 
     def push_file(self, local_file: str, remote_file: str, timeout=30, lightweight=False):
-        rsync_opt = '--rtlDz'
+        rsync_opt = '-rtlDz'
         if _should_use_wsl_rsync():
             src = _win_to_wsl_path(local_file)
             cmd = ["rsync", rsync_opt, src, f"{REMOTE_SERVER}:{remote_file}"]
@@ -90,7 +90,7 @@ class SyncManager:
         return self.run_sync_command(cmd, check=True, timeout=timeout, capture_output=True, lightweight=lightweight)
 
     def pull_dir(self, remote_dir: str, local_dir: str, delete=False, timeout=60):
-        rsync_opt = '--rtlDz'
+        rsync_opt = '-rtlDz'
         remote_dir = _unix(remote_dir.rstrip("/") + "/")
         from pathlib import Path
         local_dir_path = Path(local_dir)
@@ -106,7 +106,7 @@ class SyncManager:
             return self.run_sync_command(args + [f"{REMOTE_SERVER}:{remote_dir}", str(local_dir_path) + "/"], check=True, timeout=timeout)
 
     def push_dir(self, local_dir: str, remote_dir: str, delete=False, timeout=60):
-        rsync_opt = '--rtlDz'
+        rsync_opt = '-rtlDz'
         local_dir = _unix(local_dir.rstrip("/") + "/")
         remote_dir = _unix(remote_dir.rstrip("/") + "/")
         if _should_use_wsl_rsync():
