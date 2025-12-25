@@ -11,7 +11,6 @@ from sync_services.utils import (
 )
 from config import REMOTE_SERVER
 
-
 class SyncManager:
     def __init__(self, app):
         self.app = app 
