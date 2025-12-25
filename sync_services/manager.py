@@ -72,46 +72,49 @@ class SyncManager:
         threading.Thread(target=worker, daemon=True).start()
 
     def pull_file(self, remote_file: str, local_file: str, timeout=30, lightweight=False):
+        rsync_opt = '--rtlDz'
         if _should_use_wsl_rsync():
             dst = _win_to_wsl_path(local_file)
-            cmd = ["rsync", "-az", f"{REMOTE_SERVER}:{remote_file}", dst]
+            cmd = ["rsync", rsync_opt, f"{REMOTE_SERVER}:{remote_file}", dst]
         else:
-            cmd = ["rsync", "-az", f"{REMOTE_SERVER}:{remote_file}", local_file]
+            cmd = ["rsync", rsync_opt, f"{REMOTE_SERVER}:{remote_file}", local_file]
         return self.run_sync_command(cmd, check=True, timeout=timeout, capture_output=True, lightweight=lightweight)
 
     def push_file(self, local_file: str, remote_file: str, timeout=30, lightweight=False):
+        rsync_opt = '--rtlDz'
         if _should_use_wsl_rsync():
             src = _win_to_wsl_path(local_file)
-            cmd = ["rsync", "-az", src, f"{REMOTE_SERVER}:{remote_file}"]
+            cmd = ["rsync", rsync_opt, src, f"{REMOTE_SERVER}:{remote_file}"]
         else:
-            cmd = ["rsync", "-az", local_file, f"{REMOTE_SERVER}:{remote_file}"]
+            cmd = ["rsync", rsync_opt, local_file, f"{REMOTE_SERVER}:{remote_file}"]
         return self.run_sync_command(cmd, check=True, timeout=timeout, capture_output=True, lightweight=lightweight)
 
     def pull_dir(self, remote_dir: str, local_dir: str, delete=False, timeout=60):
+        rsync_opt = '--rtlDz'
         remote_dir = _unix(remote_dir.rstrip("/") + "/")
-        # pathlib.Pathオブジェクトが渡される場合もあるためstr化
         from pathlib import Path
         local_dir_path = Path(local_dir)
         local_dir_path.mkdir(parents=True, exist_ok=True)
         if _should_use_wsl_rsync():
             dst = _win_to_wsl_path(str(local_dir_path)) + "/"
-            args = ["wsl", "-e", "rsync", "-az"]
+            args = ["wsl", "-e", "rsync", rsync_opt]
             if delete: args.append("--delete")
             return self.run_sync_command(args + [f"{REMOTE_SERVER}:{remote_dir}", dst], check=True, timeout=timeout)
         else:
-            args = ["rsync", "-az"]
+            args = ["rsync", rsync_opt]
             if delete: args.append("--delete")
             return self.run_sync_command(args + [f"{REMOTE_SERVER}:{remote_dir}", str(local_dir_path) + "/"], check=True, timeout=timeout)
 
     def push_dir(self, local_dir: str, remote_dir: str, delete=False, timeout=60):
+        rsync_opt = '--rtlDz'
         local_dir = _unix(local_dir.rstrip("/") + "/")
         remote_dir = _unix(remote_dir.rstrip("/") + "/")
         if _should_use_wsl_rsync():
             src = _win_to_wsl_path(local_dir) + "/"
-            args = ["wsl", "-e", "rsync", "-az"]
+            args = ["wsl", "-e", "rsync", rsync_opt]
             if delete: args.append("--delete")
             return self.run_sync_command(args + [src, f"{REMOTE_SERVER}:{remote_dir}"], check=True, timeout=timeout)
         else:
-            args = ["rsync", "-az"]
+            args = ["rsync", rsync_opt]
             if delete: args.append("--delete")
             return self.run_sync_command(args + [local_dir, f"{REMOTE_SERVER}:{remote_dir}"], check=True, timeout=timeout)
