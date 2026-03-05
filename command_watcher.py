@@ -505,10 +505,15 @@ def process_new_commands() -> None:
             # Internal commands
             elif cmd.startswith("_internal_stage_file_for_download::"):
                 try:
-                    _, rel_path = cmd.split("::", 1)
+                    parts = cmd.split("::", 2)
+                    rel_path = parts[1] if len(parts) >= 2 else ""
+                    token = parts[2].strip() if len(parts) >= 3 else ""
+                    if token and not re.match(r"^[A-Za-z0-9._-]+$", token):
+                        raise ValueError("Invalid stage token")
                     src = (BASE_DIR / rel_path).resolve()
                     if not src.is_file(): raise ValueError("Not a file")
-                    shutil.copy(src, BASE_DIR / ".staged_for_download")
+                    stage_name = f".staged_for_download.{token}" if token else ".staged_for_download"
+                    shutil.copy(src, BASE_DIR / stage_name)
                     log_append_output("", exit_code=0, kind="internal")
                 except Exception as e:
                     log_append_output(f"Stage failed: {e}", exit_code=1, kind="internal")

@@ -65,6 +65,8 @@ base_path = /home/user/syncterm_remote   ; サーバー側の作業ルート
 [local_paths]
 ; GUI 側のローカルミラー
 gui_mirror_dir = ~/gui_local_mirror
+; Watcher 側のローカルミラー（省略時は ~/watcher_local_mirror）
+watcher_mirror_dir = ~/watcher_local_mirror
 
 [structure]
 sessions_dir_name = sessions
@@ -110,7 +112,7 @@ nohup ./watcher_manager.sh pc-b "PC B" > watcher.log 2>&1 &
 ## 5. GUI を起動（PC A）
 
 ```bash
-python gui_terminal.py
+python main.py
 ```
 
 GUI から以下の手順で接続します：
@@ -147,7 +149,7 @@ GUI から以下の手順で接続します：
   * セッション直下の `.watcher_status.json` がまだ生成・同期されていない可能性
   * Watcher 側の Python が動作し、`sessions/<watcher_id>/<session>/` 配下にステータス/ログが出ているか確認
 
-> さらに詳しい対処は **[`docs/TROUBLESHOOT.md`](TROUBLESHOOT.md)** を参照してください。
+> さらに詳しい対処は **[`docs/TROUBLESHOOTING.md`](TROUBLESHOOTING.md)** を参照してください。
 
 ---
 
@@ -163,7 +165,7 @@ GUI から以下の手順で接続します：
 
 * 認証の詳細：**[`docs/SSH-SETUP.md`](SSH-SETUP.md)**
 * 使い方の詳細（エディタ／ターミナル操作）：**[`docs/USAGE.md`](USAGE.md)**
-* トラブルシュート：**[`docs/TROUBLESHOOT.md`](TROUBLESHOOT.md)**
+* トラブルシュート：**[`docs/TROUBLESHOOTING.md`](TROUBLESHOOTING.md)**
 
 ---
 

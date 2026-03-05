@@ -128,6 +128,25 @@ rsync -azv user@203.0.113.10:/home/user/remote_dev/_registry/ ~/gui_local_mirror
 
 ---
 
+## 4-1. キャッシュ削除が失敗する（Web 版・RT モード）
+
+**症状**
+
+* SessionBar の「キャッシュ削除」を押すと「削除に失敗しました」や HTTP エラーが出る。
+
+**原因と確認**
+
+* **Relay のバックエンドが古い**  
+  `cleanup-staged` でセッション未存在時に 404 を返す旧コードのままの場合、relay にセッション dir が無いと失敗します。→ 最新の `backend/app/main.py` を配置し、uvicorn を再起動してください。
+* **Watcher のスクリプトが古い**  
+  `_internal_cleanup_staged` を処理する処理が入っていない `command_watcher_rt.py` のままの場合、Watcher 側でキャッシュが削除されません。→ 最新の `scripts/command_watcher_rt.py` を Watcher マシンに転送し、`watcher_manager_rt.sh` を再起動してください。
+
+**手順の詳細**
+
+* [WEB-SETUP.md の「4-1. キャッシュ削除を動かすために（RT モード）」](WEB-SETUP.md#4-1-キャッシュ削除を動かすためにrt-モード) を参照してください。
+
+---
+
 ## 5. SSH 認証エラー（`Permission denied (publickey)` など）
 
 **確認ポイント**
@@ -192,21 +211,30 @@ rsync -azv user@203.0.113.10:/home/user/remote_dev/_registry/ ~/gui_local_mirror
 
 ---
 
-## 9. 実行途中の経過がターミナルに表示されない（仕様）
+## 9. 実行途中の経過が「まったく出ない」ように見える
 
 **症状**
 
-* 長いコマンドを実行しても、GUI のターミナルに途中経過が流れない。
+* 長いコマンドを実行しているのに、途中経過がしばらく何も表示されない／一気にまとまって出てくるように見える。
 
-**原因（仕様）**
+**実際の挙動（v3.0.0 以降）**
 
-* Watcher はコマンド実行中の標準出力/標準エラーを逐次送信せず、**処理完了後にまとめてログ（例: `commands.log`）へ書き込みます**。そのため **途中経過は GUI では見えません**。
+* `command_watcher.py` 側では、通常コマンドも Python 実行も **逐次的にログへ書き込み** ます。
+  * 通常コマンド: `subprocess.Popen(..., stdout=PIPE, stderr=STDOUT)` で 1 行ずつ `commands.log` に追記。
+  * Python 実行: 一時ファイル（例: `python.log`）を 0.1 秒間隔で tail しつつ `commands.log` に反映。
+* GUI 側（`WatcherClient`）は `LOG_FETCH_INTERVAL_MS`（既定 1000ms）ごとに `commands.log` を pull して追記部分だけを読みます。
+  * そのため、**数百 ms〜数秒単位の「かたまり」で更新される**のが正しい挙動です（完全リアルタイムではありません）。
 
-**回避策の例**
+**こう見えやすいケース**
 
-* 長い処理は **ステップに分割** して実行する（各ステップ終了ごとにログが反映される）。
-* 処理側で **チェックポイントファイル** を出力する（例：`echo step1 > status.txt`）。ファイルを開き直して進捗を確認する。
-* 先に **Local モード**で動作時間を見積もり、Remote 実行は必要最小限にする。
+* 非常に大量のログを一度に吐くコマンド（ビルド・大規模テストなど）。
+* ネットワーク遅延や rsync の負荷が高いとき。
+
+**対処・調整の例**
+
+* 進捗を細かく出す: 長い処理の中で `print("step1 ...")` などを適宜出力する。
+* 1 回のログ量を抑える: 必要に応じて冗長なログを減らす（`MAX_OUTPUT_CHARS` による切り捨てもあります）。
+* 本当に途中が止まっているかを疑う場合は、Watcher 側で直接コマンドを実行して挙動を比較する。
 
 ---
 

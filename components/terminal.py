@@ -300,6 +300,7 @@ class TerminalFrame(ttk.Frame):
             user = status_data.get("user") or "u"
             host = status_data.get("host") or "h"
             env = status_data.get("conda_env")
+            # print(env)
             prefix = f"({env}) " if env and env != "base" else "[Remote] "
             
             prompt_prefix = prefix

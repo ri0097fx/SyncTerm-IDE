@@ -1,15 +1,16 @@
 {
   "open_files": [
-    "/Users/ishibashiryuto/Desktop/SyncTerm-IDE-re/CHANGELOG.md"
+    "remote::vit-pruning/models/hybrid_prune_refactored_score_trace.py",
+    "/Users/ishibashi/gui_local_mirror/sessions/rtx5090/5090-default/.watcher_status.json"
   ],
-  "active_file": "/Users/ishibashiryuto/Desktop/SyncTerm-IDE-re/CHANGELOG.md",
-  "last_tree_root": null,
+  "active_file": "/Users/ishibashi/gui_local_mirror/sessions/rtx5090/5090-default/.watcher_status.json",
+  "last_tree_root": "/Users/ishibashi/gui_local_mirror/sessions/rtx5090/5090-sub",
   "prefs": {
     "editor_family": "Menlo",
     "editor_size": 10,
     "term_family": "Menlo",
     "term_size": 10
   },
-  "main_sash_pos": 504,
-  "editor_sash_pos": 258
+  "main_sash_pos": 463,
+  "editor_sash_pos": 282
 }

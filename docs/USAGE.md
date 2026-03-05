@@ -7,7 +7,7 @@
 
 ## 0. 前提（構成の要点）
 
-* **GUI（PC A）**：`gui_terminal.py` を実行して操作する側。
+* **GUI（PC A）**：`main.py` を実行して操作する側。
 * **Watcher（PC B など複数可）**：`watcher_manager.sh` が `command_watcher.py` を起動し、**サーバーに置かれたセッション領域**を監視・実行します。
 * **サーバー**：ファイルを **中継・保管**するだけ。GUI ⇄ サーバー ⇄ Watcher を **SSH/rsync** で同期します。
   ※ 矢印の向きは **ローカル → サーバー** のみ（サーバーからのプッシュはしません）。GUI/Watcher がサーバーへ取りに行く（pull）＆送る（push）動作です。
@@ -42,7 +42,7 @@ PC A（操作端末）で GUI を立ち上げます。
 
 ```bash
 # 例: PC A 上で
-python gui_terminal.py
+python main.py
 ```
 
 起動後の流れ

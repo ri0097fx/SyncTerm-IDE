@@ -7,6 +7,20 @@
 ---
 ## [Unreleased]
 
+### Added
+- **Web 版本格対応**: ブラウザで動作する Web フロント（syncterm-web）と FastAPI バックエンド（backend）。デスクトップ版と並行利用可能。
+- **リバーストンネル（RT）モード**: Watcher が relay へ逆方向トンネルを張り、コマンド・ログ・ファイル取得を HTTP で即時送受信。低遅延・rsync 待ち不要。
+- **トンネル付き一括起動**: `./scripts/start-web-with-tunnel.sh` および `npm run dev:tunnel` で SSH トンネルと Vite を同時起動。終了時にトンネルも自動停止。
+- **Staged キャッシュ削除**: Web の SessionBar から「キャッシュ削除」で relay / Watcher の staged ファイルを一括削除。
+- **画像プレビュー・画像タブ**: 画像を Blob 取得でプレビュー。画像用タブを Editor と分離して表示。
+- **config.ini.example / .env.tunnel.example**: 個人情報を含まない設定例を追加。`config.ini` は .gitignore でリポジトリに含めない運用を推奨。
+
+### Changed
+- **README**: Web 版を推奨とする記述に変更。Quick Start で Web 版を先に案内。
+- **デプロイ**: `scripts/deploy_backend.sh` で relay へバックエンドを rsync して起動。デフォルトの REMOTE_DIR を `~/SyncTerm-IDE` に変更。
+
+### Fixed
+- RT モードで relay にセッション dir が無い場合にキャッシュ削除が 404 で失敗する問題を修正（relay 側なしでも Watcher 側のみ削除可能に）。
 
 ---
 

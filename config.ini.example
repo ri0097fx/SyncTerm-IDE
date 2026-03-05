@@ -1,9 +1,9 @@
 [remote]
 # 【要編集】接続するリモートサーバーのユーザー名とホスト名
-server = A6000
+server = user@relay-host
 
 # 【要編集】サーバー上のセッションを管理するベースディレクトリ（絶対パス）
-base_path = /home/ishibashi/mnt/term
+base_path = /home/user/remote_dev
 
 [local_paths]
 # 【要編集】GUIクライアントが使用するローカルミラーのパス
@@ -21,9 +21,6 @@ registry_dir_name = _registry
 
 [rt]
 # リバーストンネル版 Watcher 用（watcher_manager_rt.sh）
-# rt_port: Watcher の HTTP サーバーポート（relay 側に -R で転送される）
 rt_port = 9001
-# backend_port: relay のバックエンドポート（Watcher が -L で接続する先）
 backend_port = 8000
-# relay_local_port: Watcher 側の -L で使うローカルポート（8000 が Cursor 等で使われている場合は 8001 等に変更）
 relay_local_port = 8001

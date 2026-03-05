@@ -2,10 +2,24 @@ __pycache__/
 *.pyc
 *.log
 .env
+.env.tunnel
 .venv/
+.venv-local-ai/
 .DS_Store
 .idea/
 .vscode/
+# ローカル設定（config.ini.example をコピーして編集）
+config.ini
+# ローカル状態
+session_state.json
+# フロントの環境変数（VITE_BACKEND_URL 等）
+syncterm-web/.env.local
+# macOS リソースフォーク等
+Icon
+Icon?
+# Node（syncterm-web）
+node_modules/
+
 # プロジェクト独自で除外したいもの
 gui_local_mirror/
 watcher_local_mirror/
