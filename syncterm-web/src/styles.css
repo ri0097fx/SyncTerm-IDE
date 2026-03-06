@@ -494,6 +494,8 @@ body {
   font-family: var(--terminal-font-family);
   font-size: var(--terminal-font-size);
   min-height: 0;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .terminal-line {
@@ -529,6 +531,10 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   padding-left: 0.15rem;
+}
+
+.terminal-prompt[role="button"] {
+  cursor: pointer;
 }
 
 .terminal-input {

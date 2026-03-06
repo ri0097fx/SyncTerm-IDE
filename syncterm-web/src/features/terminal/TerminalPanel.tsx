@@ -14,6 +14,7 @@ export const TerminalPanel: React.FC = () => {
   const [mode, setMode] = useState<"Remote" | "Local">("Remote");
   const [autoScroll, setAutoScroll] = useState(true);
   const [promptText, setPromptText] = useState("[Remote] $");
+  const [promptFullCwd, setPromptFullCwd] = useState<string | null>(null);
   const [history, setHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState<number>(-1);
   const logRef = useRef<HTMLDivElement | null>(null);
@@ -21,12 +22,15 @@ export const TerminalPanel: React.FC = () => {
 
   // 初期ログ（失敗時も UI は維持）
   useEffect(() => {
+    if (!currentWatcher || !currentSession || mode !== "Remote") {
+      setLines([]);
+      setPromptText(mode === "Local" ? "[Local] $" : "[Remote] $");
+      return;
+    }
+    setLines([]);
+    setPromptText("[Remote] $");
     const load = async () => {
-      if (!currentWatcher || !currentSession || mode !== "Remote") {
-        setLines([]);
-        setPromptText(mode === "Local" ? "[Local] $" : "[Remote] $");
-        return;
-      }
+      if (!currentWatcher || !currentSession) return;
       try {
         const init = await api.getInitialLog(currentWatcher.id, currentSession.name);
         setLines(Array.isArray(init) ? init : []);
@@ -35,13 +39,16 @@ export const TerminalPanel: React.FC = () => {
       }
       try {
         const st = await api.getWatcherStatus(currentWatcher.id, currentSession.name);
-        const env = st?.condaEnv && st.condaEnv !== "base" ? `(${st.condaEnv}) ` : "[Remote] ";
+        const env = st?.condaEnv && st.condaEnv !== "base" ? `(${st.condaEnv}) ` : "";
         const user = st?.user ?? "";
         const host = st?.host ?? "";
-        const cwd = st?.cwd ?? "";
-        setPromptText(`${env}${user}@${host}:${cwd}$`);
+        const pathDisplay = (st?.fullCwd && st.fullCwd.trim()) ? st.fullCwd : (st?.cwd ?? "");
+        const p = `${env}${user}@${host}:${pathDisplay}$`.trim();
+        setPromptText(p || "[Remote] $");
+        setPromptFullCwd((st?.fullCwd && st.fullCwd.trim()) ? st.fullCwd : null);
       } catch {
         setPromptText("[Remote] $");
+        setPromptFullCwd(null);
       }
     };
     void load();
@@ -78,7 +85,7 @@ export const TerminalPanel: React.FC = () => {
     el.scrollTop = el.scrollHeight;
   }, [lines, autoScroll]);
 
-  // Keep prompt updated like a real terminal prompt.
+  // Keep prompt updated (poll status). On error or empty, keep current or fallback to [Remote] $.
   useEffect(() => {
     if (!currentWatcher || !currentSession || mode !== "Remote") return;
     let cancelled = false;
@@ -86,13 +93,17 @@ export const TerminalPanel: React.FC = () => {
       if (cancelled) return;
       try {
         const st = await api.getWatcherStatus(currentWatcher.id, currentSession.name);
-        const env = st?.condaEnv && st.condaEnv !== "base" ? `(${st.condaEnv}) ` : "[Remote] ";
+        if (cancelled) return;
+        const env = st?.condaEnv && st.condaEnv !== "base" ? `(${st.condaEnv}) ` : "";
         const user = st?.user ?? "";
         const host = st?.host ?? "";
-        const cwd = st?.cwd ?? "";
-        if (!cancelled) setPromptText(`${env}${user}@${host}:${cwd}$`);
+        const pathDisplay = (st?.fullCwd && st.fullCwd.trim()) ? st.fullCwd : (st?.cwd ?? "");
+        const p = `${env}${user}@${host}:${pathDisplay}$`.trim();
+        setPromptText(p || "[Remote] $");
+        if (!cancelled) setPromptFullCwd((st?.fullCwd && st.fullCwd.trim()) ? st.fullCwd : null);
       } catch {
         if (!cancelled) setPromptText("[Remote] $");
+        if (!cancelled) setPromptFullCwd(null);
       }
       if (!cancelled) setTimeout(tick, 2000);
     };
@@ -277,6 +288,13 @@ export const TerminalPanel: React.FC = () => {
           <span
             className="terminal-prompt"
             style={{ fontFamily: preferences.terminalFontFamily, fontSize: `${preferences.terminalFontSize}px` }}
+            title={promptFullCwd ? "クリックでパスをコピー" : undefined}
+            onClick={() => {
+              if (promptFullCwd && navigator.clipboard?.writeText) {
+                navigator.clipboard.writeText(promptFullCwd);
+              }
+            }}
+            role={promptFullCwd ? "button" : undefined}
           >
             {mode === "Remote" ? promptText : "[Local] $"}
           </span>
@@ -293,8 +311,6 @@ export const TerminalPanel: React.FC = () => {
                 return;
               }
               if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "c") {
-                e.preventDefault();
-                setInput("");
                 return;
               }
               if (e.key === "Enter") {
