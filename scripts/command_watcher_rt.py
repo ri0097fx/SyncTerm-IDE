@@ -326,8 +326,15 @@ class SessionContext:
             # RT: staged_content が渡されていれば直接書き込む（rsync 待ち不要）
             if getattr(self, "_staged_content", None) is not None:
                 staged.parent.mkdir(parents=True, exist_ok=True)
-                staged.write_text(self._staged_content, encoding="utf-8")
+                raw = self._staged_content
                 delattr(self, "_staged_content")
+                if isinstance(raw, str) and raw.startswith("base64:"):
+                    try:
+                        staged.write_bytes(base64.b64decode(raw[7:]))
+                    except Exception:
+                        staged.write_text(raw, encoding="utf-8")
+                else:
+                    staged.write_text(raw, encoding="utf-8")
             else:
                 for _ in range(40):
                     if staged.exists():
@@ -725,7 +732,9 @@ def _poll_commands_loop():
                         except (ValueError, OSError):
                             start = len(lines)
                     else:
-                        start = len(lines)
+                        # 新規セッションやバックエンドが commands.txt を新規作成した直後は 0 から処理する
+                        # （start = len(lines) だと最初の行をスキップしてしまい Rename / create file 等が動かない）
+                        start = 0
                     offsets[session] = start
                 if start > len(lines):
                     start = len(lines)

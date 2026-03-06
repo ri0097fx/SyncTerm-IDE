@@ -28,6 +28,26 @@ function findEntryByPath(entries: FileEntry[], path: string): FileEntry | undefi
   return undefined;
 }
 
+function flattenEntries(entries: FileEntry[]): FileEntry[] {
+  const out: FileEntry[] = [];
+  for (const e of entries) {
+    out.push(e);
+    if (e.children?.length) out.push(...flattenEntries(e.children));
+  }
+  return out;
+}
+
+function arrayBufferToBase64(buf: ArrayBuffer): string {
+  const bytes = new Uint8Array(buf);
+  const chunkSize = 8192;
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode.apply(null, [...chunk]);
+  }
+  return btoa(binary);
+}
+
 interface Props {
   onOpenFile?: (path: string) => void;
 }
@@ -37,7 +57,8 @@ type ClipboardKind = "copy" | "cut";
 export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
   const { currentWatcher, currentSession } = useSession();
   const [roots, setRoots] = useState<FileEntry[]>([]);
-  const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
+  const [lastSelectedPath, setLastSelectedPath] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [treeError, setTreeError] = useState<string | null>(null);
   const [loadingPath, setLoadingPath] = useState<string | null>(null);
@@ -48,7 +69,9 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
   const [linkSubmitting, setLinkSubmitting] = useState(false);
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; entry: FileEntry | null } | null>(null);
-  const [clipboard, setClipboard] = useState<{ path: string; kind: ClipboardKind } | null>(null);
+  const [clipboard, setClipboard] = useState<{ paths: string[]; kind: ClipboardKind } | null>(null);
+  const [dragOverPath, setDragOverPath] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
 
   const [showNewFile, setShowNewFile] = useState(false);
   const [showNewFolder, setShowNewFolder] = useState(false);
@@ -56,6 +79,7 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [actionParentPath, setActionParentPath] = useState("");
   const [actionEntry, setActionEntry] = useState<FileEntry | null>(null);
+  const [actionEntries, setActionEntries] = useState<FileEntry[]>([]);
   const [newName, setNewName] = useState("");
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
@@ -119,12 +143,43 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
     }
   };
 
-  const handleSelect = (entry: FileEntry) => {
-    setSelectedPath(entry.path);
-    if (entry.kind === "file" && onOpenFile) {
-      onOpenFile(entry.path);
-    }
-  };
+  const flatList = React.useMemo(() => flattenEntries(roots), [roots]);
+
+  const handleSelect = useCallback(
+    (entry: FileEntry, e?: React.MouseEvent) => {
+      if (e?.ctrlKey || e?.metaKey) {
+        setSelectedPaths((prev) => {
+          const next = new Set(prev);
+          if (next.has(entry.path)) next.delete(entry.path);
+          else next.add(entry.path);
+          return next;
+        });
+        setLastSelectedPath(entry.path);
+      } else if (e?.shiftKey) {
+        const idx = flatList.findIndex((x) => x.path === entry.path);
+        const lastIdx = lastSelectedPath != null ? flatList.findIndex((x) => x.path === lastSelectedPath) : -1;
+        const from = lastIdx < 0 ? idx : Math.min(idx, lastIdx);
+        const to = lastIdx < 0 ? idx : Math.max(idx, lastIdx);
+        const paths = flatList.slice(from, to + 1).map((x) => x.path);
+        setSelectedPaths(new Set(paths));
+        setLastSelectedPath(entry.path);
+      } else {
+        setSelectedPaths(new Set([entry.path]));
+        setLastSelectedPath(entry.path);
+        if (entry.kind === "file" && onOpenFile) onOpenFile(entry.path);
+      }
+    },
+    [flatList, lastSelectedPath, onOpenFile]
+  );
+
+  const getSelectedPaths = useCallback(() => Array.from(selectedPaths), [selectedPaths]);
+  const getContextEntries = useCallback((): FileEntry[] => {
+    const entry = contextMenu?.entry ?? null;
+    if (entry) return [entry];
+    return getSelectedPaths()
+      .map((p) => findEntryByPath(roots, p))
+      .filter((e): e is FileEntry => e != null);
+  }, [contextMenu?.entry, roots, getSelectedPaths]);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -158,19 +213,21 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
     setShowNewFolder(true);
   };
   const openRename = () => {
-    const e = contextMenu?.entry ?? (selectedPath ? findEntryByPath(roots, selectedPath) : undefined);
+    const entries = getContextEntries();
     setContextMenu(null);
-    if (!e) return;
-    setActionEntry(e);
-    setNewName(baseName(e.path));
+    if (entries.length !== 1) return;
+    setActionEntry(entries[0]);
+    setActionEntries([]);
+    setNewName(baseName(entries[0].path));
     setActionError(null);
     setShowRename(true);
   };
   const openDeleteConfirm = () => {
-    const e = contextMenu?.entry ?? (selectedPath ? findEntryByPath(roots, selectedPath) : undefined);
+    const entries = getContextEntries();
     setContextMenu(null);
-    if (!e) return;
-    setActionEntry(e);
+    if (!entries.length) return;
+    setActionEntry(entries.length === 1 ? entries[0] : null);
+    setActionEntries(entries.length > 1 ? entries : []);
     setActionError(null);
     setShowDeleteConfirm(true);
   };
@@ -233,62 +290,72 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
     setActionEntry(null);
   };
   const submitDelete = async () => {
-    if (!actionEntry) return;
-    await runWithRefresh(() =>
-      api.deletePath(currentWatcher!.id, currentSession!.name, actionEntry.path)
-    );
+    const toDelete = actionEntries.length ? actionEntries : actionEntry ? [actionEntry] : [];
+    if (!toDelete.length || !currentWatcher || !currentSession) return;
+    await runWithRefresh(async () => {
+      for (const e of toDelete) {
+        await api.deletePath(currentWatcher.id, currentSession.name, e.path);
+      }
+    });
     setShowDeleteConfirm(false);
     setActionEntry(null);
-    if (clipboard?.path === actionEntry.path && clipboard?.kind === "cut") setClipboard(null);
+    setActionEntries([]);
+    if (clipboard?.paths.length) {
+      const deleted = new Set(toDelete.map((e) => e.path));
+      const next = clipboard.paths.filter((p) => !deleted.has(p));
+      setClipboard(next.length ? { ...clipboard, paths: next } : null);
+    }
   };
 
   const handleCopy = () => {
-    const e = contextMenu?.entry ?? (selectedPath ? findEntryByPath(roots, selectedPath) : undefined);
+    const entries = getContextEntries();
     setContextMenu(null);
-    if (e) setClipboard({ path: e.path, kind: "copy" });
+    if (entries.length) setClipboard({ paths: entries.map((e) => e.path), kind: "copy" });
   };
   const handleCut = () => {
-    const e = contextMenu?.entry ?? (selectedPath ? findEntryByPath(roots, selectedPath) : undefined);
+    const entries = getContextEntries();
     setContextMenu(null);
-    if (e) setClipboard({ path: e.path, kind: "cut" });
+    if (entries.length) setClipboard({ paths: entries.map((e) => e.path), kind: "cut" });
   };
   const handlePaste = async () => {
-    if (!clipboard || !currentWatcher || !currentSession) return;
+    if (!clipboard?.paths.length || !currentWatcher || !currentSession) return;
     setContextMenu(null);
     const destDir = contextMenu?.entry
       ? (contextMenu.entry.kind === "dir" || contextMenu.entry.kind === "symlink"
           ? contextMenu.entry.path
           : parentPath(contextMenu.entry.path))
-      : selectedPath
+      : getSelectedPaths()[0] != null
       ? (() => {
-          const entry = findEntryByPath(roots, selectedPath);
-          return entry && (entry.kind === "dir" || entry.kind === "symlink") ? entry.path : parentPath(selectedPath);
+          const entry = findEntryByPath(roots, getSelectedPaths()[0]);
+          return entry && (entry.kind === "dir" || entry.kind === "symlink") ? entry.path : parentPath(getSelectedPaths()[0]);
         })()
       : "";
-    const destPath = joinPath(destDir, baseName(clipboard.path));
-    if (clipboard.kind === "cut") {
-      await runWithRefresh(() => api.movePath(currentWatcher.id, currentSession.name, clipboard.path, destPath));
-      setClipboard(null);
-    } else {
-      await runWithRefresh(() => api.copyPath(currentWatcher.id, currentSession.name, clipboard.path, destPath));
-    }
+    await runWithRefresh(async () => {
+      for (const path of clipboard.paths) {
+        const destPath = joinPath(destDir, baseName(path));
+        if (clipboard.kind === "cut") await api.movePath(currentWatcher.id, currentSession.name, path, destPath);
+        else await api.copyPath(currentWatcher.id, currentSession.name, path, destPath);
+      }
+    });
+    if (clipboard.kind === "cut") setClipboard(null);
   };
 
   const handleDownload = async () => {
-    const e = contextMenu?.entry ?? (selectedPath ? findEntryByPath(roots, selectedPath) : undefined);
+    const entries = getContextEntries().filter((e) => e.kind === "file");
     setContextMenu(null);
-    if (!e || e.kind !== "file") return;
-    const path = e.path;
-    if (!currentWatcher || !currentSession) return;
+    if (!entries.length || !currentWatcher || !currentSession) return;
     try {
-      const content = await api.fetchFileContent(currentWatcher.id, currentSession.name, path);
-      const blob = new Blob([content], { type: "application/octet-stream" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = baseName(path);
-      a.click();
-      URL.revokeObjectURL(url);
+      for (let i = 0; i < entries.length; i++) {
+        const path = entries[i].path;
+        const blob = await api.getRawFileBlob(currentWatcher.id, currentSession.name, path);
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = baseName(path);
+        a.click();
+        URL.revokeObjectURL(url);
+        if (i < entries.length - 1) await new Promise((r) => setTimeout(r, 200));
+      }
     } catch (err) {
       setTreeError(err instanceof Error ? err.message : "Download failed");
     }
@@ -338,9 +405,54 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
     setContextMenu({ x: e.clientX, y: e.clientY, entry });
   };
 
-  const canPaste = !!clipboard && !!currentWatcher && !!currentSession;
-  const contextEntry = contextMenu?.entry ?? (selectedPath ? findEntryByPath(roots, selectedPath) : undefined);
-  const showDownload = contextEntry?.kind === "file";
+  const canPaste = !!clipboard?.paths?.length && !!currentWatcher && !!currentSession;
+  const contextEntries = getContextEntries();
+  const singleContextEntry = contextEntries.length === 1 ? contextEntries[0] : null;
+  const showDownload = contextEntries.some((e) => e.kind === "file");
+
+  const handleDragStart = useCallback(
+    (paths: string[]) => {
+      setDragOverPath(null);
+    },
+    []
+  );
+  const handleDropMove = useCallback(
+    async (destDir: string, paths: string[]) => {
+      if (!currentWatcher || !currentSession) return;
+      const toMove = paths.filter((p) => p !== destDir && !p.startsWith(destDir + "/"));
+      await runWithRefresh(async () => {
+        for (const path of toMove) {
+          await api.movePath(currentWatcher.id, currentSession.name, path, joinPath(destDir, baseName(path)));
+        }
+      });
+      setDragOverPath(null);
+    },
+    [currentWatcher, currentSession, runWithRefresh]
+  );
+  const handleDropFiles = useCallback(
+    async (destDir: string, files: FileList | File[]) => {
+      if (!currentWatcher || !currentSession) return;
+      const arr = Array.from(files);
+      setUploading(true);
+      setTreeError(null);
+      try {
+        for (const file of arr) {
+          const path = joinPath(destDir, file.name);
+          const buf = await file.arrayBuffer();
+          const contentBase64 = arrayBufferToBase64(buf);
+          await api.uploadFile(currentWatcher.id, currentSession.name, path, contentBase64);
+        }
+        window.setTimeout(() => void refreshTree(), 1500);
+        window.setTimeout(() => void refreshTree(), 4000);
+      } catch (err) {
+        setTreeError(err instanceof Error ? err.message : "Upload failed");
+      } finally {
+        setUploading(false);
+        setDragOverPath(null);
+      }
+    },
+    [currentWatcher, currentSession, refreshTree]
+  );
 
   return (
     <div className="pane pane-left">
@@ -356,19 +468,46 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
         </div>
       </div>
       <div
-        className="pane-body file-tree-scroll"
+        className={`pane-body file-tree-scroll ${dragOverPath === "" ? "file-tree-drag-over" : ""}`}
         onContextMenu={(e) => onContextMenuOpen(e, null)}
+        onDragOver={(e) => {
+          if (e.dataTransfer.types.includes("Files")) {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = "copy";
+            setDragOverPath("");
+          }
+        }}
+        onDragLeave={() => setDragOverPath((p) => (p === "" ? null : p))}
+        onDrop={(e) => {
+          e.preventDefault();
+          if (e.dataTransfer.files?.length) {
+            void handleDropFiles("", e.dataTransfer.files);
+          } else if (e.dataTransfer.types.includes("application/json")) {
+            try {
+              const data = JSON.parse(e.dataTransfer.getData("application/json"));
+              if (data?.paths?.length) void handleDropMove("", data.paths);
+            } catch {}
+          }
+          setDragOverPath(null);
+        }}
       >
+        {uploading && <div className="pane-empty">Uploading...</div>}
         {roots.map((entry) => (
           <TreeNode
             key={entry.id}
             entry={entry}
             depth={0}
-            selectedPath={selectedPath}
+            selectedPaths={selectedPaths}
             onSelect={handleSelect}
             onExpand={handleExpand}
             onContextMenu={onContextMenuOpen}
             loadingPath={loadingPath}
+            getSelectedPaths={getSelectedPaths}
+            dragOverPath={dragOverPath}
+            setDragOverPath={setDragOverPath}
+            onDropMove={handleDropMove}
+            onDropFiles={handleDropFiles}
+            onDragStart={handleDragStart}
           />
         ))}
         {loading && <div className="pane-empty">Loading...</div>}
@@ -390,10 +529,10 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
           <button type="button" onClick={handleCopy}>Copy</button>
           <button type="button" onClick={handleCut}>Cut</button>
           <button type="button" onClick={handlePaste} disabled={!canPaste}>Paste</button>
-          <button type="button" onClick={openRename} disabled={!contextEntry}>Rename</button>
+          <button type="button" onClick={openRename} disabled={!singleContextEntry}>Rename</button>
           {showDownload && <button type="button" onClick={handleDownload}>Download</button>}
           <div className="context-menu-sep" />
-          <button type="button" onClick={openDeleteConfirm} disabled={!contextEntry}>Delete</button>
+          <button type="button" onClick={openDeleteConfirm} disabled={!contextEntries.length}>Delete</button>
         </div>
       )}
 
@@ -468,11 +607,17 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
         </div>
       )}
 
-      {showDeleteConfirm && actionEntry && (
+      {showDeleteConfirm && (actionEntry || actionEntries.length > 0) && (
         <div className="modal-overlay" onClick={() => setShowDeleteConfirm(false)}>
           <div className="modal-card" onClick={(e) => e.stopPropagation()}>
             <h3 className="modal-title">Delete</h3>
-            <p>Delete &quot;{actionEntry.name}&quot;? This cannot be undone.</p>
+            <p>
+              {actionEntries.length > 1
+                ? `Delete ${actionEntries.length} items? This cannot be undone.`
+                : actionEntry
+                ? `Delete "${actionEntry.name}"? This cannot be undone.`
+                : `Delete "${actionEntries[0]?.name}"? This cannot be undone.`}
+            </p>
             {actionError && <div className="modal-error">{actionError}</div>}
             <div className="modal-actions">
               <button className="icon-button" style={{ width: "auto", padding: "0 0.8rem" }} onClick={() => setShowDeleteConfirm(false)}>Cancel</button>
@@ -519,18 +664,40 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
 interface NodeProps {
   entry: FileEntry;
   depth: number;
-  selectedPath: string | null;
-  onSelect: (entry: FileEntry) => void;
+  selectedPaths: Set<string>;
+  onSelect: (entry: FileEntry, e?: React.MouseEvent) => void;
   onExpand: (entry: FileEntry) => void;
   onContextMenu: (e: React.MouseEvent, entry: FileEntry) => void;
   loadingPath: string | null;
+  getSelectedPaths: () => string[];
+  dragOverPath: string | null;
+  setDragOverPath: (path: string | null) => void;
+  onDropMove: (destDir: string, paths: string[]) => Promise<void>;
+  onDropFiles: (destDir: string, files: FileList | File[]) => Promise<void>;
+  onDragStart: (paths: string[]) => void;
 }
 
-const TreeNode: React.FC<NodeProps> = ({ entry, depth, selectedPath, onSelect, onExpand, onContextMenu, loadingPath }) => {
+const TreeNode: React.FC<NodeProps> = ({
+  entry,
+  depth,
+  selectedPaths,
+  onSelect,
+  onExpand,
+  onContextMenu,
+  loadingPath,
+  getSelectedPaths,
+  dragOverPath,
+  setDragOverPath,
+  onDropMove,
+  onDropFiles,
+  onDragStart,
+}) => {
   const [open, setOpen] = useState(depth === 0);
   const hasChildren = (entry.children && entry.children.length > 0) || !!entry.hasChildren;
-  const isSelected = selectedPath === entry.path;
+  const isSelected = selectedPaths.has(entry.path);
   const isLoading = loadingPath === entry.path;
+  const isFolder = entry.kind === "dir" || entry.kind === "symlink";
+  const isDragOver = dragOverPath === entry.path;
 
   const icon =
     entry.kind === "symlink"
@@ -542,19 +709,64 @@ const TreeNode: React.FC<NodeProps> = ({ entry, depth, selectedPath, onSelect, o
       : "📄";
   const caret = hasChildren ? (open ? "▼" : "▶") : " ";
 
+  const handleDragStart = (e: React.DragEvent) => {
+    onDragStart([]);
+    const paths = getSelectedPaths();
+    const toDrag = paths.length && selectedPaths.has(entry.path) ? paths : [entry.path];
+    e.dataTransfer.setData("application/json", JSON.stringify({ paths: toDrag }));
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", entry.name);
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    if (e.dataTransfer.types.includes("Files")) {
+      if (isFolder) {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "copy";
+        setDragOverPath(entry.path);
+      }
+      return;
+    }
+    if (e.dataTransfer.types.includes("application/json") && isFolder) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      setDragOverPath(entry.path);
+    }
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    if (e.dataTransfer.files?.length) {
+      void onDropFiles(entry.path, e.dataTransfer.files);
+    } else if (e.dataTransfer.types.includes("application/json")) {
+      try {
+        const data = JSON.parse(e.dataTransfer.getData("application/json"));
+        if (data?.paths?.length) void onDropMove(entry.path, data.paths);
+      } catch {}
+    }
+    setDragOverPath(null);
+  };
+
+  const handleDragLeave = () => setDragOverPath((p) => (p === entry.path ? null : p));
+
   return (
     <div>
       <button
         type="button"
-        className={`tree-row ${isSelected ? "tree-row-selected" : ""}`}
+        className={`tree-row ${isSelected ? "tree-row-selected" : ""} ${isDragOver ? "file-tree-drag-over" : ""}`}
         style={{ paddingLeft: 8 + depth * 14 }}
-        onClick={() => {
+        draggable
+        onDragStart={handleDragStart}
+        onDragOver={isFolder ? handleDragOver : undefined}
+        onDragLeave={isFolder ? handleDragLeave : undefined}
+        onDrop={isFolder ? handleDrop : undefined}
+        onClick={(e) => {
           if (entry.kind !== "file") {
             const nextOpen = !open;
             setOpen(nextOpen);
             if (nextOpen) void onExpand(entry);
           }
-          onSelect(entry);
+          onSelect(entry, e);
         }}
         onContextMenu={(e) => onContextMenu(e, entry)}
       >
@@ -572,11 +784,17 @@ const TreeNode: React.FC<NodeProps> = ({ entry, depth, selectedPath, onSelect, o
               key={child.id}
               entry={child}
               depth={depth + 1}
-              selectedPath={selectedPath}
+              selectedPaths={selectedPaths}
               onSelect={onSelect}
               onExpand={onExpand}
               onContextMenu={onContextMenu}
               loadingPath={loadingPath}
+              getSelectedPaths={getSelectedPaths}
+              dragOverPath={dragOverPath}
+              setDragOverPath={setDragOverPath}
+              onDropMove={onDropMove}
+              onDropFiles={onDropFiles}
+              onDragStart={onDragStart}
             />
           ))}
         </div>

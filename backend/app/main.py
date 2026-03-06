@@ -156,6 +156,11 @@ class MovePathPayload(BaseModel):
   destPath: str
 
 
+class UploadFilePayload(BaseModel):
+  path: str
+  contentBase64: str
+
+
 def _norm_rel(path: str) -> str:
   """Session-relative path to Watcher rel path (no leading /, no ..)."""
   p = path.strip().lstrip("/").replace("\\", "/")
@@ -1275,7 +1280,10 @@ def save_file_via_watcher(root: Path, rel_path: str, content: str, wid: Optional
   staged_dir.mkdir(parents=True, exist_ok=True)
   token = f"{int(time.time()*1000)}-{uuid.uuid4().hex[:8]}"
   staged_file = staged_dir / token
-  staged_file.write_text(content, encoding="utf-8")
+  if content.startswith("base64:"):
+    staged_file.write_bytes(base64.b64decode(content[7:]))
+  else:
+    staged_file.write_text(content, encoding="utf-8")
 
   ok = append_command_and_wait_processed(
     root,
@@ -1458,6 +1466,22 @@ def move_path(wid: str, sess: str, payload: MovePathPayload):
     raise HTTPException(status_code=400, detail="sourcePath and destPath are required")
   cmd = f"_internal_rename_path::{src}::{dest}"
   return _send_internal_cmd(wid, sess, cmd)
+
+
+@app.post("/watchers/{wid}/sessions/{sess}/files/upload")
+def upload_file(wid: str, sess: str, payload: UploadFilePayload):
+  """Upload a file (binary via contentBase64). Creates or overwrites the path."""
+  root = session_root(wid, sess)
+  rel = _norm_rel(payload.path)
+  if not rel or rel == ".":
+    raise HTTPException(status_code=400, detail="path is required")
+  if not payload.contentBase64:
+    raise HTTPException(status_code=400, detail="contentBase64 is required")
+  content = "base64:" + payload.contentBase64
+  if wid and sess and save_file_via_watcher_rt(wid, sess, rel, content):
+    return {"ok": True, "rt": True}
+  save_file_via_watcher(root, rel, content, wid=wid, sess=sess)
+  return {"ok": True, "rt": False}
 
 
 @app.post("/watchers/{wid}/sessions/{sess}/ai-assist")

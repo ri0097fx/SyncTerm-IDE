@@ -359,6 +359,12 @@ body {
   margin: 0.25rem 0;
 }
 
+.file-tree-drag-over {
+  outline: 2px dashed var(--accent-bg);
+  outline-offset: -2px;
+  background: color-mix(in srgb, var(--accent-bg) 12%, transparent);
+}
+
 .editor-body {
   display: flex;
   flex-direction: column;

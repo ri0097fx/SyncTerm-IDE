@@ -57,6 +57,13 @@ export interface SyncApi {
     destPath: string
   ): Promise<{ ok: boolean; rt?: boolean }>;
 
+  uploadFile(
+    watcherId: string,
+    session: string,
+    path: string,
+    contentBase64: string
+  ): Promise<{ ok: boolean; rt?: boolean }>;
+
   fetchFileContent(
     watcherId: string,
     session: string,
@@ -76,6 +83,12 @@ export interface SyncApi {
     content: string
   ): Promise<void>;
   getRawFileUrl(watcherId: string, session: string, path: string): string;
+  getRawFileBlob(
+    watcherId: string,
+    session: string,
+    path: string,
+    signal?: AbortSignal
+  ): Promise<Blob>;
   runAiAssist(
     watcherId: string,
     session: string,
@@ -326,6 +339,20 @@ class HttpSyncApi implements SyncApi {
         session
       )}/files/move`,
       { method: "POST", body: JSON.stringify({ sourcePath, destPath }) }
+    );
+  }
+
+  async uploadFile(
+    watcherId: string,
+    session: string,
+    path: string,
+    contentBase64: string
+  ): Promise<{ ok: boolean; rt?: boolean }> {
+    return http(
+      `/watchers/${encodeURIComponent(watcherId)}/sessions/${encodeURIComponent(
+        session
+      )}/files/upload`,
+      { method: "POST", body: JSON.stringify({ path, contentBase64 }) }
     );
   }
 
