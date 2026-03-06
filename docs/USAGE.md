@@ -170,7 +170,7 @@ pip install pillow
 3. **Remote モード**でコマンド実行、**エディタ**で編集
 
    * 保存 → Relay 経由で Watcher に反映
-   * 必要に応じてログ初期化や「commands をクリア」を利用
+   * 必要に応じて「キャッシュ・commands 削除」で Staged と commands をリセット
 4. 必要に応じて **別 Watcher** や **別セッション**に切替
 
 ---

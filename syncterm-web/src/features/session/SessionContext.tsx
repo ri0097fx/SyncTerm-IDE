@@ -12,6 +12,7 @@ interface SessionState {
   setWatcher: (id: string) => void;
   setSession: (name: string) => void;
   refreshWatchers: () => void;
+  refreshSessions: (selectName?: string) => Promise<void>;
 }
 
 const SessionContext = createContext<SessionState | undefined>(undefined);
@@ -47,25 +48,35 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     void loadWatchers();
   }, []);
 
+  const loadSessions = async (watcherId?: string, selectName?: string) => {
+    const wid = watcherId ?? currentWatcherId;
+    if (!wid) {
+      setSessions([]);
+      return;
+    }
+    setLoading(true);
+    try {
+      const list = await api.listSessions(wid);
+      setSessions(list);
+      if (selectName != null && list.some((s) => s.name === selectName)) {
+        setCurrentSessionName(selectName);
+      } else if (!currentSessionName && list.length > 0) {
+        setCurrentSessionName(list[0].name);
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
-    const loadSessions = async () => {
-      if (!currentWatcherId) {
-        setSessions([]);
-        return;
-      }
-      setLoading(true);
-      try {
-        const list = await api.listSessions(currentWatcherId);
-        setSessions(list);
-        if (!currentSessionName && list.length > 0) {
-          setCurrentSessionName(list[0].name);
-        }
-      } finally {
-        setLoading(false);
-      }
-    };
     void loadSessions();
   }, [currentWatcherId]);
+
+  const refreshSessions = async (selectName?: string) => {
+    if (currentWatcherId) {
+      await loadSessions(currentWatcherId, selectName);
+    }
+  };
 
   useEffect(() => {
     const loadRunner = async () => {
@@ -102,7 +113,8 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setSession: (name) => setCurrentSessionName(name),
     refreshWatchers: () => {
       void loadWatchers();
-    }
+    },
+    refreshSessions
   };
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;

@@ -67,6 +67,10 @@ class SessionModel(BaseModel):
   watcherId: str
 
 
+class CreateSessionModel(BaseModel):
+  name: str
+
+
 class WatcherStatusModel(BaseModel):
   user: str
   host: str
@@ -410,6 +414,24 @@ def list_sessions(wid: str):
     if d.is_dir():
       sessions.append(SessionModel(name=d.name, watcherId=wid))
   return sessions
+
+
+@app.post("/watchers/{wid}/sessions", response_model=SessionModel)
+def create_session(wid: str, body: CreateSessionModel):
+  """Relay 上にセッション用ディレクトリを作成する。名前は / .. 不可・空白不可。"""
+  name = (body.name or "").strip()
+  if not name:
+    raise HTTPException(status_code=400, detail="session name is required")
+  if "/" in name or ".." in name or "\\" in name:
+    raise HTTPException(status_code=400, detail="session name must not contain / \\ or ..")
+  root = SESSIONS_ROOT / wid / name
+  if root.exists():
+    raise HTTPException(status_code=409, detail="session already exists")
+  try:
+    root.mkdir(parents=True, exist_ok=False)
+  except OSError as e:
+    raise HTTPException(status_code=500, detail=str(e))
+  return SessionModel(name=name, watcherId=wid)
 
 
 @app.get("/watchers/{wid}/sessions/{sess}/status", response_model=WatcherStatusModel)

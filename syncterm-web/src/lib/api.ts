@@ -10,6 +10,7 @@ import type {
 export interface SyncApi {
   listWatchers(): Promise<WatcherInfo[]>;
   listSessions(watcherId: string): Promise<SessionInfo[]>;
+  createSession(watcherId: string, name: string): Promise<SessionInfo>;
   getWatcherStatus(watcherId: string, session: string): Promise<WatcherStatus>;
   getInitialLog(watcherId: string, session: string): Promise<TerminalLine[]>;
   sendRemoteCommand(
@@ -88,18 +89,12 @@ export interface SyncApi {
     response?: unknown;
   }>;
 
-  /** 現在セッションの staged キャッシュを一括削除 */
+  /** 現在セッションの staged キャッシュと commands を一括削除 */
   cleanupStagedCache(watcherId: string, session: string): Promise<{
     deleted: number;
     failed?: number;
     watcher_cleaned: boolean;
     relay_session_exists?: boolean;
-  }>;
-
-  /** commands.txt と .commands.offset のみを Relay と Watcher 両方でクリア */
-  clearCommands(watcherId: string, session: string): Promise<{
-    relay_cleared: boolean;
-    watcher_cleaned: boolean;
   }>;
 }
 
@@ -153,6 +148,13 @@ class HttpSyncApi implements SyncApi {
 
   async listSessions(watcherId: string): Promise<SessionInfo[]> {
     return http<SessionInfo[]>(`/watchers/${encodeURIComponent(watcherId)}/sessions`);
+  }
+
+  async createSession(watcherId: string, name: string): Promise<SessionInfo> {
+    return http<SessionInfo>(`/watchers/${encodeURIComponent(watcherId)}/sessions`, {
+      method: "POST",
+      body: JSON.stringify({ name })
+    });
   }
 
   async getWatcherStatus(watcherId: string, session: string): Promise<WatcherStatus> {
@@ -422,16 +424,6 @@ class HttpSyncApi implements SyncApi {
   }> {
     return http(
       `/watchers/${encodeURIComponent(watcherId)}/sessions/${encodeURIComponent(session)}/cleanup-staged`,
-      { method: "POST" }
-    );
-  }
-
-  async clearCommands(
-    watcherId: string,
-    session: string
-  ): Promise<{ relay_cleared: boolean; watcher_cleaned: boolean }> {
-    return http(
-      `/watchers/${encodeURIComponent(watcherId)}/sessions/${encodeURIComponent(session)}/clear-commands`,
       { method: "POST" }
     );
   }

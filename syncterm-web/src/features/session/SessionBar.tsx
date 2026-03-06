@@ -12,12 +12,13 @@ type RtStatus = {
 export const SessionBar: React.FC = () => {
   const [showPrefs, setShowPrefs] = React.useState(false);
   const [cleanupMessage, setCleanupMessage] = React.useState<string | null>(null);
-  const [clearCommandsMessage, setClearCommandsMessage] = React.useState<string | null>(null);
   const [showRtDiagnostic, setShowRtDiagnostic] = React.useState(false);
   const [rtStatus, setRtStatus] = React.useState<RtStatus | null>(null);
   const [rtDiagnosticError, setRtDiagnosticError] = React.useState<string | null>(null);
   const [debugRtResult, setDebugRtResult] = React.useState<{ ok: boolean; error?: string; response?: unknown } | null>(null);
-  const { watchers, sessions, currentWatcher, currentSession, setWatcher, setSession, refreshWatchers, runnerConfig } =
+  const [newSessionName, setNewSessionName] = React.useState("");
+  const [createSessionError, setCreateSessionError] = React.useState<string | null>(null);
+  const { watchers, sessions, currentWatcher, currentSession, setWatcher, setSession, refreshWatchers, refreshSessions, runnerConfig } =
     useSession();
   const { preferences, updatePreferences, resetPreferences } = usePreferences();
 
@@ -56,8 +57,8 @@ export const SessionBar: React.FC = () => {
           ? "（relay にセッションがありませんでした）"
           : "";
       const msg = res.watcher_cleaned
-        ? `Staged キャッシュを削除しました（relay: ${res.deleted} 件, Watcher 側も削除済み）${failNote}${relayNote}`
-        : `Staged キャッシュを削除しました（relay: ${res.deleted} 件）${failNote}${relayNote}`;
+        ? `キャッシュ・commands を削除しました（relay: ${res.deleted} 件, Watcher 側も削除済み）${failNote}${relayNote}`
+        : `キャッシュ・commands を削除しました（relay: ${res.deleted} 件）${failNote}${relayNote}`;
       setCleanupMessage(msg);
       setTimeout(() => setCleanupMessage(null), 3000);
     } catch (err) {
@@ -67,24 +68,17 @@ export const SessionBar: React.FC = () => {
     }
   };
 
-  const handleClearCommands = async () => {
-    if (!currentWatcher || !currentSession) return;
+  const handleCreateSession = async () => {
+    const name = newSessionName.trim();
+    if (!name || !currentWatcher) return;
+    setCreateSessionError(null);
     try {
-      const res = await api.clearCommands(currentWatcher.id, currentSession.name);
-      const msg =
-        res.watcher_cleaned && res.relay_cleared
-          ? "commands をクリアしました（Relay と Watcher 両方）"
-          : res.watcher_cleaned
-            ? "commands をクリアしました（Watcher 側）"
-            : res.relay_cleared
-              ? "commands をクリアしました（Relay 側）"
-              : "commands をクリアしました";
-      setClearCommandsMessage(msg);
-      setTimeout(() => setClearCommandsMessage(null), 3000);
+      await api.createSession(currentWatcher.id, name);
+      setNewSessionName("");
+      await refreshSessions(name);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "クリアに失敗しました";
-      setClearCommandsMessage(message);
-      setTimeout(() => setClearCommandsMessage(null), 5000);
+      const message = err instanceof Error ? err.message : "作成に失敗しました";
+      setCreateSessionError(message);
     }
   };
 
@@ -121,6 +115,33 @@ export const SessionBar: React.FC = () => {
             ))}
           </select>
           {currentWatcher && (
+            <span style={{ display: "inline-flex", alignItems: "center", marginLeft: "0.25rem", gap: "0.25rem" }}>
+              <input
+                type="text"
+                className="session-select"
+                placeholder="新規セッション名"
+                value={newSessionName}
+                onChange={(e) => { setNewSessionName(e.target.value); setCreateSessionError(null); }}
+                onKeyDown={(e) => e.key === "Enter" && handleCreateSession()}
+                style={{ width: "8rem", padding: "0.2rem 0.4rem" }}
+              />
+              <button
+                type="button"
+                className="icon-button"
+                style={{ width: "auto", padding: "0 0.5rem" }}
+                onClick={handleCreateSession}
+                title="セッションを新規作成"
+              >
+                作成
+              </button>
+            </span>
+          )}
+          {createSessionError && (
+            <span style={{ marginLeft: "0.5rem", fontSize: "0.85rem", color: "var(--color-error, #f87171)" }}>
+              {createSessionError}
+            </span>
+          )}
+          {currentWatcher && (
             <button
               className="icon-button"
               style={{ width: "auto", padding: "0 0.5rem", marginLeft: "0.5rem" }}
@@ -131,29 +152,14 @@ export const SessionBar: React.FC = () => {
             </button>
           )}
           {currentWatcher && currentSession && (
-            <>
-              <button
-                className="icon-button"
-                style={{ width: "auto", padding: "0 0.5rem", marginLeft: "0.25rem" }}
-                onClick={handleClearCommands}
-                title="commands.txt と .commands.offset をクリア（保留コマンドを捨てる）"
-              >
-                commands をクリア
-              </button>
-              <button
-                className="icon-button"
-                style={{ width: "auto", padding: "0 0.5rem", marginLeft: "0.25rem" }}
-                onClick={handleCleanupStaged}
-                title="Staged キャッシュを一括削除"
-              >
-                キャッシュ削除
-              </button>
-            </>
-          )}
-          {clearCommandsMessage && (
-            <span className="session-bar-message" style={{ marginLeft: "0.5rem", fontSize: "0.85rem", opacity: 0.9 }}>
-              {clearCommandsMessage}
-            </span>
+            <button
+              className="icon-button"
+              style={{ width: "auto", padding: "0 0.5rem", marginLeft: "0.25rem" }}
+              onClick={handleCleanupStaged}
+              title="Staged キャッシュと commands を一括削除"
+            >
+              キャッシュ・commands 削除
+            </button>
           )}
           {cleanupMessage && (
             <span className="session-bar-message" style={{ marginLeft: "0.5rem", fontSize: "0.85rem", opacity: 0.9 }}>
