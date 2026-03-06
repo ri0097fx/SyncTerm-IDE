@@ -102,6 +102,8 @@ cp .env.tunnel.example .env.tunnel
 - `config.ini`: `[remote]` の `server` と `base_path` を環境に合わせて編集する。
 - `.env.tunnel`: `TUNNEL_SSH` を `user@relay-host` の形式で編集する（ローカルから Relay へ SSH トンネルを張るための指定）。
 
+**トンネルで起動する場合**: `syncterm-web/.env.local` を作成し、`VITE_BACKEND_URL=http://localhost:8002` を書く。既定は 8000 のため、トンネル（8002）を使うなら必須。
+
 #### 2. 中継サーバー（Relay）でバックエンドを起動する
 
 Relay 上でリポジトリを配置したうえで、デプロイスクリプトを実行する。
@@ -135,6 +137,8 @@ cp .env.tunnel.example .env.tunnel   # 未作成なら。TUNNEL_SSH を編集済
 ```
 
 または `syncterm-web` から `npm run dev:tunnel` を実行してもよい。トンネル（localhost:8002 → Relay:8000）が張られたうえで Vite が起動する。
+
+**別 PC で開く場合やトンネルを使わない場合**: `syncterm-web/.env.local` を作成し、バックエンドの URL を指定する。トンネル経由なら `VITE_BACKEND_URL=http://localhost:8002`、Relay に直接アクセスするなら `VITE_BACKEND_URL=http://<Relayのホスト>:8000`。未設定時は `http://localhost:8000` が使われる。
 
 #### 5. ブラウザでアクセスする
 
