@@ -19,6 +19,7 @@ export const TerminalPanel: React.FC = () => {
   const [historyIndex, setHistoryIndex] = useState<number>(-1);
   const logRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const pendingLogLinesRef = useRef<TerminalLine[]>([]);
 
   // 初期ログ（失敗時も UI は維持）
   useEffect(() => {
@@ -42,7 +43,7 @@ export const TerminalPanel: React.FC = () => {
         const env = st?.condaEnv && st.condaEnv !== "base" ? `(${st.condaEnv}) ` : "";
         const user = st?.user ?? "";
         const host = st?.host ?? "";
-        const pathDisplay = (st?.fullCwd && st.fullCwd.trim()) ? st.fullCwd : (st?.cwd ?? "");
+        const pathDisplay = st?.cwd ?? "";
         const p = `${env}${user}@${host}:${pathDisplay}$`.trim();
         setPromptText(p || "[Remote] $");
         setPromptFullCwd((st?.fullCwd && st.fullCwd.trim()) ? st.fullCwd : null);
@@ -65,7 +66,19 @@ export const TerminalPanel: React.FC = () => {
         const all = await api.fetchLogTail(currentWatcher.id, currentSession.name);
         if (!cancelled && all.length > 0) {
           const maxLines = Math.max(500, Number(preferences?.terminalMaxLines) || 5000);
-          setLines((prev) => [...prev, ...all].slice(-maxLines));
+          const sel = document.getSelection();
+          const selectionInLog =
+            logRef.current &&
+            sel?.anchorNode &&
+            logRef.current.contains(sel.anchorNode) &&
+            (sel.toString()?.length ?? 0) > 0;
+          if (selectionInLog) {
+            pendingLogLinesRef.current = [...pendingLogLinesRef.current, ...all];
+          } else {
+            const pending = pendingLogLinesRef.current;
+            pendingLogLinesRef.current = [];
+            setLines((prev) => [...prev, ...pending, ...all].slice(-maxLines));
+          }
         }
       } catch {
         // 404 / ネットワークエラー等で落とさない
@@ -97,7 +110,7 @@ export const TerminalPanel: React.FC = () => {
         const env = st?.condaEnv && st.condaEnv !== "base" ? `(${st.condaEnv}) ` : "";
         const user = st?.user ?? "";
         const host = st?.host ?? "";
-        const pathDisplay = (st?.fullCwd && st.fullCwd.trim()) ? st.fullCwd : (st?.cwd ?? "");
+        const pathDisplay = st?.cwd ?? "";
         const p = `${env}${user}@${host}:${pathDisplay}$`.trim();
         setPromptText(p || "[Remote] $");
         if (!cancelled) setPromptFullCwd((st?.fullCwd && st.fullCwd.trim()) ? st.fullCwd : null);
@@ -265,7 +278,6 @@ export const TerminalPanel: React.FC = () => {
           ref={logRef}
           className="terminal-log"
           style={{ fontFamily: preferences.terminalFontFamily, fontSize: `${preferences.terminalFontSize}px` }}
-          onClick={() => inputRef.current?.focus()}
           onScroll={(e) => {
             const target = e.currentTarget;
             const nearBottom = target.scrollHeight - target.scrollTop - target.clientHeight < 16;
