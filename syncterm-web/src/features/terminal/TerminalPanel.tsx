@@ -4,6 +4,8 @@ import type { TerminalLine } from "../../types/domain";
 import { api } from "../../lib/api";
 import { usePreferences } from "../preferences/PreferencesContext";
 
+const MAX_TERMINAL_LINES = 5000;
+
 export const TerminalPanel: React.FC = () => {
   const { preferences } = usePreferences();
   const { currentWatcher, currentSession } = useSession();
@@ -17,7 +19,7 @@ export const TerminalPanel: React.FC = () => {
   const logRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
-  // 初期ログ
+  // 初期ログ（失敗時も UI は維持）
   useEffect(() => {
     const load = async () => {
       if (!currentWatcher || !currentSession || mode !== "Remote") {
@@ -25,12 +27,19 @@ export const TerminalPanel: React.FC = () => {
         setPromptText(mode === "Local" ? "[Local] $" : "[Remote] $");
         return;
       }
-      const init = await api.getInitialLog(currentWatcher.id, currentSession.name);
-      setLines(init);
+      try {
+        const init = await api.getInitialLog(currentWatcher.id, currentSession.name);
+        setLines(Array.isArray(init) ? init : []);
+      } catch {
+        setLines([]);
+      }
       try {
         const st = await api.getWatcherStatus(currentWatcher.id, currentSession.name);
-        const env = st.condaEnv && st.condaEnv !== "base" ? `(${st.condaEnv}) ` : "[Remote] ";
-        setPromptText(`${env}${st.user}@${st.host}:${st.cwd}$`);
+        const env = st?.condaEnv && st.condaEnv !== "base" ? `(${st.condaEnv}) ` : "[Remote] ";
+        const user = st?.user ?? "";
+        const host = st?.host ?? "";
+        const cwd = st?.cwd ?? "";
+        setPromptText(`${env}${user}@${host}:${cwd}$`);
       } catch {
         setPromptText("[Remote] $");
       }
@@ -38,18 +47,24 @@ export const TerminalPanel: React.FC = () => {
     void load();
   }, [currentWatcher, currentSession, mode]);
 
-  // 疑似ポーリング
+  // 疑似ポーリング（失敗時は握りつぶし、UI が落ちないようにする）
   useEffect(() => {
     if (!currentWatcher || !currentSession || mode !== "Remote") return;
 
     let cancelled = false;
     const tick = async () => {
       if (!currentWatcher || !currentSession || cancelled) return;
-      const all = await api.fetchLogTail(currentWatcher.id, currentSession.name);
-      if (!cancelled && all.length > 0) {
-        setLines((prev) => [...prev, ...all].slice(-preferences.terminalMaxLines));
+      try {
+        const all = await api.fetchLogTail(currentWatcher.id, currentSession.name);
+        if (!cancelled && all.length > 0) {
+          const maxLines = Math.max(500, Number(preferences?.terminalMaxLines) || 5000);
+          setLines((prev) => [...prev, ...all].slice(-maxLines));
+        }
+      } catch {
+        // 404 / ネットワークエラー等で落とさない
       }
-      if (!cancelled) setTimeout(tick, preferences.terminalPollMs);
+      const pollMs = Math.max(200, Number(preferences?.terminalPollMs) || 1000);
+      if (!cancelled) setTimeout(tick, pollMs);
     };
     void tick();
     return () => {
@@ -71,8 +86,11 @@ export const TerminalPanel: React.FC = () => {
       if (cancelled) return;
       try {
         const st = await api.getWatcherStatus(currentWatcher.id, currentSession.name);
-        const env = st.condaEnv && st.condaEnv !== "base" ? `(${st.condaEnv}) ` : "[Remote] ";
-        if (!cancelled) setPromptText(`${env}${st.user}@${st.host}:${st.cwd}$`);
+        const env = st?.condaEnv && st.condaEnv !== "base" ? `(${st.condaEnv}) ` : "[Remote] ";
+        const user = st?.user ?? "";
+        const host = st?.host ?? "";
+        const cwd = st?.cwd ?? "";
+        if (!cancelled) setPromptText(`${env}${user}@${host}:${cwd}$`);
       } catch {
         if (!cancelled) setPromptText("[Remote] $");
       }
@@ -95,7 +113,56 @@ export const TerminalPanel: React.FC = () => {
           -MAX_TERMINAL_LINES
         )
       );
-      await api.sendRemoteCommand(currentWatcher.id, currentSession.name, trimmed);
+      try {
+        const result = await api.sendRemoteCommand(currentWatcher.id, currentSession.name, trimmed);
+        const ts = Date.now();
+        // 実行経路を常に1行表示（追跡用）
+        const trace = result?._trace;
+        let statusLine: string;
+        if (trace?.method === "rt") {
+          const n = trace.outputLineCount ?? 0;
+          const code = trace.exitCode ?? result?.exitCode ?? "?";
+          statusLine = n > 0
+            ? `[RT] 実行済み（出力 ${n} 行, 終了コード ${code}）`
+            : `[RT] 実行済み（出力なし, 終了コード ${code}）`;
+        } else if (trace?.method === "commands_txt") {
+          statusLine = "[Relay] commands.txt に追記しました（Watcher のポールを待ちます）";
+        } else {
+          statusLine = trace
+            ? "[Relay] 送信しました（応答に経路情報なし）"
+            : "[Relay] 送信しました（Backend 要再起動で経路表示。出力なしの場合は Watcher のターミナルで [RT /command] ログを確認）";
+        }
+        if (preferences?.showCommandTrace) {
+          setLines((prev) =>
+            [...prev, { id: `${ts}-trace`, text: statusLine, isSystem: true }].slice(-MAX_TERMINAL_LINES)
+          );
+        }
+        if (result?.output !== undefined && result.output !== "") {
+          const newLines: TerminalLine[] = String(result.output)
+            .split("\n")
+            .map((t, i) => ({ id: `${ts}-out-${i}`, text: t, isSystem: false }));
+          setLines((prev) => [...prev, ...newLines].slice(-MAX_TERMINAL_LINES));
+        }
+      } catch (err) {
+        const raw = err instanceof Error ? err.message : String(err);
+        let display = `[Error] ${raw}`;
+        if (raw.includes("503")) {
+          try {
+            const json = raw.replace(/^HTTP 503:\s*/, "");
+            const data = JSON.parse(json) as { detail?: { hint?: string; rt_failed_reason?: string } };
+            const hint = data.detail?.hint ?? data.detail?.rt_failed_reason ?? "";
+            if (hint) display = `[Error] コマンド送信失敗。${hint} 画面上部の「接続診断」で rt_port を確認してください。`;
+          } catch {
+            /* use raw message */
+          }
+        }
+        setLines((prev) =>
+          [...prev, { id: `${Date.now()}-err`, text: display, isSystem: true }].slice(
+            -MAX_TERMINAL_LINES
+          )
+        );
+        return;
+      }
     } else {
       // Local モードは当面ダミー
       setLines((prev) => [
@@ -127,31 +194,32 @@ export const TerminalPanel: React.FC = () => {
     setHistoryIndex(-1);
   };
 
-  const visibleLines = lines.reduce<TerminalLine[]>((acc, line) => {
-    const t = line.text.trim();
-    if (!t) return acc;
-
-    // Hide all control markers.
-    if (t.startsWith("__LS_DONE__::")) return acc;
-    if (t.startsWith("__CMD_EXIT_CODE__::")) {
-      // Hide all exit markers from UI (both internal and user commands).
+  let displayedLines: TerminalLine[];
+  try {
+    displayedLines = lines.reduce<TerminalLine[]>((acc, line) => {
+      if (!line || typeof line.text !== "string") return acc;
+      const t = String(line.text).trim();
+      if (!t) return acc;
+      if (t.startsWith("__LS_DONE__::")) return acc;
+      if (t.startsWith("__CMD_EXIT_CODE__::")) return acc;
+      if (t.includes("_internal_")) return acc;
+      if (t.startsWith("LS error:")) return acc;
+      if (t.startsWith("Link: ln -sfn")) return acc;
+      if (t.startsWith("Create file error:")) return acc;
+      if (t.startsWith("Create dir error:")) return acc;
+      if (t.startsWith("Delete error:")) return acc;
+      if (t.startsWith("Move failed:")) return acc;
+      if (t.startsWith("Stage failed:")) return acc;
+      acc.push({
+        id: String(line.id ?? `${acc.length}`),
+        text: String(line.text),
+        isSystem: Boolean(line.isSystem)
+      });
       return acc;
-    }
-
-    // Extra safety: do not render internal command strings.
-    if (t.includes("_internal_")) return acc;
-    if (t.startsWith("LS error:")) return acc;
-    if (t.startsWith("Link: ln -sfn")) return acc;
-    if (t.startsWith("Create file error:")) return acc;
-    if (t.startsWith("Create dir error:")) return acc;
-    if (t.startsWith("Delete error:")) return acc;
-    if (t.startsWith("Move failed:")) return acc;
-    if (t.startsWith("Stage failed:")) return acc;
-
-    acc.push(line);
-    return acc;
-  }, []);
-  const displayedLines = visibleLines;
+    }, []);
+  } catch {
+    displayedLines = [];
+  }
 
   return (
     <div className="pane pane-bottom">
@@ -194,9 +262,9 @@ export const TerminalPanel: React.FC = () => {
             if (!autoScroll && nearBottom) setAutoScroll(true);
           }}
         >
-          {displayedLines.map((l) => (
-            <pre key={l.id} className={l.isSystem ? "terminal-line system" : "terminal-line"}>
-              {l.text}
+          {displayedLines.map((l, idx) => (
+            <pre key={l?.id ?? `line-${idx}`} className={l?.isSystem ? "terminal-line system" : "terminal-line"}>
+              {typeof l?.text === "string" ? l.text : String(l?.text ?? "")}
             </pre>
           ))}
           {displayedLines.length === 0 && (

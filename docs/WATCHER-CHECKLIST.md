@@ -89,8 +89,46 @@ ls -la /hdd/usr/ishibashi/mnt/term/_registry/
 
 ---
 
-## 5. 最小セッティング項目まとめ
+## 5. コマンド実行が失敗する場合（RT モード）
+
+バックエンドは「RT で送信 → 失敗したら commands.txt に追記」の順で試す。RT が失敗し、かつ Relay にセッション dir が無いと **503** を返す（本文に原因のヒントあり）。
+
+### 5-1. 診断エンドポイント
+
+ブラウザまたは curl で以下を開く（`{wid}` は Watcher ID、例: `rtx5090`）。トンネル経由なら `http://localhost:8002` を付ける。
+
+```
+GET http://localhost:8002/watchers/{wid}/rt-status
+```
+
+返却例:
+
+```json
+{
+  "registry_root": "/path/on/relay/_registry",
+  "rt_port_file_exists": true,
+  "rt_port": 9001
+}
+```
+
+- **rt_port_file_exists が false**: Relay の `config.ini` の `base_path` と、Watcher の `config.ini` の `base_path` が **Relay 上で同じ**か確認。Watcher が `_registry/{wid}.rt_port` を rsync で Relay に送っているか確認。
+- **rt_port はあるがコマンドが届かない**: Relay 上で `127.0.0.1:{rt_port}` に接続できるか確認。Watcher 側で `watcher_manager_rt.sh` が動いており、SSH の `-R {rt_port}:localhost:{rt_port}` が張られているか確認。
+
+### 5-2. 確認チェック
+
+| 項目 | 確認方法 |
+|------|----------|
+| Relay の config.ini | バックエンドの REPO_ROOT 直下の `config.ini`。`base_path` が Relay 上の実際のパスか。 |
+| Watcher の config.ini | `base_path` が **Relay 上のパス**と一致しているか（Watcher と Relay で同じ値）。 |
+| rt_port ファイル | Relay 上で `ls {base_path}/_registry/{wid}.rt_port` で存在し、中身がポート番号の数字か。 |
+| SSH リバーストンネル | Watcher マシンで `ps` に `ssh.*-R.*9001` のようなプロセスがあるか。 |
+
+---
+
+## 6. 最小セッティング項目まとめ
 
 - **Relay**: `config.ini`（base_path, structure）をバックエンドのリポジトリルートに置く。`{base_path}/_registry/` を用意する。
-- **Watcher PC**: `config.ini`（server, base_path を Relay と同一に）。SSH 可能。watcher_manager を起動。
+- **Watcher PC**: `config.ini`（server, base_path を Relay と同一に）。SSH 可能。watcher_manager_rt を起動。
 - **クライアント**: ブラウザが接続するバックエンド URL（VITE_BACKEND_URL）が、上記 Relay のバックエンドを指していること。
+
+**コマンドが届かないとき**: バックエンドの `GET /watchers/{wid}/rt-status` で rt_port の有無を確認。503 が出た場合はレスポンス本文のヒントを参照（セクション 5）。

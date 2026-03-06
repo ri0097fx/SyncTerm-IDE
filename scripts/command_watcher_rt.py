@@ -71,6 +71,10 @@ class SessionContext:
         self.base_dir = Path(base_dir).resolve()
         self.cwd = self.base_dir
         self.conda_env: Optional[str] = "base" if HAS_CONDA else None
+        # .runner_config.json で conda_env が指定されていれば採用
+        cfg = self._get_runner_config()
+        if cfg.get("conda_env"):
+            self.conda_env = str(cfg["conda_env"]).strip() or self.conda_env
 
     def _get_runner_config(self) -> dict:
         p = self.base_dir / ".runner_config.json"
@@ -82,7 +86,7 @@ class SessionContext:
         return {}
 
     def _wrap_conda(self, cmdline: str) -> str:
-        if not HAS_CONDA or not self.conda_env or self.conda_env == "base":
+        if not HAS_CONDA or not self.conda_env:
             return cmdline
         hook = f'$({shlex.quote(CONDA_EXE)} shell.bash hook)'
         inner = f'eval "{hook}"; conda activate {shlex.quote(self.conda_env)}; {cmdline}'
@@ -432,12 +436,19 @@ class SessionContext:
             return "\n".join(output_lines), 0, extra
 
         if cmd.strip().startswith("conda activate"):
-            # 簡易対応
-            output_lines.append("[Watcher] conda activate in RT mode: use host mode.")
+            parts = cmd.strip().split(maxsplit=2)
+            rest = (parts[2].strip() if len(parts) > 2 else "") or ""
+            env_name = rest.split()[0] if rest else ""
+            if env_name:
+                self.conda_env = env_name
+                output_lines.append(f"[Watcher] conda activate {env_name!r} (以降のコマンドはこの環境で実行)")
+            else:
+                output_lines.append("[Watcher] conda activate: 環境名を指定してください (例: conda activate myenv)")
             output_lines.append(f"{EOC_MARKER_PREFIX}0")
             return "\n".join(output_lines), 0, {}
         if cmd.strip() == "conda deactivate":
-            output_lines.append("[Watcher] conda deactivate in RT mode.")
+            self.conda_env = "base" if HAS_CONDA else None
+            output_lines.append("[Watcher] conda deactivate (base に戻しました)")
             output_lines.append(f"{EOC_MARKER_PREFIX}0")
             return "\n".join(output_lines), 0, {}
 
@@ -498,6 +509,9 @@ class RTRequestHandler(BaseHTTPRequestHandler):
         session = data.get("session", "")
         command = data.get("command", "")
 
+        cmd_preview = (command[:50] + "..") if len(command) > 50 else command
+        print(f"[RT /command] received watcher={watcher_id} session={session!r} cmd={cmd_preview!r}", flush=True)
+
         if not session:
             self._send_json(400, {"error": "session required"})
             return
@@ -530,6 +544,8 @@ class RTRequestHandler(BaseHTTPRequestHandler):
             post_log_to_relay(watcher_id, session, log_text)
 
         resp = {"ok": True, "output": output, "exitCode": exit_code, **extra}
+        out_len = len(output)
+        print(f"[RT /command] responding session={session!r} output_len={out_len} exitCode={exit_code}", flush=True)
         self._send_json(200, resp)
 
     def _send_json(self, status: int, data: dict):

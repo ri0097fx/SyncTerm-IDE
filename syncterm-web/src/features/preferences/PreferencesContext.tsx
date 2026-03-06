@@ -20,6 +20,8 @@ export interface Preferences {
   terminalMaxLines: number;
   terminalPollMs: number;
   showImagePreviewPane: boolean;
+  /** コマンド送信後の実行経路表示（[RT] 実行済み 等）を表示する */
+  showCommandTrace: boolean;
 }
 
 const DEFAULT_PREFERENCES: Preferences = {
@@ -36,7 +38,8 @@ const DEFAULT_PREFERENCES: Preferences = {
   terminalFontFamily: "Consolas, 'JetBrains Mono', Menlo, Monaco, 'Courier New', monospace",
   terminalMaxLines: 5000,
   terminalPollMs: 1000,
-  showImagePreviewPane: true
+  showImagePreviewPane: true,
+  showCommandTrace: false
 };
 
 interface PreferencesContextValue {

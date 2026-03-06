@@ -3,12 +3,47 @@ import { useSession } from "./SessionContext";
 import { usePreferences } from "../preferences/PreferencesContext";
 import { api } from "../../lib/api";
 
+type RtStatus = {
+  registry_root: string;
+  rt_port_file_exists: boolean;
+  rt_port: number | null;
+};
+
 export const SessionBar: React.FC = () => {
   const [showPrefs, setShowPrefs] = React.useState(false);
   const [cleanupMessage, setCleanupMessage] = React.useState<string | null>(null);
+  const [showRtDiagnostic, setShowRtDiagnostic] = React.useState(false);
+  const [rtStatus, setRtStatus] = React.useState<RtStatus | null>(null);
+  const [rtDiagnosticError, setRtDiagnosticError] = React.useState<string | null>(null);
+  const [debugRtResult, setDebugRtResult] = React.useState<{ ok: boolean; error?: string; response?: unknown } | null>(null);
   const { watchers, sessions, currentWatcher, currentSession, setWatcher, setSession, refreshWatchers, runnerConfig } =
     useSession();
   const { preferences, updatePreferences, resetPreferences } = usePreferences();
+
+  const handleRtDiagnostic = async () => {
+    if (!currentWatcher) return;
+    setRtDiagnosticError(null);
+    setRtStatus(null);
+    setDebugRtResult(null);
+    setShowRtDiagnostic(true);
+    try {
+      const res = await api.getRtStatus(currentWatcher.id);
+      setRtStatus(res);
+    } catch (err) {
+      setRtDiagnosticError(err instanceof Error ? err.message : "取得に失敗しました");
+    }
+  };
+
+  const handleDebugRt = async () => {
+    if (!currentWatcher || !currentSession) return;
+    setDebugRtResult(null);
+    try {
+      const res = await api.getDebugRt(currentWatcher.id, currentSession.name);
+      setDebugRtResult({ ok: res.ok, error: res.error, response: res.response });
+    } catch (err) {
+      setDebugRtResult({ ok: false, error: err instanceof Error ? err.message : "接続テストに失敗しました" });
+    }
+  };
 
   const handleCleanupStaged = async () => {
     if (!currentWatcher || !currentSession) return;
@@ -63,10 +98,20 @@ export const SessionBar: React.FC = () => {
               </option>
             ))}
           </select>
-          {currentWatcher && currentSession && (
+          {currentWatcher && (
             <button
               className="icon-button"
               style={{ width: "auto", padding: "0 0.5rem", marginLeft: "0.5rem" }}
+              onClick={handleRtDiagnostic}
+              title="RT 接続診断（rt_port の有無を確認）"
+            >
+              接続診断
+            </button>
+          )}
+          {currentWatcher && currentSession && (
+            <button
+              className="icon-button"
+              style={{ width: "auto", padding: "0 0.5rem", marginLeft: "0.25rem" }}
               onClick={handleCleanupStaged}
               title="Staged キャッシュを一括削除"
             >
@@ -96,6 +141,61 @@ export const SessionBar: React.FC = () => {
           </button>
         </div>
       </header>
+
+      {showRtDiagnostic && (
+        <div className="modal-overlay" onClick={() => { setShowRtDiagnostic(false); setRtStatus(null); setRtDiagnosticError(null); setDebugRtResult(null); }}>
+          <div className="modal-card preferences-modal" style={{ maxWidth: "420px" }} onClick={(e) => e.stopPropagation()}>
+            <h3 className="modal-title">接続診断（RT）</h3>
+            {rtDiagnosticError && (
+              <p style={{ color: "var(--error)", marginBottom: "0.5rem" }}>{rtDiagnosticError}</p>
+            )}
+            {rtStatus && (
+              <div style={{ fontFamily: "monospace", fontSize: "0.9rem", marginBottom: "0.75rem" }}>
+                <p><strong>registry_root:</strong> {rtStatus.registry_root}</p>
+                <p><strong>rt_port ファイル:</strong> {rtStatus.rt_port_file_exists ? "あり" : "なし"}</p>
+                <p><strong>rt_port:</strong> {rtStatus.rt_port ?? "—"}</p>
+                {!rtStatus.rt_port_file_exists && (
+                  <p style={{ marginTop: "0.5rem", color: "var(--text-muted)", fontSize: "0.85rem" }}>
+                    Relay に <code>_registry/{currentWatcher?.id}.rt_port</code> がありません。Watcher と Relay の config.ini の base_path を一致させ、Watcher 側で rsync を実行してください。
+                  </p>
+                )}
+                {rtStatus.rt_port_file_exists && rtStatus.rt_port != null && (
+                  <p style={{ marginTop: "0.5rem", color: "var(--text-muted)", fontSize: "0.85rem" }}>
+                    rt_port はあります。コマンドが届かない場合は「RT 接続テスト」で Relay→Watcher の HTTP を確認してください。
+                  </p>
+                )}
+              </div>
+            )}
+            {currentWatcher && currentSession && rtStatus?.rt_port != null && (
+              <div style={{ marginBottom: "0.75rem" }}>
+                <button
+                  type="button"
+                  className="icon-button"
+                  style={{ width: "auto", padding: "0 0.6rem" }}
+                  onClick={handleDebugRt}
+                  title="Relay から Watcher へ HTTP で echo コマンドを送り、応答を確認"
+                >
+                  RT 接続テスト
+                </button>
+                {debugRtResult && (
+                  <div style={{ marginTop: "0.5rem", fontSize: "0.9rem" }}>
+                    {debugRtResult.ok ? (
+                      <p style={{ color: "var(--success, green)" }}>接続成功（Watcher が応答しました）</p>
+                    ) : (
+                      <p style={{ color: "var(--error)" }}>失敗: {debugRtResult.error}</p>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+            <div className="modal-actions">
+              <button className="primary-button" onClick={() => { setShowRtDiagnostic(false); setRtStatus(null); setRtDiagnosticError(null); setDebugRtResult(null); }}>
+                閉じる
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showPrefs && (
         <div className="modal-overlay" onClick={() => setShowPrefs(false)}>
@@ -256,6 +356,14 @@ export const SessionBar: React.FC = () => {
                   onChange={(e) => updatePreferences({ showImagePreviewPane: e.target.checked })}
                 />
                 Show image preview side pane
+              </label>
+              <label className="modal-label modal-checkbox">
+                <input
+                  type="checkbox"
+                  checked={preferences.showCommandTrace}
+                  onChange={(e) => updatePreferences({ showCommandTrace: e.target.checked })}
+                />
+                Show command execution trace (debug)
               </label>
             </div>
             <div className="modal-actions">

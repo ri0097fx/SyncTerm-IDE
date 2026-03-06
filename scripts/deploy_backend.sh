@@ -55,10 +55,16 @@ ssh "$TARGET" "bash -lc '
 set -euo pipefail
 mkdir -p \"$REMOTE_DIR\"
 cd \"$REMOTE_DIR\"
+APP_ROOT=\$(pwd)
+REQ_FILE=\"\$APP_ROOT/backend/requirements.txt\"
+if [[ ! -f \"\$REQ_FILE\" ]]; then
+  echo \"ERROR: \$REQ_FILE not found. Ensure [1/5] sync completed and remote path contains backend/\"
+  exit 1
+fi
 python3 -m venv .venv-backend
 . .venv-backend/bin/activate
 pip install --upgrade pip >/dev/null
-pip install -r backend/requirements.txt
+pip install -r \"\$REQ_FILE\"
 chmod +x watcher_manager.sh watcher_manager_rt.sh scripts/*.sh scripts/wsl/*.sh 2>/dev/null || true
 '"
 

@@ -12,7 +12,15 @@ export interface SyncApi {
   listSessions(watcherId: string): Promise<SessionInfo[]>;
   getWatcherStatus(watcherId: string, session: string): Promise<WatcherStatus>;
   getInitialLog(watcherId: string, session: string): Promise<TerminalLine[]>;
-  sendRemoteCommand(watcherId: string, session: string, command: string): Promise<void>;
+  sendRemoteCommand(
+    watcherId: string,
+    session: string,
+    command: string
+  ): Promise<{
+    output?: string;
+    exitCode?: number;
+    _trace?: { method: "rt" | "commands_txt"; outputLineCount?: number; exitCode?: number };
+  }>;
   fetchLogTail(watcherId: string, session: string): Promise<TerminalLine[]>;
 
   listFiles(watcherId: string, session: string): Promise<FileEntry[]>;
@@ -64,6 +72,21 @@ export interface SyncApi {
     session: string,
     config: RunnerConfig
   ): Promise<void>;
+
+  /** RT モード診断（rt_port の有無など） */
+  getRtStatus(watcherId: string): Promise<{
+    registry_root: string;
+    rt_port_file_exists: boolean;
+    rt_port: number | null;
+  }>;
+
+  /** RT 接続テスト（Relay → Watcher の HTTP が通るか） */
+  getDebugRt(watcherId: string, session: string): Promise<{
+    ok: boolean;
+    error?: string;
+    port?: number | null;
+    response?: unknown;
+  }>;
 
   /** 現在セッションの staged キャッシュを一括削除 */
   cleanupStagedCache(watcherId: string, session: string): Promise<{
@@ -150,25 +173,45 @@ class HttpSyncApi implements SyncApi {
     watcherId: string,
     session: string,
     command: string
-  ): Promise<void> {
-    await http(`/watchers/${encodeURIComponent(watcherId)}/sessions/${encodeURIComponent(session)}/commands`, {
-      method: "POST",
-      body: JSON.stringify({ command })
-    });
+  ): Promise<{
+    output?: string;
+    exitCode?: number;
+    _trace?: { method: "rt" | "commands_txt"; outputLineCount?: number; exitCode?: number };
+  }> {
+    const res = await http<{
+      ok?: boolean;
+      rt?: boolean;
+      output?: string;
+      exitCode?: number;
+      _trace?: { method: "rt" | "commands_txt"; outputLineCount?: number; exitCode?: number };
+    }>(
+      `/watchers/${encodeURIComponent(watcherId)}/sessions/${encodeURIComponent(session)}/commands`,
+      { method: "POST", body: JSON.stringify({ command }) }
+    );
+    const trace = res?._trace;
+    if (res?.ok === true) {
+      return {
+        output: res.output ?? "",
+        exitCode: res.exitCode,
+        _trace: trace,
+      };
+    }
+    return { _trace: trace };
   }
 
   async fetchLogTail(watcherId: string, session: string): Promise<TerminalLine[]> {
     const k = this.key(watcherId, session);
     const from = this.logOffsets[k] ?? 0;
-    const data = await http<{ lines: string[]; nextOffset: number }>(
+    const data = await http<{ lines?: string[]; nextOffset?: number }>(
       `/watchers/${encodeURIComponent(watcherId)}/sessions/${encodeURIComponent(
         session
       )}/log?fromOffset=${from}`
     );
-    this.logOffsets[k] = data.nextOffset;
-    return data.lines.map((text, idx) => ({
+    const lines = Array.isArray(data.lines) ? data.lines : [];
+    this.logOffsets[k] = typeof data.nextOffset === "number" ? data.nextOffset : from;
+    return lines.map((text, idx) => ({
       id: `${Date.now()}-${from}-${idx}`,
-      text
+      text: typeof text === "string" ? text : String(text ?? "")
     }));
   }
 
@@ -340,6 +383,25 @@ class HttpSyncApi implements SyncApi {
           extraArgs: config.extraArgs
         })
       }
+    );
+  }
+
+  async getRtStatus(watcherId: string): Promise<{
+    registry_root: string;
+    rt_port_file_exists: boolean;
+    rt_port: number | null;
+  }> {
+    return http(`/watchers/${encodeURIComponent(watcherId)}/rt-status`);
+  }
+
+  async getDebugRt(watcherId: string, session: string): Promise<{
+    ok: boolean;
+    error?: string;
+    port?: number | null;
+    response?: unknown;
+  }> {
+    return http(
+      `/watchers/${encodeURIComponent(watcherId)}/sessions/${encodeURIComponent(session)}/debug/rt`
     );
   }
 

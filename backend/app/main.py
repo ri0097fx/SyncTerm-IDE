@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import configparser
 import json
+import logging
 import mimetypes
 import os
 import subprocess
@@ -19,6 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
 
+logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = REPO_ROOT / "config.ini"
@@ -426,15 +428,22 @@ def get_status(wid: str, sess: str):
 
 @app.get("/watchers/{wid}/sessions/{sess}/debug/rt")
 def debug_rt(wid: str, sess: str):
-  """RT モードの接続テスト。HTTP で echo コマンドを送り、応答を返す"""
+  """RT モードの接続テスト。HTTP で echo コマンドを送り、応答または失敗理由を返す"""
   port = _get_rt_port(wid)
   if port is None:
     return {"ok": False, "error": "rt_port not found", "port": None}
-  cmd = "echo __RT_TEST__"
-  resp = _post_command_via_rt_with_response(wid, sess, cmd)
-  if resp is None:
-    return {"ok": False, "error": "HTTP request failed (connection refused or timeout)", "port": port}
-  return {"ok": True, "port": port, "response": resp}
+  url = f"http://127.0.0.1:{port}/command"
+  body = json.dumps({"watcherId": wid, "session": sess, "command": "echo __RT_TEST__"}, ensure_ascii=False).encode("utf-8")
+  try:
+    req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=10) as resp:
+      data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    return {"ok": True, "port": port, "response": data}
+  except urllib.error.URLError as e:
+    reason = e.reason if e.reason else str(e)
+    return {"ok": False, "error": f"HTTP request failed: {reason}", "port": port}
+  except Exception as e:
+    return {"ok": False, "error": f"HTTP request failed: {type(e).__name__}: {e}", "port": port}
 
 
 @app.get("/watchers/{wid}/sessions/{sess}/debug/file-raw")
@@ -449,7 +458,7 @@ def debug_file_raw(wid: str, sess: str, path: str = Query(..., description="path
     return result
   token = f"{int(time.time()*1000)}-{uuid.uuid4().hex[:8]}"
   cmd = f"_internal_stage_file_for_download::{rel}::{token}"
-  resp = _post_command_via_rt_with_response(wid, sess, cmd)
+  resp, _ = _post_command_via_rt_with_response(wid, sess, cmd)
   if resp is None:
     result["error"] = "HTTP request to watcher failed (timeout or connection refused)"
     return result
@@ -647,9 +656,10 @@ def get_file_raw(wid: str, sess: str, path: str = Query(..., description="path u
 
 @app.get("/watchers/{wid}/sessions/{sess}/log", response_model=LogChunk)
 def get_log_chunk(wid: str, sess: str, fromOffset: int = 0):
-  root = session_root(wid, sess)
+  # RT モードでは Relay にセッション dir が無いことがあるため 404 にしない
+  root = SESSIONS_ROOT / wid / sess
   log_path = root / "commands.log"
-  if not log_path.exists():
+  if not root.exists() or not log_path.exists():
     return LogChunk(lines=[], nextOffset=0, hasMore=False)
 
   total_size = log_path.stat().st_size
@@ -688,34 +698,38 @@ def _get_rt_port(wid: str) -> Optional[int]:
     return None
 
 
-def _post_command_via_rt(wid: str, sess: str, command: str) -> bool:
-  """RT 経由でコマンド送信。成功時 True"""
+def _post_command_via_rt(wid: str, sess: str, command: str) -> tuple[bool, str]:
+  """RT 経由でコマンド送信。(成功したか, 失敗時は理由)"""
   port = _get_rt_port(wid)
   if port is None:
-    return False
+    return False, "rt_port_not_found"
   url = f"http://127.0.0.1:{port}/command"
   body = json.dumps({"watcherId": wid, "session": sess, "command": command}, ensure_ascii=False).encode("utf-8")
   try:
     req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(req, timeout=120) as resp:
-      return resp.status == 200
-  except Exception:
-    return False
+      return (resp.status == 200), ""
+  except urllib.error.URLError as e:
+    return False, str(e.reason) if e.reason else str(e)
+  except Exception as e:
+    return False, str(e)
 
 
-def _post_command_via_rt_with_response(wid: str, sess: str, command: str) -> Optional[dict]:
-  """RT 経由でコマンド送信し、レスポンス JSON を返す。失敗時 None"""
+def _post_command_via_rt_with_response(wid: str, sess: str, command: str) -> tuple[Optional[dict], str]:
+  """RT 経由でコマンド送信し、(レスポンス JSON, 失敗時は理由) を返す"""
   port = _get_rt_port(wid)
   if port is None:
-    return None
+    return None, "rt_port_not_found"
   url = f"http://127.0.0.1:{port}/command"
   body = json.dumps({"watcherId": wid, "session": sess, "command": command}, ensure_ascii=False).encode("utf-8")
   try:
     req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(req, timeout=30) as resp:
-      return json.loads(resp.read().decode("utf-8", errors="replace"))
-  except Exception:
-    return None
+      return json.loads(resp.read().decode("utf-8", errors="replace")), ""
+  except urllib.error.URLError as e:
+    return None, str(e.reason) if e.reason else str(e)
+  except Exception as e:
+    return None, str(e)
 
 
 @app.post("/watchers/{wid}/sessions/{sess}/log-append")
@@ -733,19 +747,78 @@ async def post_log_append(wid: str, sess: str, request: Request):
   return {"ok": True}
 
 
+@app.get("/watchers/{wid}/rt-status")
+def get_rt_status(wid: str):
+  """RT モード診断: rt_port ファイルの有無とポート番号を返す"""
+  port = _get_rt_port(wid)
+  port_file = REGISTRY_ROOT / f"{wid}.rt_port"
+  return {
+    "registry_root": str(REGISTRY_ROOT),
+    "rt_port_file_exists": port_file.exists(),
+    "rt_port": port,
+  }
+
+
 @app.post("/watchers/{wid}/sessions/{sess}/commands")
 def post_command(wid: str, sess: str, payload: CommandPayload):
-  root = session_root(wid, sess)
   cmd = payload.command.rstrip()
+  logger.info("command received wid=%s sess=%s cmd_len=%d cmd_preview=%r", wid, sess, len(cmd), (cmd[:60] + "..") if len(cmd) > 60 else cmd)
 
-  if _post_command_via_rt(wid, sess, cmd):
-    return {"ok": True, "rt": True}
+  # RT を先に試す（Relay にセッション dir が無くても Watcher に届く）
+  rt_resp, rt_error = _post_command_via_rt_with_response(wid, sess, cmd)
+  if rt_resp is not None:
+    out = rt_resp.get("output", "")
+    exit_code = rt_resp.get("exitCode", 0)
+    out_lines = len(out.splitlines()) if out else 0
+    logger.info("command delivered via RT wid=%s sess=%s output_lines=%d exitCode=%s", wid, sess, out_lines, exit_code)
+    # 記録用: Relay にセッション dir があれば commands.txt にも追記（監査・他プロセス用）
+    root = SESSIONS_ROOT / wid / sess
+    if root.exists():
+      try:
+        cmd_file = root / "commands.txt"
+        with cmd_file.open("a", encoding="utf-8") as f:
+          f.write(cmd + "\n")
+      except Exception as e:
+        logger.warning("commands.txt append failed wid=%s sess=%s: %s", wid, sess, e)
+    return {
+      "ok": True,
+      "rt": True,
+      "output": out,
+      "exitCode": exit_code,
+      "_trace": {"method": "rt", "outputLineCount": out_lines, "exitCode": exit_code},
+    }
 
+  # rt_port がある = RT 用 Watcher。届かなかったら 503 で理由を返す（commands.txt は別マシンでは読めない）
+  rt_port = _get_rt_port(wid)
+  if rt_port is not None:
+    logger.warning("command RT failed wid=%s sess=%s rt_error=%s", wid, sess, rt_error)
+    raise HTTPException(
+      status_code=503,
+      detail={
+        "code": "rt_delivery_failed",
+        "rt_failed_reason": rt_error,
+        "hint": f"Relay→Watcher の HTTP が失敗しました（{rt_error}）。接続診断の「RT 接続テスト」で詳細を確認してください。",
+      },
+    )
+
+  # フォールバック: commands.txt に追記（Relay にセッション dir が必要・同一/共有 FS 用）
+  root = SESSIONS_ROOT / wid / sess
+  if not root.exists():
+    logger.warning("command no session dir wid=%s sess=%s rt_error=%s", wid, sess, rt_error)
+    raise HTTPException(
+      status_code=503,
+      detail={
+        "code": "command_delivery_failed",
+        "rt_failed_reason": rt_error,
+        "hint": "RT failed and session dir does not exist on relay. Check: 1) Watcher is running (watcher_manager_rt.sh), 2) config.ini base_path is the same on Watcher and Relay, 3) GET /watchers/{wid}/rt-status to see rt_port.",
+      },
+    )
   cmd_file = root / "commands.txt"
   cmd_file.parent.mkdir(parents=True, exist_ok=True)
   with cmd_file.open("a", encoding="utf-8") as f:
     f.write(cmd + "\n")
-  return {"ok": True}
+  logger.info("command written to commands.txt wid=%s sess=%s path=%s", wid, sess, cmd_file)
+  return {"ok": True, "_trace": {"method": "commands_txt"}}
 
 
 @app.post("/watchers/{wid}/sessions/{sess}/cleanup-staged")
@@ -783,7 +856,7 @@ def cleanup_staged(wid: str, sess: str):
               deleted += 1
             except Exception:
               failed += 1
-  watcher_cleaned = _post_command_via_rt(wid, sess, "_internal_cleanup_staged")
+  watcher_cleaned = _post_command_via_rt(wid, sess, "_internal_cleanup_staged")[0]
   return {
     "ok": True,
     "deleted": deleted,
@@ -796,7 +869,7 @@ def cleanup_staged(wid: str, sess: str):
 def list_dir_entries_via_watcher(wid: str, sess: str, root: Path, rel_path: str) -> List[FileEntryModel]:
   # RT モード: HTTP で即送信し、レスポンスの ls_result を直接使う（rsync 待ち不要）
   cmd = f"_internal_list_dir::{rel_path}"
-  resp = _post_command_via_rt_with_response(wid, sess, cmd)
+  resp, _ = _post_command_via_rt_with_response(wid, sess, cmd)
   if resp is not None:
     ls_result = resp.get("ls_result")
     if ls_result is not None and isinstance(ls_result, str) and not ls_result.startswith("ERROR:"):
@@ -998,7 +1071,7 @@ def fetch_file_via_watcher_rt(wid: str, sess: str, rel_path: str) -> Optional[st
   """RT モードで HTTP 経由でファイル内容を取得。取れればその文字列、失敗時は None"""
   token = f"{int(time.time()*1000)}-{uuid.uuid4().hex[:8]}"
   cmd = f"_internal_stage_file_for_download::{rel_path}::{token}"
-  resp = _post_command_via_rt_with_response(wid, sess, cmd)
+  resp, _ = _post_command_via_rt_with_response(wid, sess, cmd)
   if resp is None:
     return None
   content = resp.get("file_content")
@@ -1030,7 +1103,7 @@ def fetch_file_bytes_via_watcher_rt(wid: str, sess: str, rel_path: str) -> Optio
   """RT モードで HTTP 経由でバイナリ取得。取れれば bytes、失敗時は None"""
   token = f"{int(time.time()*1000)}-{uuid.uuid4().hex[:8]}"
   cmd = f"_internal_stage_file_for_download::{rel_path}::{token}"
-  resp = _post_command_via_rt_with_response(wid, sess, cmd)
+  resp, _ = _post_command_via_rt_with_response(wid, sess, cmd)
   if resp is None:
     return None
   b64 = resp.get("file_content_base64")
