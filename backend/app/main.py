@@ -397,6 +397,32 @@ def _startup_cleanup_staged():
   _cleanup_old_staged_files()
 
 
+@app.get("/info")
+def backend_info():
+  """デバッグ用: バックエンドが参照しているパスと _registry の状態。Watcher が一覧に出ないときに確認用。"""
+  import time
+  now = time.time()
+  registry_files: List[str] = []
+  file_states: List[dict] = []
+  if REGISTRY_ROOT.exists():
+    for path in sorted(REGISTRY_ROOT.glob("*.json"), key=lambda p: p.name.lower()):
+      registry_files.append(path.name)
+      try:
+        data = json.loads(path.read_text("utf-8"))
+        ts = data.get("last_heartbeat") or data.get("last_seen") or data.get("heartbeat_ts") or path.stat().st_mtime
+        age_sec = now - float(ts) if ts is not None else None
+        file_states.append({"file": path.name, "age_sec": round(age_sec, 1) if age_sec is not None else None, "included": age_sec is not None and age_sec <= 30.0})
+      except Exception:
+        file_states.append({"file": path.name, "age_sec": None, "included": False})
+  return {
+    "registry_root": str(REGISTRY_ROOT),
+    "sessions_root": str(SESSIONS_ROOT),
+    "registry_files": registry_files,
+    "file_states": file_states,
+    "watcher_count": len(load_watchers()),
+  }
+
+
 @app.get("/watchers", response_model=List[WatcherModel])
 def list_watchers():
   return load_watchers()
@@ -1337,11 +1363,15 @@ def create_link(wid: str, sess: str, payload: CreateLinkPayload):
   if "'" in source:
     raise HTTPException(status_code=400, detail="single quote is not supported in sourcePath")
 
+  cmd = f"_internal_create_link::{source}::{name}"
+  # RT で即送信（Watcher がすぐ実行）。失敗しても commands.txt に書くので poll で拾われる
+  rt_resp, _ = _post_command_via_rt_with_response(wid, sess, cmd)
+
   cmd_file = root / "commands.txt"
   cmd_file.parent.mkdir(parents=True, exist_ok=True)
   with cmd_file.open("a", encoding="utf-8") as f:
-    f.write(f"_internal_create_link::{source}::{name}\n")
-  return {"ok": True}
+    f.write(cmd + "\n")
+  return {"ok": True, "rt": rt_resp is not None}
 
 
 @app.post("/watchers/{wid}/sessions/{sess}/ai-assist")

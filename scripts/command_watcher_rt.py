@@ -380,13 +380,21 @@ class SessionContext:
             return {}
 
         if cmd.startswith("_internal_create_link::"):
-            _, source_path, link_name = cmd.split("::", 2)
+            # source_path に "::" が含まれる場合があるので、最後の "::" で link_name と分割
+            rest = cmd[len("_internal_create_link::"):]
+            idx = rest.rfind("::")
+            if idx < 0:
+                output_lines.append(f"{EOC_MARKER_PREFIX}INTERNAL:1")
+                return {}
+            source_path = rest[:idx].strip()
+            link_name = rest[idx + 2:].strip()
+            if not link_name:
+                output_lines.append(f"{EOC_MARKER_PREFIX}INTERNAL:1")
+                return {}
             dest = self.base_dir / link_name
             proc = subprocess.run(
-                f"ln -sfn '{source_path}' '{dest}'",
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                ["ln", "-sfn", source_path, str(dest)],
+                capture_output=True,
                 text=True,
                 cwd=self.base_dir,
                 encoding="utf-8",

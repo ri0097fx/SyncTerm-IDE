@@ -115,10 +115,9 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
     try {
       await api.createSymlink(currentWatcher.id, currentSession.name, source, name);
       setShowLinkDialog(false);
-      // watcher poll interval is short; wait a moment then refresh tree.
-      window.setTimeout(() => {
-        void refreshTree();
-      }, 1200);
+      // リンク作成は relay の commands.txt に書く → Watcher が pull して実行 → Watcher が push するまで数秒かかる
+      window.setTimeout(() => void refreshTree(), 4000);
+      window.setTimeout(() => void refreshTree(), 8000);
     } catch (e) {
       setLinkError(e instanceof Error ? e.message : "リンク作成に失敗しました。");
     } finally {
