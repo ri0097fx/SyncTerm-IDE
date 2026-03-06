@@ -33,7 +33,8 @@ def load_paths():
   parser.read(CONFIG_PATH)
   remote = parser["remote"]
   structure = parser["structure"]
-  base_path = Path(remote.get("base_path"))
+  base_path_raw = remote.get("base_path", "")
+  base_path = Path(os.path.expanduser(base_path_raw)) if base_path_raw else Path()
   sessions_dir_name = structure.get("sessions_dir_name", "sessions")
   registry_dir_name = structure.get("registry_dir_name", "_registry")
   sessions_root = base_path / sessions_dir_name
@@ -42,6 +43,11 @@ def load_paths():
 
 
 BASE_PATH, SESSIONS_ROOT, REGISTRY_ROOT = load_paths()
+
+# Ensure session/registry dirs exist at startup (e.g. after deploy)
+if BASE_PATH:
+  SESSIONS_ROOT.mkdir(parents=True, exist_ok=True)
+  REGISTRY_ROOT.mkdir(parents=True, exist_ok=True)
 MAX_FILE_BYTES = 2_000_000  # full-load limit for editor (2MB)
 MAX_CHUNK_BYTES = 300_000   # chunk endpoint limit per request
 MAX_LOG_CHUNK_BYTES = 1_000_000

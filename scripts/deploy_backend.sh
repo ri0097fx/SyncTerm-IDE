@@ -13,12 +13,32 @@ set -euo pipefail
 #   3) Backend port (optional, default: 8000)
 
 TARGET="${1:-}"
-REMOTE_DIR="${2:-~/SyncTerm-IDE}"
 BACKEND_PORT="${3:-8000}"
 BACKEND_HOST="${TARGET#*@}"
 
+# REMOTE_DIR: use 2nd arg, or config.ini [remote] deploy_dir, or default
+if [[ -n "${2:-}" ]]; then
+  REMOTE_DIR="$2"
+else
+  REMOTE_DIR="~/SyncTerm-IDE"
+  if [[ -f "config.ini" ]]; then
+    DEPLOY_DIR=$(python3 -c "
+import configparser
+c = configparser.ConfigParser()
+c.read('config.ini')
+if c.has_section('remote') and c.has_option('remote', 'deploy_dir'):
+    print(c.get('remote', 'deploy_dir').strip())
+" 2>/dev/null || true)
+    if [[ -n "$DEPLOY_DIR" ]]; then
+      REMOTE_DIR="$DEPLOY_DIR"
+      echo "Using deploy_dir from config.ini: $REMOTE_DIR"
+    fi
+  fi
+fi
+
 if [[ -z "$TARGET" ]]; then
   echo "Usage: $0 <user@host> [remote_dir] [backend_port]"
+  echo "  remote_dir: optional; default from config.ini [remote] deploy_dir, else ~/SyncTerm-IDE"
   exit 1
 fi
 
@@ -47,6 +67,9 @@ echo "[2/5] Sync runtime scripts and config"
 rsync -az "./config.ini" "$TARGET:$REMOTE_DIR/config.ini"
 rsync -az "./watcher_manager_rt.sh" "$TARGET:$REMOTE_DIR/watcher_manager_rt.sh"
 rsync -az --delete "./scripts/" "$TARGET:$REMOTE_DIR/scripts/"
+
+echo "[2b/5] Create base_path, sessions, _registry on remote (from config.ini)"
+ssh "$TARGET" "bash -lc 'cd \"$REMOTE_DIR\" && python3 scripts/ensure_base_path.py'"
 
 echo "[3/5] Create venv and install dependencies"
 ssh "$TARGET" "bash -lc '

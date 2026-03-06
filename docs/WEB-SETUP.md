@@ -56,7 +56,9 @@ sessions_dir_name = sessions
 registry_dir_name = _registry
 ```
 
-環境に応じて `server` および `base_path` を編集する。FastAPI バックエンドは `base_path` および `sessions_dir_name` / `registry_dir_name` に従い `sessions/` と `_registry/` を参照する。
+環境に応じて `server` および `base_path` を編集する。FastAPI バックエンドは `base_path` および `sessions_dir_name` / `registry_dir_name` に従い `sessions/` と `_registry/` を参照する。`base_path` に `~` を使うとホームディレクトリに展開される。
+
+**デプロイ先を config で指定する場合**: `[remote]` に任意で `deploy_dir = ~/mnt` を追加すると、`./scripts/deploy_backend.sh user@host` 実行時に第2引数を省略したときのデプロイ先として使われる。デプロイ時には `config.ini` の `base_path` に従い、リモートで `base_path`・`sessions`・`_registry` が自動作成される。
 
 ### 3-3. バックエンド（FastAPI）のインストールと起動
 
