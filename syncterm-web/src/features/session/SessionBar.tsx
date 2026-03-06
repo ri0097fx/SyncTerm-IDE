@@ -122,14 +122,14 @@ export const SessionBar: React.FC = () => {
                 placeholder="新規セッション名"
                 value={newSessionName}
                 onChange={(e) => { setNewSessionName(e.target.value); setCreateSessionError(null); }}
-                onKeyDown={(e) => e.key === "Enter" && handleCreateSession()}
+                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); handleCreateSession(); } }}
                 style={{ width: "8rem", padding: "0.2rem 0.4rem" }}
               />
               <button
                 type="button"
                 className="icon-button"
                 style={{ width: "auto", padding: "0 0.5rem" }}
-                onClick={handleCreateSession}
+                onClick={(e) => { e.preventDefault(); handleCreateSession(); }}
                 title="セッションを新規作成"
               >
                 作成

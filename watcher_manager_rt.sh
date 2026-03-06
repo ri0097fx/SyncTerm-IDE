@@ -179,6 +179,10 @@ trap cleanup EXIT
 # ===== メイン =====
 echo "[RT] Started for WATCHER_ID='${WATCHER_ID}' DISPLAY_NAME='${DISPLAY_NAME}'"
 mkdir -p "$LOCAL_WATCHER_DIR" "$LOCAL_REGISTRY_DIR" "$PID_DIR"
+# セッションが一つも無い場合は default を自動作成（初起動時）
+if [ -z "$(find "$LOCAL_WATCHER_DIR" -maxdepth 1 -type d ! -path "$LOCAL_WATCHER_DIR" 2>/dev/null | head -1)" ]; then
+  mkdir -p "${LOCAL_WATCHER_DIR}/default"
+fi
 run_nofail ssh $SSH_OPTS "$SERVER" "mkdir -p '$REMOTE_WATCHER_DIR' '$REMOTE_REGISTRY_DIR'"
 
 # RT ポートをレジストリに登録（backend が HTTP でコマンド送信するため）

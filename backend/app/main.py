@@ -404,6 +404,9 @@ def list_watchers():
   return load_watchers()
 
 
+DEFAULT_SESSION_NAME = "default"
+
+
 @app.get("/watchers/{wid}/sessions", response_model=List[SessionModel])
 def list_sessions(wid: str):
   root = SESSIONS_ROOT / wid
@@ -413,10 +416,18 @@ def list_sessions(wid: str):
   for d in sorted(root.iterdir()):
     if d.is_dir():
       sessions.append(SessionModel(name=d.name, watcherId=wid))
+  # Watcher にセッションが一つも無い場合は default を自動作成（初起動時など）
+  if not sessions:
+    default_root = root / DEFAULT_SESSION_NAME
+    try:
+      default_root.mkdir(parents=True, exist_ok=False)
+      sessions.append(SessionModel(name=DEFAULT_SESSION_NAME, watcherId=wid))
+    except OSError:
+      pass
   return sessions
 
 
-@app.post("/watchers/{wid}/sessions", response_model=SessionModel)
+@app.post("/watchers/{wid}/sessions/create", response_model=SessionModel)
 def create_session(wid: str, body: CreateSessionModel):
   """Relay 上にセッション用ディレクトリを作成する。名前は / .. 不可・空白不可。"""
   name = (body.name or "").strip()
