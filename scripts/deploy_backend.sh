@@ -52,30 +52,35 @@ if [[ "$REMOTE_DIR" == /Users/* ]]; then
   exit 2
 fi
 
-echo "[0/5] Ensure remote directory exists"
-ssh "$TARGET" "bash -lc 'mkdir -p \"$REMOTE_DIR/backend\" \"$REMOTE_DIR/scripts\"'"
+# Resolve REMOTE_DIR to absolute path on the remote (expand ~ and get real path for rsync)
+echo "[0/5] Resolve remote directory to absolute path"
+REMOTE_DIR_ABS=$(ssh "$TARGET" "REMOTE_DIR='$(printf '%s' "$REMOTE_DIR" | sed "s/'/'\\\\''/g")'; export REMOTE_DIR; bash -lc 'D=\$(eval echo \"\$REMOTE_DIR\"); mkdir -p \"\$D/backend\" \"\$D/scripts\" && cd \"\$D\" && pwd'" 2>/dev/null) || true
+if [[ -z "$REMOTE_DIR_ABS" ]]; then
+  echo "WARN: Could not resolve remote path (check SSH and that remote can create the dir), using as-is: $REMOTE_DIR"
+  REMOTE_DIR_ABS="$REMOTE_DIR"
+fi
+echo "Remote deploy path: $REMOTE_DIR_ABS"
 
-echo "[1/5] Sync backend to server: $TARGET:$REMOTE_DIR"
+echo "[1/5] Sync backend to server: $TARGET:$REMOTE_DIR_ABS"
 rsync -az \
   --delete \
   --exclude '.git' \
   --exclude '__pycache__' \
   --exclude '.DS_Store' \
-  "./backend/" "$TARGET:$REMOTE_DIR/backend/"
+  "./backend/" "$TARGET:$REMOTE_DIR_ABS/backend/"
 
 echo "[2/5] Sync runtime scripts and config"
-rsync -az "./config.ini" "$TARGET:$REMOTE_DIR/config.ini"
-rsync -az "./watcher_manager_rt.sh" "$TARGET:$REMOTE_DIR/watcher_manager_rt.sh"
-rsync -az --delete "./scripts/" "$TARGET:$REMOTE_DIR/scripts/"
+rsync -az "./config.ini" "$TARGET:$REMOTE_DIR_ABS/config.ini"
+rsync -az "./watcher_manager_rt.sh" "$TARGET:$REMOTE_DIR_ABS/watcher_manager_rt.sh"
+rsync -az --delete "./scripts/" "$TARGET:$REMOTE_DIR_ABS/scripts/"
 
 echo "[2b/5] Create base_path, sessions, _registry on remote (from config.ini)"
-ssh "$TARGET" "bash -lc 'cd \"$REMOTE_DIR\" && python3 scripts/ensure_base_path.py'"
+ssh "$TARGET" "bash -lc 'cd \"$REMOTE_DIR_ABS\" && python3 scripts/ensure_base_path.py'"
 
 echo "[3/5] Create venv and install dependencies"
 ssh "$TARGET" "bash -lc '
 set -euo pipefail
-mkdir -p \"$REMOTE_DIR\"
-cd \"$REMOTE_DIR\"
+cd \"$REMOTE_DIR_ABS\"
 APP_ROOT=\$(pwd)
 REQ_FILE=\"\$APP_ROOT/backend/requirements.txt\"
 if [[ ! -f \"\$REQ_FILE\" ]]; then
@@ -92,7 +97,7 @@ chmod +x watcher_manager_rt.sh scripts/*.sh scripts/wsl/*.sh 2>/dev/null || true
 echo "[4/5] Restart backend service"
 ssh "$TARGET" "bash -lc '
 set -euo pipefail
-cd \"$REMOTE_DIR\"
+cd \"$REMOTE_DIR_ABS\"
 if [[ -f backend.pid ]]; then
   old_pid=\$(cat backend.pid || true)
   if [[ -n \"\${old_pid}\" ]] && kill -0 \"\$old_pid\" 2>/dev/null; then
@@ -108,5 +113,5 @@ echo \$! > backend.pid
 echo "[5/5] Done"
 echo "Backend URL: http://$BACKEND_HOST:$BACKEND_PORT"
 echo "Tip: Check server log with:"
-echo "  ssh $TARGET \"tail -f $REMOTE_DIR/backend.log\""
+echo "  ssh $TARGET \"tail -f $REMOTE_DIR_ABS/backend.log\""
 
