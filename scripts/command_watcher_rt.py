@@ -88,9 +88,8 @@ class SessionContext:
     def _wrap_conda(self, cmdline: str) -> str:
         if not HAS_CONDA or not self.conda_env:
             return cmdline
-        hook = f'$({shlex.quote(CONDA_EXE)} shell.bash hook)'
-        inner = f'eval "{hook}"; conda activate {shlex.quote(self.conda_env)}; {cmdline}'
-        return "bash -lc " + shlex.quote(inner)
+        # conda run -n <env> で確実にその環境で実行（hook/activate は PATH や login shell に依存するため使わない）
+        return f"{shlex.quote(CONDA_EXE)} run --no-capture-output -n {shlex.quote(self.conda_env)} bash -c {shlex.quote(cmdline)}"
 
     def _wrap_docker_exec(self, cmdline: str, config: dict) -> tuple:
         container = config.get("container_name") or config.get("image")
@@ -199,6 +198,7 @@ class SessionContext:
             cwd=self.cwd,
             encoding="utf-8",
             errors="replace",
+            env=os.environ.copy(),
         )
         try:
             if proc.stdout:
