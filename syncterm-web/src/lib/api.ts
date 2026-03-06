@@ -37,6 +37,26 @@ export interface SyncApi {
     linkName: string
   ): Promise<void>;
 
+  createPath(
+    watcherId: string,
+    session: string,
+    path: string,
+    kind: "file" | "dir"
+  ): Promise<{ ok: boolean; rt?: boolean }>;
+  deletePath(watcherId: string, session: string, path: string): Promise<{ ok: boolean; rt?: boolean }>;
+  copyPath(
+    watcherId: string,
+    session: string,
+    sourcePath: string,
+    destPath: string
+  ): Promise<{ ok: boolean; rt?: boolean }>;
+  movePath(
+    watcherId: string,
+    session: string,
+    sourcePath: string,
+    destPath: string
+  ): Promise<{ ok: boolean; rt?: boolean }>;
+
   fetchFileContent(
     watcherId: string,
     session: string,
@@ -253,6 +273,59 @@ class HttpSyncApi implements SyncApi {
         method: "POST",
         body: JSON.stringify({ sourcePath, linkName })
       }
+    );
+  }
+
+  async createPath(
+    watcherId: string,
+    session: string,
+    path: string,
+    kind: "file" | "dir"
+  ): Promise<{ ok: boolean; rt?: boolean }> {
+    return http(
+      `/watchers/${encodeURIComponent(watcherId)}/sessions/${encodeURIComponent(session)}/files`,
+      { method: "POST", body: JSON.stringify({ path, kind }) }
+    );
+  }
+
+  async deletePath(
+    watcherId: string,
+    session: string,
+    path: string
+  ): Promise<{ ok: boolean; rt?: boolean }> {
+    return http(
+      `/watchers/${encodeURIComponent(watcherId)}/sessions/${encodeURIComponent(
+        session
+      )}/files?path=${encodeURIComponent(path)}`,
+      { method: "DELETE" }
+    );
+  }
+
+  async copyPath(
+    watcherId: string,
+    session: string,
+    sourcePath: string,
+    destPath: string
+  ): Promise<{ ok: boolean; rt?: boolean }> {
+    return http(
+      `/watchers/${encodeURIComponent(watcherId)}/sessions/${encodeURIComponent(
+        session
+      )}/files/copy`,
+      { method: "POST", body: JSON.stringify({ sourcePath, destPath }) }
+    );
+  }
+
+  async movePath(
+    watcherId: string,
+    session: string,
+    sourcePath: string,
+    destPath: string
+  ): Promise<{ ok: boolean; rt?: boolean }> {
+    return http(
+      `/watchers/${encodeURIComponent(watcherId)}/sessions/${encodeURIComponent(
+        session
+      )}/files/move`,
+      { method: "POST", body: JSON.stringify({ sourcePath, destPath }) }
     );
   }
 

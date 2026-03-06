@@ -319,6 +319,46 @@ body {
   overflow: hidden;
 }
 
+.file-tree-context-menu {
+  position: fixed;
+  z-index: 10000;
+  min-width: 10rem;
+  padding: 0.25rem 0;
+  background: var(--color-pane-bg);
+  border: 1px solid var(--color-pane-border);
+  border-radius: 0.4rem;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+.file-tree-context-menu button {
+  display: block;
+  width: 100%;
+  padding: 0.35rem 0.75rem;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: var(--color-text);
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.file-tree-context-menu button:hover:not(:disabled) {
+  background: var(--color-row-hover);
+}
+.file-tree-context-menu button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.file-tree-context-menu .context-menu-sep {
+  height: 1px;
+  margin: 0.25rem 0.5rem;
+  background: var(--color-pane-border);
+}
+
+.modal-hint {
+  font-size: 0.8rem;
+  opacity: 0.8;
+  margin: 0.25rem 0;
+}
+
 .editor-body {
   display: flex;
   flex-direction: column;

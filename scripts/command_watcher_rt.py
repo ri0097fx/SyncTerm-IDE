@@ -379,6 +379,47 @@ class SessionContext:
             output_lines.append(f"{EOC_MARKER_PREFIX}INTERNAL:0")
             return {}
 
+        if cmd.startswith("_internal_rename_path::"):
+            rest = cmd[len("_internal_rename_path::"):]
+            idx = rest.rfind("::")
+            if idx < 0:
+                output_lines.append(f"{EOC_MARKER_PREFIX}INTERNAL:1")
+                return {}
+            old_rel, new_rel = rest[:idx].strip(), rest[idx + 2:].strip()
+            _validate_safe_relpath(old_rel)
+            _validate_safe_relpath(new_rel)
+            src = self.base_dir / old_rel
+            dest = self.base_dir / new_rel
+            if not src.exists() and not src.is_symlink():
+                output_lines.append(f"{EOC_MARKER_PREFIX}INTERNAL:1")
+                return {}
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), str(dest))
+            output_lines.append(f"{EOC_MARKER_PREFIX}INTERNAL:0")
+            return {}
+
+        if cmd.startswith("_internal_copy_path::"):
+            rest = cmd[len("_internal_copy_path::"):]
+            idx = rest.rfind("::")
+            if idx < 0:
+                output_lines.append(f"{EOC_MARKER_PREFIX}INTERNAL:1")
+                return {}
+            src_rel, dest_rel = rest[:idx].strip(), rest[idx + 2:].strip()
+            _validate_safe_relpath(src_rel)
+            _validate_safe_relpath(dest_rel)
+            src = self.base_dir / src_rel
+            dest = self.base_dir / dest_rel
+            if not src.exists() and not src.is_symlink():
+                output_lines.append(f"{EOC_MARKER_PREFIX}INTERNAL:1")
+                return {}
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if src.is_dir() and not src.is_symlink():
+                shutil.copytree(str(src), str(dest), symlinks=True)
+            else:
+                shutil.copy2(str(src), str(dest), follow_symlinks=False)
+            output_lines.append(f"{EOC_MARKER_PREFIX}INTERNAL:0")
+            return {}
+
         if cmd.startswith("_internal_create_link::"):
             # source_path に "::" が含まれる場合があるので、最後の "::" で link_name と分割
             rest = cmd[len("_internal_create_link::"):]

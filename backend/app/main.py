@@ -137,6 +137,33 @@ class CreateLinkPayload(BaseModel):
   linkName: str
 
 
+class CreatePathPayload(BaseModel):
+  path: str
+  kind: str  # "file" | "dir"
+
+
+class DeletePathPayload(BaseModel):
+  path: str
+
+
+class CopyPathPayload(BaseModel):
+  sourcePath: str
+  destPath: str
+
+
+class MovePathPayload(BaseModel):
+  sourcePath: str
+  destPath: str
+
+
+def _norm_rel(path: str) -> str:
+  """Session-relative path to Watcher rel path (no leading /, no ..)."""
+  p = path.strip().lstrip("/").replace("\\", "/")
+  if ".." in p.split("/") or p.startswith(".."):
+    raise ValueError("path must not contain ..")
+  return p or "."
+
+
 class AiAssistPayload(BaseModel):
   path: str
   action: str
@@ -1372,6 +1399,65 @@ def create_link(wid: str, sess: str, payload: CreateLinkPayload):
   with cmd_file.open("a", encoding="utf-8") as f:
     f.write(cmd + "\n")
   return {"ok": True, "rt": rt_resp is not None}
+
+
+def _send_internal_cmd(wid: str, sess: str, cmd: str) -> dict:
+  root = session_root(wid, sess)
+  rt_resp, _ = _post_command_via_rt_with_response(wid, sess, cmd)
+  cmd_file = root / "commands.txt"
+  cmd_file.parent.mkdir(parents=True, exist_ok=True)
+  with cmd_file.open("a", encoding="utf-8") as f:
+    f.write(cmd + "\n")
+  return {"ok": True, "rt": rt_resp is not None}
+
+
+@app.post("/watchers/{wid}/sessions/{sess}/files")
+def create_path(wid: str, sess: str, payload: CreatePathPayload):
+  """Create a new file or directory (session-relative path)."""
+  session_root(wid, sess)
+  rel = _norm_rel(payload.path)
+  if not rel or rel == ".":
+    raise HTTPException(status_code=400, detail="path is required")
+  kind = (payload.kind or "file").strip().lower()
+  if kind not in ("file", "dir"):
+    raise HTTPException(status_code=400, detail="kind must be file or dir")
+  cmd = f"_internal_create_{kind}::{rel}"
+  return _send_internal_cmd(wid, sess, cmd)
+
+
+@app.delete("/watchers/{wid}/sessions/{sess}/files")
+def delete_path(wid: str, sess: str, path: str = Query(..., description="session-relative path")):
+  """Delete a file or directory."""
+  session_root(wid, sess)
+  rel = _norm_rel(path)
+  if not rel or rel == ".":
+    raise HTTPException(status_code=400, detail="path is required")
+  cmd = f"_internal_delete_path::{rel}"
+  return _send_internal_cmd(wid, sess, cmd)
+
+
+@app.post("/watchers/{wid}/sessions/{sess}/files/copy")
+def copy_path(wid: str, sess: str, payload: CopyPathPayload):
+  """Copy file or directory to destPath."""
+  session_root(wid, sess)
+  src = _norm_rel(payload.sourcePath)
+  dest = _norm_rel(payload.destPath)
+  if not src or src == "." or not dest or dest == ".":
+    raise HTTPException(status_code=400, detail="sourcePath and destPath are required")
+  cmd = f"_internal_copy_path::{src}::{dest}"
+  return _send_internal_cmd(wid, sess, cmd)
+
+
+@app.post("/watchers/{wid}/sessions/{sess}/files/move")
+def move_path(wid: str, sess: str, payload: MovePathPayload):
+  """Move/rename file or directory."""
+  session_root(wid, sess)
+  src = _norm_rel(payload.sourcePath)
+  dest = _norm_rel(payload.destPath)
+  if not src or src == "." or not dest or dest == ".":
+    raise HTTPException(status_code=400, detail="sourcePath and destPath are required")
+  cmd = f"_internal_rename_path::{src}::{dest}"
+  return _send_internal_cmd(wid, sess, cmd)
 
 
 @app.post("/watchers/{wid}/sessions/{sess}/ai-assist")
