@@ -205,11 +205,16 @@ export const TerminalPanel: React.FC = () => {
             [...prev, { id: `${ts}-trace`, text: statusLine, isSystem: true }].slice(-MAX_TERMINAL_LINES)
           );
         }
+        // 出力はログポールのみで表示（レスポンスの output をここで足すと Watcher が log に書いた分と二重になる）
         if (result?.output !== undefined && result.output !== "") {
-          const newLines: TerminalLine[] = String(result.output)
-            .split("\n")
-            .map((t, i) => ({ id: `${ts}-out-${i}`, text: t, isSystem: false }));
-          setLines((prev) => [...prev, ...newLines].slice(-MAX_TERMINAL_LINES));
+          const wid = currentWatcher.id;
+          const sess = currentSession.name;
+          setTimeout(async () => {
+            const tail = await api.fetchLogTail(wid, sess);
+            if (tail.length > 0) {
+              setLines((prev) => [...prev, ...tail].slice(-MAX_TERMINAL_LINES));
+            }
+          }, 120);
         }
       } catch (err) {
         const raw = err instanceof Error ? err.message : String(err);

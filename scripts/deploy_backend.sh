@@ -115,6 +115,7 @@ echo "[4/5] Restart backend service"
 ssh "$TARGET" "bash -lc '
 set -euo pipefail
 cd $(rempath_quoted "$REMOTE_DIR_ABS")
+# backend.pid のプロセスを停止
 if [[ -f backend.pid ]]; then
   old_pid=\$(cat backend.pid || true)
   if [[ -n \"\${old_pid}\" ]] && kill -0 \"\$old_pid\" 2>/dev/null; then
@@ -122,13 +123,45 @@ if [[ -f backend.pid ]]; then
     sleep 1
   fi
 fi
+# ポート占有しているプロセスをすべて停止（古い uvicorn が残っていると 405 等になる）
+# NOTE: lsof は DNS/サービス名解決で遅くなることがあるので -nP を付ける
+if command -v lsof >/dev/null 2>&1; then
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    pids=\$(lsof -nP -iTCP:\"$BACKEND_PORT\" -sTCP:LISTEN -t 2>/dev/null | tr \"\\n\" \" \" | xargs echo -n || true)
+    [[ -z \"\$pids\" ]] && break
+    echo \"Killing process(es) on port $BACKEND_PORT (attempt \$attempt): \$pids\"
+    # まず TERM、残るなら KILL
+    kill \$pids 2>/dev/null || true
+    sleep 0.7
+    still=\$(lsof -nP -iTCP:\"$BACKEND_PORT\" -sTCP:LISTEN -t 2>/dev/null | tr \"\\n\" \" \" | xargs echo -n || true)
+    if [[ -n \"\$still\" ]]; then
+      echo \"Still listening after TERM, sending KILL: \$still\"
+      kill -9 \$still 2>/dev/null || true
+      sleep 0.7
+    fi
+  done
+else
+  echo \"[WARN] lsof not found on remote; skipping port-kill step\"
+fi
+sleep 1
 . .venv-backend/bin/activate
 nohup uvicorn backend.app.main:app --host 0.0.0.0 --port \"$BACKEND_PORT\" > backend.log 2>&1 &
 echo \$! > backend.pid
+sleep 1
+if ! kill -0 \$(cat backend.pid) 2>/dev/null; then
+  echo \"[WARN] uvicorn may have exited. Check backend.log:\"
+  tail -30 backend.log
+  exit 1
+fi
 '"
 
 echo "[5/5] Done"
 echo "Backend URL: http://$BACKEND_HOST:$BACKEND_PORT"
+echo ""
+echo "Verify file-ops (POST /files) is available:"
+echo "  curl -s http://localhost:8002/health   # via tunnel → expect {\"status\":\"ok\",\"file_ops\":true}"
+echo "  curl -s -X POST http://localhost:8002/watchers/WID/sessions/SESS/files -H 'Content-Type: application/json' -d '{\"path\":\"x.txt\",\"kind\":\"file\"}'  # 200 = OK, 405 = old backend still running"
+echo ""
 echo "Tip: Check server log with:"
 printf '  ssh %s "tail -f %s/backend.log"\n' "$TARGET" "$REMOTE_DIR_ABS"
 

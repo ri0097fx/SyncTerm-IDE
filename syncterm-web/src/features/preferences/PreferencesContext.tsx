@@ -15,6 +15,8 @@ export interface Preferences {
   editorWordWrap: "off" | "on";
   editorLineNumbers: boolean;
   editorMinimap: boolean;
+  /** AI アシストパネル（入力欄/結果表示）を表示する */
+  showAiAssistPanel: boolean;
   terminalFontSize: number;
   terminalFontFamily: string;
   terminalMaxLines: number;
@@ -34,6 +36,7 @@ const DEFAULT_PREFERENCES: Preferences = {
   editorWordWrap: "off",
   editorLineNumbers: true,
   editorMinimap: false,
+  showAiAssistPanel: false,
   terminalFontSize: 13,
   terminalFontFamily: "Consolas, 'JetBrains Mono', Menlo, Monaco, 'Courier New', monospace",
   terminalMaxLines: 5000,

@@ -349,6 +349,14 @@ export const SessionBar: React.FC = () => {
                 />
                 Show editor minimap
               </label>
+              <label className="modal-label modal-checkbox">
+                <input
+                  type="checkbox"
+                  checked={preferences.showAiAssistPanel}
+                  onChange={(e) => updatePreferences({ showAiAssistPanel: e.target.checked })}
+                />
+                Show AI assist panel
+              </label>
               <label className="modal-label">
                 Terminal Font Size
                 <input
@@ -406,7 +414,7 @@ export const SessionBar: React.FC = () => {
                   checked={preferences.showCommandTrace}
                   onChange={(e) => updatePreferences({ showCommandTrace: e.target.checked })}
                 />
-                Show command execution trace (debug)
+                Show command execution trace & file tree op log (debug)
               </label>
             </div>
             <div className="modal-actions">

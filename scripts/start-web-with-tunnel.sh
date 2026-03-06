@@ -38,15 +38,20 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 if [[ -n "$TUNNEL_SSH" ]]; then
-  echo "[tunnel] Starting: ssh -L ${TUNNEL_LOCAL_PORT}:127.0.0.1:${TUNNEL_REMOTE_PORT} ${TUNNEL_SSH} -N"
-  ssh -L "${TUNNEL_LOCAL_PORT}:127.0.0.1:${TUNNEL_REMOTE_PORT}" "$TUNNEL_SSH" -N &
+  echo "[tunnel] Starting: ssh -o ExitOnForwardFailure=yes -L ${TUNNEL_LOCAL_PORT}:127.0.0.1:${TUNNEL_REMOTE_PORT} ${TUNNEL_SSH} -N"
+  ssh -o ExitOnForwardFailure=yes -L "${TUNNEL_LOCAL_PORT}:127.0.0.1:${TUNNEL_REMOTE_PORT}" "$TUNNEL_SSH" -N &
   SSH_PID=$!
   sleep 1
   if ! kill -0 "$SSH_PID" 2>/dev/null; then
-    echo "[tunnel] SSH failed to start (check host/key). Continuing without tunnel."
+    echo "[tunnel] SSH failed to start. Common causes:"
+    echo "  - Local port ${TUNNEL_LOCAL_PORT} already in use"
+    echo "  - SSH host/key issue"
+    echo "[tunnel] Continuing without tunnel."
     SSH_PID=""
   else
     echo "[tunnel] Backend will be available at http://localhost:${TUNNEL_LOCAL_PORT}"
+    # Prefer runtime env over syncterm-web/.env.local so the tunnel port can be changed via .env.tunnel
+    export VITE_BACKEND_URL="http://localhost:${TUNNEL_LOCAL_PORT}"
   fi
 else
   echo "[tunnel] TUNNEL_SSH not set. Copy .env.tunnel.example to .env.tunnel and set TUNNEL_SSH to use tunnel."

@@ -147,6 +147,51 @@ rsync -azv user@203.0.113.10:~/SyncTerm-IDE/_registry/ ~/gui_local_mirror/_probe
 
 ---
 
+## 4-2. Web 版トンネルで「Connection refused」/ channel open failed
+
+**症状**
+
+* `./scripts/start-web-with-tunnel.sh` 実行後にログに `channel 2: open failed: connect failed: Connection refused` が出る。
+* ブラウザで API（例: ファイル一覧）が読めない / 405 や接続エラーになる。
+
+**原因**
+
+* **リレー上の 8000 番でバックエンドが動いていない**。トンネルは「ローカル 8002 → リレー 8000」なので、リレー側で何も listen していないと接続が拒否される。
+
+**確認（リレーに SSH して実行）**
+
+```bash
+# ポート 8000 を誰が使っているか
+lsof -i :8000
+
+# バックエンドのログ（起動失敗の理由が書いてあることが多い）
+tail -80 <アプリルート>/backend.log
+```
+
+**対処**
+
+1. **手動でバックエンドを常駐起動する（リレー上）**
+
+   **重要**: フォアグラウンドで `uvicorn ...` だけ実行すると、SSH を切った瞬間にプロセスが SIGHUP を受けて終了します（ログに `Shutting down` が出る）。**必ず `nohup` と `&` でバックグラウンド起動**してください。
+
+```bash
+ssh user@relay-host
+cd <アプリルート>   # 例: ~/SyncTerm-IDE または deploy_dir
+. .venv-backend/bin/activate
+nohup uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 > backend.log 2>&1 &
+echo $! > backend.pid
+exit
+```
+
+   * 起動に失敗している場合は `tail -80 backend.log` でエラー（ModuleNotFoundError, config.ini not found 等）を確認する。
+   * 別ターミナルで `curl -s http://127.0.0.1:8000/health` が `{"status":"ok","file_ops":true}` を返すか確認する。
+
+2. **デプロイをやり直す**
+
+   * ローカルで `./scripts/deploy_backend.sh user@relay-host` を再実行する。[4/5] で「uvicorn may have exited」と出た場合は、表示された `backend.log` の末尾を確認する。
+
+---
+
 ## 5. SSH 認証エラー（`Permission denied (publickey)` など）
 
 **確認ポイント**

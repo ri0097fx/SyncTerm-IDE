@@ -455,6 +455,12 @@ def backend_info():
   }
 
 
+@app.get("/health")
+def health():
+  """デプロイ確認用: このバックエンドがファイル操作ルート (POST /files 等) を持つか返す"""
+  return {"status": "ok", "file_ops": True}
+
+
 @app.get("/watchers", response_model=List[WatcherModel])
 def list_watchers():
   return load_watchers()
@@ -811,7 +817,7 @@ def _post_command_via_rt(wid: str, sess: str, command: str) -> tuple[bool, str]:
 
 
 def _post_command_via_rt_with_response(wid: str, sess: str, command: str) -> tuple[Optional[dict], str]:
-  """RT 経由でコマンド送信し、(レスポンス JSON, 失敗時は理由) を返す"""
+  """RT 経由でコマンド送信し、(レスポンス JSON, 失敗時は理由) を返す。Watcher が 404 の場合は reason に 'session_not_found' を返す。"""
   port = _get_rt_port(wid)
   if port is None:
     return None, "rt_port_not_found"
@@ -821,6 +827,10 @@ def _post_command_via_rt_with_response(wid: str, sess: str, command: str) -> tup
     req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(req, timeout=30) as resp:
       return json.loads(resp.read().decode("utf-8", errors="replace")), ""
+  except urllib.error.HTTPError as e:
+    if e.code == 404:
+      return None, "session_not_found"
+    return None, f"HTTP {e.code}"
   except urllib.error.URLError as e:
     return None, str(e.reason) if e.reason else str(e)
   except Exception as e:
@@ -1388,7 +1398,7 @@ def call_openai_chat_limited(system_prompt: str, user_prompt: str, max_tokens: i
 
 @app.post("/watchers/{wid}/sessions/{sess}/links")
 def create_link(wid: str, sess: str, payload: CreateLinkPayload):
-  root = session_root(wid, sess)
+  """Create symlink. Relay にセッション dir が無くても RT で Watcher に送る。"""
   source = payload.sourcePath.strip()
   name = payload.linkName.strip()
   if not source or not name:
@@ -1399,30 +1409,31 @@ def create_link(wid: str, sess: str, payload: CreateLinkPayload):
     raise HTTPException(status_code=400, detail="single quote is not supported in sourcePath")
 
   cmd = f"_internal_create_link::{source}::{name}"
-  # RT で即送信（Watcher がすぐ実行）。失敗しても commands.txt に書くので poll で拾われる
-  rt_resp, _ = _post_command_via_rt_with_response(wid, sess, cmd)
-
-  cmd_file = root / "commands.txt"
-  cmd_file.parent.mkdir(parents=True, exist_ok=True)
-  with cmd_file.open("a", encoding="utf-8") as f:
-    f.write(cmd + "\n")
-  return {"ok": True, "rt": rt_resp is not None}
+  return _send_internal_cmd(wid, sess, cmd)
 
 
 def _send_internal_cmd(wid: str, sess: str, cmd: str) -> dict:
-  root = session_root(wid, sess)
-  rt_resp, _ = _post_command_via_rt_with_response(wid, sess, cmd)
+  """内部コマンドを RT で送信。RT 成功時は commands.txt に書かない（poll で二重実行されるため）。
+  Relay 上にセッション dir が無くても送信する（RT は Watcher 側の dir で実行される）。"""
+  rt_resp, rt_reason = _post_command_via_rt_with_response(wid, sess, cmd)
+  if rt_resp is not None:
+    return {"ok": True, "rt": True}
+  if rt_reason == "session_not_found":
+    raise HTTPException(
+      status_code=404,
+      detail="Session not found on Watcher. Ensure Watcher has LOCAL_WATCHER_DIR/session and watcher_manager_rt.sh has run.",
+    )
+  root = SESSIONS_ROOT / wid / sess
   cmd_file = root / "commands.txt"
   cmd_file.parent.mkdir(parents=True, exist_ok=True)
   with cmd_file.open("a", encoding="utf-8") as f:
     f.write(cmd + "\n")
-  return {"ok": True, "rt": rt_resp is not None}
+  return {"ok": True, "rt": False}
 
 
 @app.post("/watchers/{wid}/sessions/{sess}/files")
 def create_path(wid: str, sess: str, payload: CreatePathPayload):
-  """Create a new file or directory (session-relative path)."""
-  session_root(wid, sess)
+  """Create a new file or directory (session-relative path). Relay にセッション dir が無くても RT で Watcher に送る。"""
   rel = _norm_rel(payload.path)
   if not rel or rel == ".":
     raise HTTPException(status_code=400, detail="path is required")
@@ -1435,8 +1446,7 @@ def create_path(wid: str, sess: str, payload: CreatePathPayload):
 
 @app.delete("/watchers/{wid}/sessions/{sess}/files")
 def delete_path(wid: str, sess: str, path: str = Query(..., description="session-relative path")):
-  """Delete a file or directory."""
-  session_root(wid, sess)
+  """Delete a file or directory. Relay にセッション dir が無くても RT で Watcher に送る。"""
   rel = _norm_rel(path)
   if not rel or rel == ".":
     raise HTTPException(status_code=400, detail="path is required")
@@ -1446,8 +1456,7 @@ def delete_path(wid: str, sess: str, path: str = Query(..., description="session
 
 @app.post("/watchers/{wid}/sessions/{sess}/files/copy")
 def copy_path(wid: str, sess: str, payload: CopyPathPayload):
-  """Copy file or directory to destPath."""
-  session_root(wid, sess)
+  """Copy file or directory to destPath. Relay にセッション dir が無くても RT で Watcher に送る。"""
   src = _norm_rel(payload.sourcePath)
   dest = _norm_rel(payload.destPath)
   if not src or src == "." or not dest or dest == ".":
@@ -1458,8 +1467,7 @@ def copy_path(wid: str, sess: str, payload: CopyPathPayload):
 
 @app.post("/watchers/{wid}/sessions/{sess}/files/move")
 def move_path(wid: str, sess: str, payload: MovePathPayload):
-  """Move/rename file or directory."""
-  session_root(wid, sess)
+  """Move/rename file or directory. Relay にセッション dir が無くても RT で Watcher に送る。"""
   src = _norm_rel(payload.sourcePath)
   dest = _norm_rel(payload.destPath)
   if not src or src == "." or not dest or dest == ".":

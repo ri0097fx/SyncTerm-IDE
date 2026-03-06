@@ -115,7 +115,6 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
   const [saveBadge, setSaveBadge] = useState<"saved" | "error" | null>(null);
   const [editorInstance, setEditorInstance] = useState<MonacoEditorType.IStandaloneCodeEditor | null>(null);
   const [monacoInstance, setMonacoInstance] = useState<Monaco | null>(null);
-  const [keymapHint, setKeymapHint] = useState("");
   const [aiPrompt, setAiPrompt] = useState("");
   const [aiAction, setAiAction] = useState("refactor");
   const [aiResult, setAiResult] = useState("");
@@ -387,12 +386,6 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
       })
     );
 
-    setKeymapHint(
-      preferences.editorKeymap === "spyder"
-        ? "Save: Ctrl/Cmd+S, Comment: Ctrl/Cmd+1, Indent: Tab, Outdent: Shift+Tab"
-        : "Save: Ctrl/Cmd+S, Comment: Ctrl/Cmd+/, Indent: Tab, Outdent: Shift+Tab"
-    );
-
     return () => {
       for (const d of disposables) d.dispose();
     };
@@ -617,44 +610,57 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
               }}
               options={monacoOptions}
             />
-            <div className="editor-keymap-hint">{keymapHint}</div>
-            <div className="ai-assist-panel">
-              <div className="ai-assist-row">
-                <select
-                  className="session-select"
-                  value={aiAction}
-                  onChange={(e) => setAiAction(e.target.value)}
-                >
-                  <option value="refactor">Refactor</option>
-                  <option value="fix">Fix</option>
-                  <option value="explain">Explain as code comments</option>
-                  <option value="generate">Generate code</option>
-                </select>
-                <input
-                  className="terminal-input"
-                  value={aiPrompt}
-                  onChange={(e) => setAiPrompt(e.target.value)}
-                  placeholder="AI instruction..."
-                />
-                <button className="primary-button" disabled={aiLoading} onClick={() => void handleAiAssist()}>
-                  {aiLoading ? "Thinking..." : "AI Assist"}
-                </button>
-              </div>
-              {aiError && <div className="pane-empty" style={{ color: "#fca5a5", paddingTop: 6 }}>{aiError}</div>}
-              {aiResult && (
-                <div className="ai-assist-result">
-                  <div className="ai-assist-actions">
-                    <button className="icon-button" style={{ width: "auto", padding: "0 0.7rem" }} onClick={applyAiToSelection}>
-                      Replace Selection
-                    </button>
-                    <button className="icon-button" style={{ width: "auto", padding: "0 0.7rem" }} onClick={appendAiResult}>
-                      Append Result
-                    </button>
-                  </div>
-                  <pre className="terminal-line">{aiResult}</pre>
+            {preferences.showAiAssistPanel && (
+              <div className="ai-assist-panel">
+                <div className="ai-assist-row">
+                  <select
+                    className="session-select"
+                    value={aiAction}
+                    onChange={(e) => setAiAction(e.target.value)}
+                  >
+                    <option value="refactor">Refactor</option>
+                    <option value="fix">Fix</option>
+                    <option value="explain">Explain as code comments</option>
+                    <option value="generate">Generate code</option>
+                  </select>
+                  <input
+                    className="terminal-input"
+                    value={aiPrompt}
+                    onChange={(e) => setAiPrompt(e.target.value)}
+                    placeholder="AI instruction..."
+                  />
+                  <button className="primary-button" disabled={aiLoading} onClick={() => void handleAiAssist()}>
+                    {aiLoading ? "Thinking..." : "AI Assist"}
+                  </button>
                 </div>
-              )}
-            </div>
+                {aiError && (
+                  <div className="pane-empty" style={{ color: "#fca5a5", paddingTop: 6 }}>
+                    {aiError}
+                  </div>
+                )}
+                {aiResult && (
+                  <div className="ai-assist-result">
+                    <div className="ai-assist-actions">
+                      <button
+                        className="icon-button"
+                        style={{ width: "auto", padding: "0 0.7rem" }}
+                        onClick={applyAiToSelection}
+                      >
+                        Replace Selection
+                      </button>
+                      <button
+                        className="icon-button"
+                        style={{ width: "auto", padding: "0 0.7rem" }}
+                        onClick={appendAiResult}
+                      >
+                        Append Result
+                      </button>
+                    </div>
+                    <pre className="terminal-line">{aiResult}</pre>
+                  </div>
+                )}
+              </div>
+            )}
           </>
         ) : loadingPath && loadingPath === filePath ? (
           <div className="pane-empty">読み込み中...</div>

@@ -621,11 +621,17 @@ class RTRequestHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "session required"})
             return
 
-        # LOCAL_WATCHER_DIR = sessions_root/watcher_id (session の親ディレクトリ)
+        # LOCAL_WATCHER_DIR = セッション親ディレクトリ。セッション dir が無ければ自動作成する。
         local_watcher_dir = Path(os.environ.get("LOCAL_WATCHER_DIR", str(BASE_DIR.parent)))
         base_dir = local_watcher_dir / session
+        if not base_dir.exists():
+            try:
+                base_dir.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                self._send_json(500, {"error": f"failed to create session dir {session}: {e}"})
+                return
         if not base_dir.is_dir():
-            self._send_json(404, {"error": f"session not found: {session}"})
+            self._send_json(500, {"error": f"session path is not a directory: {session}"})
             return
 
         ctx = get_session(base_dir)

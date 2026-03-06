@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { useSession } from "../session/SessionContext";
+import { usePreferences } from "../preferences/PreferencesContext";
 import type { FileEntry } from "../../types/domain";
 import { api } from "../../lib/api";
 
@@ -37,6 +38,35 @@ function flattenEntries(entries: FileEntry[]): FileEntry[] {
   return out;
 }
 
+function snapshotChildrenByPath(entries: FileEntry[]): Map<string, FileEntry[]> {
+  const map = new Map<string, FileEntry[]>();
+  const walk = (nodes: FileEntry[]) => {
+    for (const n of nodes) {
+      if (n.path !== "/" && n.children && n.children.length > 0) {
+        map.set(n.path, n.children);
+      }
+      if (n.children && n.children.length > 0) {
+        walk(n.children);
+      }
+    }
+  };
+  walk(entries);
+  return map;
+}
+
+function mergeChildrenFromSnapshot(items: FileEntry[], snapshot: Map<string, FileEntry[]>): FileEntry[] {
+  return items.map((node) => {
+    let children = node.children;
+    const snap = snapshot.get(node.path);
+    if ((!children || children.length === 0) && snap && snap.length > 0) {
+      children = snap;
+    } else if (children && children.length > 0) {
+      children = mergeChildrenFromSnapshot(children, snapshot);
+    }
+    return { ...node, children };
+  });
+}
+
 function arrayBufferToBase64(buf: ArrayBuffer): string {
   const bytes = new Uint8Array(buf);
   const chunkSize = 8192;
@@ -54,9 +84,13 @@ interface Props {
 
 type ClipboardKind = "copy" | "cut";
 
+const FILE_TREE_DEBUG_MAX = 20;
+
 export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
   const { currentWatcher, currentSession } = useSession();
+  const { preferences } = usePreferences();
   const [roots, setRoots] = useState<FileEntry[]>([]);
+  const [openPaths, setOpenPaths] = useState<Set<string>>(new Set(["/"]));
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
   const [lastSelectedPath, setLastSelectedPath] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -73,16 +107,48 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
   const [dragOverPath, setDragOverPath] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
 
-  const [showNewFile, setShowNewFile] = useState(false);
-  const [showNewFolder, setShowNewFolder] = useState(false);
   const [showRename, setShowRename] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
-  const [actionParentPath, setActionParentPath] = useState("");
   const [actionEntry, setActionEntry] = useState<FileEntry | null>(null);
   const [actionEntries, setActionEntries] = useState<FileEntry[]>([]);
-  const [newName, setNewName] = useState("");
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
+  const [newName, setNewName] = useState("");
+
+  const [inlineCreate, setInlineCreate] = useState<
+    | {
+        parentDisplayPath: string;
+        parentRelPath: string;
+        kind: "file" | "dir";
+      }
+    | null
+  >(null);
+  const [inlineCreateName, setInlineCreateName] = useState("");
+
+  /** デバッグ: Preferences の Show command trace が ON のとき、フォルダツリー操作のログ（原因調査用） */
+  const [fileTreeDebugLog, setFileTreeDebugLog] = useState<Array<{ op: string; params: string; result: string }>>([]);
+
+  useEffect(() => {
+    // watcher/session 切替時に展開状態とインライン作成状態をクリア
+    setOpenPaths(new Set(["/"]));
+    setInlineCreate(null);
+    setInlineCreateName("");
+    setActionError(null);
+    setTreeError(null);
+  }, [currentWatcher?.id, currentSession?.name]);
+
+  useEffect(() => {
+    if (!inlineCreate) return;
+    const handleClick = () => {
+      setInlineCreate(null);
+      setInlineCreateName("");
+      setActionError(null);
+    };
+    window.addEventListener("click", handleClick);
+    return () => {
+      window.removeEventListener("click", handleClick);
+    };
+  }, [inlineCreate]);
 
   useEffect(() => {
     const load = async () => {
@@ -103,17 +169,20 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
 
   const refreshTree = useCallback(async () => {
     if (!currentWatcher || !currentSession) return;
+    // 展開済みディレクトリ / シンボリックリンクの children をスナップショットしておき、リフレッシュ後に復元する
+    const snapshot = snapshotChildrenByPath(roots);
     setLoading(true);
     setTreeError(null);
     try {
       const entries = await api.listFiles(currentWatcher.id, currentSession.name);
-      setRoots(entries);
+      const merged = snapshot.size ? mergeChildrenFromSnapshot(entries, snapshot) : entries;
+      setRoots(merged);
     } catch (e) {
       setTreeError(e instanceof Error ? e.message : "Failed to refresh file tree");
     } finally {
       setLoading(false);
     }
-  }, [currentWatcher, currentSession]);
+  }, [currentWatcher, currentSession, roots]);
 
   const updateChildren = (items: FileEntry[], path: string, children: FileEntry[]): FileEntry[] =>
     items.map((node) => {
@@ -192,25 +261,52 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
     };
   }, [contextMenu]);
 
-  const getParentForCreate = (entry: FileEntry | null): string => {
-    if (!entry) return "";
-    if (entry.kind === "dir" || entry.kind === "symlink") return entry.path;
-    return parentPath(entry.path);
+  const getParentForCreate = (
+    entry: FileEntry | null
+  ): { parentDisplayPath: string; parentRelPath: string } => {
+    // 右クリック対象がない場合はルート直下に作成
+    if (!entry) return { parentDisplayPath: "/", parentRelPath: "" };
+    if (entry.path === "/") return { parentDisplayPath: "/", parentRelPath: "" };
+    if (entry.kind === "dir" || entry.kind === "symlink") {
+      // ディレクトリ/リンク自体の直下に作成
+      const rel = entry.path.replace(/^\//, "");
+      return { parentDisplayPath: entry.path, parentRelPath: rel };
+    }
+    // ファイル上での New はその親ディレクトリに対して行う（表示は "/dir", 内部の相対パスは "dir"）
+    const relParent = parentPath(entry.path); // 先頭スラッシュなし
+    const display = relParent ? `/${relParent}` : "/";
+    return { parentDisplayPath: display, parentRelPath: relParent };
   };
 
   const openNewFile = () => {
+    const { parentDisplayPath, parentRelPath } = getParentForCreate(contextMenu?.entry ?? null);
     setContextMenu(null);
-    setActionParentPath(getParentForCreate(contextMenu?.entry ?? null));
-    setNewName("");
+    setInlineCreate({ parentDisplayPath, parentRelPath, kind: "file" });
+    setInlineCreateName("");
     setActionError(null);
-    setShowNewFile(true);
+    setTreeError(null);
+    if (parentDisplayPath) {
+      const e = findEntryByPath(roots, parentDisplayPath);
+      if (e) {
+        setOpenPaths((prev) => new Set(prev).add(e.path));
+        void handleExpand(e);
+      }
+    }
   };
   const openNewFolder = () => {
+    const { parentDisplayPath, parentRelPath } = getParentForCreate(contextMenu?.entry ?? null);
     setContextMenu(null);
-    setActionParentPath(getParentForCreate(contextMenu?.entry ?? null));
-    setNewName("");
+    setInlineCreate({ parentDisplayPath, parentRelPath, kind: "dir" });
+    setInlineCreateName("");
     setActionError(null);
-    setShowNewFolder(true);
+    setTreeError(null);
+    if (parentDisplayPath) {
+      const e = findEntryByPath(roots, parentDisplayPath);
+      if (e) {
+        setOpenPaths((prev) => new Set(prev).add(e.path));
+        void handleExpand(e);
+      }
+    }
   };
   const openRename = () => {
     const entries = getContextEntries();
@@ -232,6 +328,46 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
     setShowDeleteConfirm(true);
   };
 
+  /** デバッグ用: showCommandTrace が ON のとき API の入出力を console と fileTreeDebugLog に記録 */
+  const runWithTrace = useCallback(
+    async function runWithTrace<T>(
+      op: string,
+      params: Record<string, unknown>,
+      fn: () => Promise<T>
+    ): Promise<T> {
+      if (!preferences?.showCommandTrace) return fn();
+      const paramsStr = JSON.stringify(params);
+      console.log(`[FileTree] ${op}`, params);
+      setFileTreeDebugLog((prev) =>
+        prev.length >= FILE_TREE_DEBUG_MAX ? [...prev.slice(1), { op, params: paramsStr, result: "..." }] : [...prev, { op, params: paramsStr, result: "..." }]
+      );
+      try {
+        const res = await fn();
+        const resultStr =
+          typeof res === "object" && res !== null && "ok" in res
+            ? `ok=${(res as { ok?: boolean }).ok} rt=${(res as { rt?: boolean }).rt}`
+            : String(res);
+        console.log(`[FileTree] ${op} result`, res);
+        setFileTreeDebugLog((prev) => {
+          const next = [...prev];
+          if (next.length) next[next.length - 1] = { ...next[next.length - 1], result: resultStr };
+          return next;
+        });
+        return res;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error(`[FileTree] ${op} error`, e);
+        setFileTreeDebugLog((prev) => {
+          const next = [...prev];
+          if (next.length) next[next.length - 1] = { ...next[next.length - 1], result: `ERROR: ${msg}` };
+          return next;
+        });
+        throw e;
+      }
+    },
+    [preferences?.showCommandTrace]
+  );
+
   const runWithRefresh = async (fn: () => Promise<unknown>) => {
     if (!currentWatcher || !currentSession) return;
     setActionBusy(true);
@@ -247,8 +383,9 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
     }
   };
 
-  const submitNewFile = async () => {
-    const name = newName.trim();
+  const submitInlineCreate = async () => {
+    if (!inlineCreate || !currentWatcher || !currentSession) return;
+    const name = inlineCreateName.trim();
     if (!name) {
       setActionError("名前を入力してください。");
       return;
@@ -257,23 +394,14 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
       setActionError("名前に / と \\ は使えません。");
       return;
     }
-    const path = joinPath(actionParentPath, name);
-    await runWithRefresh(() => api.createPath(currentWatcher!.id, currentSession!.name, path, "file"));
-    setShowNewFile(false);
-  };
-  const submitNewFolder = async () => {
-    const name = newName.trim();
-    if (!name) {
-      setActionError("名前を入力してください。");
-      return;
-    }
-    if (name.includes("/") || name.includes("\\")) {
-      setActionError("名前に / と \\ は使えません。");
-      return;
-    }
-    const path = joinPath(actionParentPath, name);
-    await runWithRefresh(() => api.createPath(currentWatcher!.id, currentSession!.name, path, "dir"));
-    setShowNewFolder(false);
+    const path = joinPath(inlineCreate.parentRelPath, name);
+    await runWithRefresh(() =>
+      runWithTrace("createPath", { path, kind: inlineCreate.kind }, () =>
+        api.createPath(currentWatcher.id, currentSession.name, path, inlineCreate.kind)
+      )
+    );
+    setInlineCreate(null);
+    setInlineCreateName("");
   };
   const submitRename = async () => {
     if (!actionEntry) return;
@@ -284,7 +412,9 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
     }
     const destPath = joinPath(parentPath(actionEntry.path), name);
     await runWithRefresh(() =>
-      api.movePath(currentWatcher!.id, currentSession!.name, actionEntry.path, destPath)
+      runWithTrace("movePath", { sourcePath: actionEntry.path, destPath }, () =>
+        api.movePath(currentWatcher!.id, currentSession!.name, actionEntry.path, destPath)
+      )
     );
     setShowRename(false);
     setActionEntry(null);
@@ -294,7 +424,9 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
     if (!toDelete.length || !currentWatcher || !currentSession) return;
     await runWithRefresh(async () => {
       for (const e of toDelete) {
-        await api.deletePath(currentWatcher.id, currentSession.name, e.path);
+        await runWithTrace("deletePath", { path: e.path }, () =>
+          api.deletePath(currentWatcher.id, currentSession.name, e.path)
+        );
       }
     });
     setShowDeleteConfirm(false);
@@ -333,8 +465,15 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
     await runWithRefresh(async () => {
       for (const path of clipboard.paths) {
         const destPath = joinPath(destDir, baseName(path));
-        if (clipboard.kind === "cut") await api.movePath(currentWatcher.id, currentSession.name, path, destPath);
-        else await api.copyPath(currentWatcher.id, currentSession.name, path, destPath);
+        if (clipboard.kind === "cut") {
+          await runWithTrace("movePath", { sourcePath: path, destPath }, () =>
+            api.movePath(currentWatcher.id, currentSession.name, path, destPath)
+          );
+        } else {
+          await runWithTrace("copyPath", { sourcePath: path, destPath }, () =>
+            api.copyPath(currentWatcher.id, currentSession.name, path, destPath)
+          );
+        }
       }
     });
     if (clipboard.kind === "cut") setClipboard(null);
@@ -388,7 +527,9 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
     setLinkSubmitting(true);
     setLinkError(null);
     try {
-      await api.createSymlink(currentWatcher.id, currentSession.name, source, name);
+      await runWithTrace("createSymlink", { sourcePath: source, linkName: name }, () =>
+        api.createSymlink(currentWatcher.id, currentSession.name, source, name)
+      );
       setShowLinkDialog(false);
       window.setTimeout(() => void refreshTree(), 4000);
       window.setTimeout(() => void refreshTree(), 8000);
@@ -422,12 +563,15 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
       const toMove = paths.filter((p) => p !== destDir && !p.startsWith(destDir + "/"));
       await runWithRefresh(async () => {
         for (const path of toMove) {
-          await api.movePath(currentWatcher.id, currentSession.name, path, joinPath(destDir, baseName(path)));
+          const destPath = joinPath(destDir, baseName(path));
+          await runWithTrace("movePath", { sourcePath: path, destPath }, () =>
+            api.movePath(currentWatcher.id, currentSession.name, path, destPath)
+          );
         }
       });
       setDragOverPath(null);
     },
-    [currentWatcher, currentSession, runWithRefresh]
+    [currentWatcher, currentSession, runWithRefresh, runWithTrace]
   );
   const handleDropFiles = useCallback(
     async (destDir: string, files: FileList | File[]) => {
@@ -467,6 +611,18 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
           </button>
         </div>
       </div>
+      {preferences?.showCommandTrace && fileTreeDebugLog.length > 0 && (
+        <div className="file-tree-debug-log" style={{ padding: "6px 8px", fontSize: "11px", background: "var(--bg-secondary)", borderBottom: "1px solid var(--border)" }}>
+          <strong>File tree debug (last {fileTreeDebugLog.length} ops)</strong>
+          <ul style={{ margin: "4px 0 0", paddingLeft: "16px", maxHeight: "120px", overflow: "auto" }}>
+            {fileTreeDebugLog.map((line, i) => (
+              <li key={i} style={{ marginBottom: 2 }}>
+                <span style={{ color: "var(--accent)" }}>{line.op}</span> {line.params} → {line.result}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       <div
         className={`pane-body file-tree-scroll ${dragOverPath === "" ? "file-tree-drag-over" : ""}`}
         onContextMenu={(e) => onContextMenuOpen(e, null)}
@@ -497,6 +653,18 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
             key={entry.id}
             entry={entry}
             depth={0}
+            openPaths={openPaths}
+            setOpenPaths={setOpenPaths}
+            inlineCreate={inlineCreate}
+            inlineCreateName={inlineCreateName}
+            setInlineCreateName={setInlineCreateName}
+            onSubmitInlineCreate={submitInlineCreate}
+            onCancelInlineCreate={() => {
+              setInlineCreate(null);
+              setInlineCreateName("");
+              setActionError(null);
+            }}
+            inlineCreateError={actionError}
             selectedPaths={selectedPaths}
             onSelect={handleSelect}
             onExpand={handleExpand}
@@ -533,54 +701,6 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
           {showDownload && <button type="button" onClick={handleDownload}>Download</button>}
           <div className="context-menu-sep" />
           <button type="button" onClick={openDeleteConfirm} disabled={!contextEntries.length}>Delete</button>
-        </div>
-      )}
-
-      {showNewFile && (
-        <div className="modal-overlay" onClick={() => setShowNewFile(false)}>
-          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
-            <h3 className="modal-title">New File</h3>
-            <label className="modal-label">
-              Name
-              <input
-                className="modal-input"
-                value={newName}
-                onChange={(e) => setNewName(e.target.value)}
-                placeholder="filename.txt"
-                autoFocus
-              />
-            </label>
-            {actionParentPath && <p className="modal-hint">Parent: {actionParentPath || "(root)"}</p>}
-            {actionError && <div className="modal-error">{actionError}</div>}
-            <div className="modal-actions">
-              <button className="icon-button" style={{ width: "auto", padding: "0 0.8rem" }} onClick={() => setShowNewFile(false)}>Cancel</button>
-              <button className="primary-button" disabled={actionBusy} onClick={() => void submitNewFile()}>{actionBusy ? "Creating..." : "Create"}</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {showNewFolder && (
-        <div className="modal-overlay" onClick={() => setShowNewFolder(false)}>
-          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
-            <h3 className="modal-title">New Folder</h3>
-            <label className="modal-label">
-              Name
-              <input
-                className="modal-input"
-                value={newName}
-                onChange={(e) => setNewName(e.target.value)}
-                placeholder="folder_name"
-                autoFocus
-              />
-            </label>
-            {actionParentPath && <p className="modal-hint">Parent: {actionParentPath || "(root)"}</p>}
-            {actionError && <div className="modal-error">{actionError}</div>}
-            <div className="modal-actions">
-              <button className="icon-button" style={{ width: "auto", padding: "0 0.8rem" }} onClick={() => setShowNewFolder(false)}>Cancel</button>
-              <button className="primary-button" disabled={actionBusy} onClick={() => void submitNewFolder()}>{actionBusy ? "Creating..." : "Create"}</button>
-            </div>
-          </div>
         </div>
       )}
 
@@ -664,6 +784,20 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
 interface NodeProps {
   entry: FileEntry;
   depth: number;
+  openPaths: Set<string>;
+  setOpenPaths: React.Dispatch<React.SetStateAction<Set<string>>>;
+  inlineCreate:
+    | {
+        parentDisplayPath: string;
+        parentRelPath: string;
+        kind: "file" | "dir";
+      }
+    | null;
+  inlineCreateName: string;
+  setInlineCreateName: (name: string) => void;
+  onSubmitInlineCreate: () => Promise<void>;
+  onCancelInlineCreate: () => void;
+  inlineCreateError: string | null;
   selectedPaths: Set<string>;
   onSelect: (entry: FileEntry, e?: React.MouseEvent) => void;
   onExpand: (entry: FileEntry) => void;
@@ -680,6 +814,14 @@ interface NodeProps {
 const TreeNode: React.FC<NodeProps> = ({
   entry,
   depth,
+  openPaths,
+  setOpenPaths,
+  inlineCreate,
+  inlineCreateName,
+  setInlineCreateName,
+  onSubmitInlineCreate,
+  onCancelInlineCreate,
+  inlineCreateError,
   selectedPaths,
   onSelect,
   onExpand,
@@ -692,7 +834,7 @@ const TreeNode: React.FC<NodeProps> = ({
   onDropFiles,
   onDragStart,
 }) => {
-  const [open, setOpen] = useState(depth === 0);
+  const open = openPaths.has(entry.path) || depth === 0;
   const hasChildren = (entry.children && entry.children.length > 0) || !!entry.hasChildren;
   const isSelected = selectedPaths.has(entry.path);
   const isLoading = loadingPath === entry.path;
@@ -747,7 +889,9 @@ const TreeNode: React.FC<NodeProps> = ({
     setDragOverPath(null);
   };
 
-  const handleDragLeave = () => setDragOverPath((p) => (p === entry.path ? null : p));
+  const handleDragLeave = () => {
+    setDragOverPath(dragOverPath === entry.path ? null : dragOverPath);
+  };
 
   return (
     <div>
@@ -763,7 +907,12 @@ const TreeNode: React.FC<NodeProps> = ({
         onClick={(e) => {
           if (entry.kind !== "file") {
             const nextOpen = !open;
-            setOpen(nextOpen);
+            setOpenPaths((prev) => {
+              const next = new Set(prev);
+              if (nextOpen) next.add(entry.path);
+              else next.delete(entry.path);
+              return next;
+            });
             if (nextOpen) void onExpand(entry);
           }
           onSelect(entry, e);
@@ -777,13 +926,33 @@ const TreeNode: React.FC<NodeProps> = ({
           {isLoading ? " (loading...)" : ""}
         </span>
       </button>
-      {hasChildren && open && (
+      {inlineCreate && inlineCreate.parentDisplayPath === entry.path && (
+          <InlineCreateRow
+            kind={inlineCreate.kind}
+            value={inlineCreateName}
+            error={inlineCreateError}
+            busy={false}
+            onChange={setInlineCreateName}
+            onSubmit={onSubmitInlineCreate}
+            onCancel={onCancelInlineCreate}
+            depth={depth + 1}
+          />
+        )}
+      {isFolder && open && (
         <div>
           {(entry.children ?? []).map((child) => (
             <TreeNode
               key={child.id}
               entry={child}
               depth={depth + 1}
+              openPaths={openPaths}
+              setOpenPaths={setOpenPaths}
+              inlineCreate={inlineCreate}
+              inlineCreateName={inlineCreateName}
+              setInlineCreateName={setInlineCreateName}
+              onSubmitInlineCreate={onSubmitInlineCreate}
+              onCancelInlineCreate={onCancelInlineCreate}
+              inlineCreateError={inlineCreateError}
               selectedPaths={selectedPaths}
               onSelect={onSelect}
               onExpand={onExpand}
@@ -799,6 +968,46 @@ const TreeNode: React.FC<NodeProps> = ({
           ))}
         </div>
       )}
+    </div>
+  );
+};
+
+const InlineCreateRow: React.FC<{
+  kind: "file" | "dir";
+  value: string;
+  error: string | null;
+  busy: boolean;
+  onChange: (v: string) => void;
+  onSubmit: () => Promise<void>;
+  onCancel: () => void;
+  depth: number;
+}> = ({ kind, value, error, busy, onChange, onSubmit, onCancel, depth }) => {
+  const label = kind === "dir" ? "New Folder" : "New File";
+  return (
+    <div
+      style={{ paddingLeft: 8 + depth * 14, paddingTop: 2, paddingBottom: 2 }}
+      onClick={(e) => e.stopPropagation()}
+    >
+      <input
+        className="modal-input"
+        style={{ width: "100%", maxWidth: 320, padding: "2px 6px", height: 22, fontSize: 12 }}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={label}
+        autoFocus
+        onKeyDown={(e) => {
+          if (e.key === "Escape") {
+            e.preventDefault();
+            onCancel();
+          }
+          if (e.key === "Enter") {
+            e.preventDefault();
+            void onSubmit();
+          }
+        }}
+        disabled={busy}
+      />
+      {error && <div className="modal-error" style={{ marginTop: 4 }}>{error}</div>}
     </div>
   );
 };
