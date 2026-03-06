@@ -44,7 +44,8 @@ getv_section() {
 
 SERVER="$(getv server)"
 BASE_REMOTE_ROOT="$(getv base_path)"
-: "${BASE_REMOTE_ROOT:=$HOME/SyncTerm-IDE}"
+# 未設定時はリレー上の ~/SyncTerm-IDE（~ は rsync 接続先のリレーで展開される）
+: "${BASE_REMOTE_ROOT:=~/SyncTerm-IDE}"
 SESSIONS_DIR_NAME="$(getv sessions_dir_name)"
 REGISTRY_DIR_NAME="$(getv registry_dir_name)"
 WATCHER_MIRROR_DIR_RAW="$(getv watcher_mirror_dir)"

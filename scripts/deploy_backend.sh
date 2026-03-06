@@ -38,7 +38,8 @@ if c.has_section('remote') and c.has_option('remote', 'deploy_dir'):
   if [[ -z "$REMOTE_DIR" ]] && [[ -n "$TARGET" ]]; then
     # リレー上で BACKEND_PORT を監視しているプロセスの cwd をデプロイ先にする（動いているコードと一致させる）
     DISCOVERED=$(ssh "$TARGET" "pid=\$(lsof -i :$BACKEND_PORT -t 2>/dev/null | head -1); if [ -n \"\$pid\" ]; then readlink -f /proc/\$pid/cwd 2>/dev/null; fi" 2>/dev/null) || true
-    if [[ -n "$DISCOVERED" ]]; then
+    # "(deleted)" 付き（削除済みディレクトリを参照しているプロセス）は無効とみなして使わない
+    if [[ -n "$DISCOVERED" ]] && [[ "$DISCOVERED" != *" (deleted)"* ]]; then
       REMOTE_DIR="$DISCOVERED"
       echo "Using backend process cwd on relay (port $BACKEND_PORT): $REMOTE_DIR"
     fi
@@ -74,26 +75,29 @@ if [[ -z "$REMOTE_DIR_ABS" ]]; then
 fi
 echo "Remote deploy path: $REMOTE_DIR_ABS"
 
+# リモートパスにスペース等が含まれる場合に備え、rsync/ssh 用にシングルクォートで囲む
+rempath_quoted() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+
 echo "[1/5] Sync backend to server: $TARGET:$REMOTE_DIR_ABS"
 rsync -az \
   --delete \
   --exclude '.git' \
   --exclude '__pycache__' \
   --exclude '.DS_Store' \
-  "./backend/" "$TARGET:$REMOTE_DIR_ABS/backend/"
+  "./backend/" "$TARGET:$(rempath_quoted "$REMOTE_DIR_ABS")/backend/"
 
 echo "[2/5] Sync runtime scripts and config"
-rsync -az "./config.ini" "$TARGET:$REMOTE_DIR_ABS/config.ini"
-rsync -az "./watcher_manager_rt.sh" "$TARGET:$REMOTE_DIR_ABS/watcher_manager_rt.sh"
-rsync -az --delete "./scripts/" "$TARGET:$REMOTE_DIR_ABS/scripts/"
+rsync -az "./config.ini" "$TARGET:$(rempath_quoted "$REMOTE_DIR_ABS")/config.ini"
+rsync -az "./watcher_manager_rt.sh" "$TARGET:$(rempath_quoted "$REMOTE_DIR_ABS")/watcher_manager_rt.sh"
+rsync -az --delete "./scripts/" "$TARGET:$(rempath_quoted "$REMOTE_DIR_ABS")/scripts/"
 
 echo "[2b/5] Create sessions, _registry under app root on remote"
-ssh "$TARGET" "bash -lc 'cd \"$REMOTE_DIR_ABS\" && python3 scripts/ensure_base_path.py'"
+ssh "$TARGET" "bash -lc 'cd $(rempath_quoted "$REMOTE_DIR_ABS") && python3 scripts/ensure_base_path.py'"
 
 echo "[3/5] Create venv and install dependencies"
 ssh "$TARGET" "bash -lc '
 set -euo pipefail
-cd \"$REMOTE_DIR_ABS\"
+cd $(rempath_quoted "$REMOTE_DIR_ABS")
 APP_ROOT=\$(pwd)
 REQ_FILE=\"\$APP_ROOT/backend/requirements.txt\"
 if [[ ! -f \"\$REQ_FILE\" ]]; then
@@ -110,7 +114,7 @@ chmod +x watcher_manager_rt.sh scripts/*.sh scripts/wsl/*.sh 2>/dev/null || true
 echo "[4/5] Restart backend service"
 ssh "$TARGET" "bash -lc '
 set -euo pipefail
-cd \"$REMOTE_DIR_ABS\"
+cd $(rempath_quoted "$REMOTE_DIR_ABS")
 if [[ -f backend.pid ]]; then
   old_pid=\$(cat backend.pid || true)
   if [[ -n \"\${old_pid}\" ]] && kill -0 \"\$old_pid\" 2>/dev/null; then
@@ -126,5 +130,5 @@ echo \$! > backend.pid
 echo "[5/5] Done"
 echo "Backend URL: http://$BACKEND_HOST:$BACKEND_PORT"
 echo "Tip: Check server log with:"
-echo "  ssh $TARGET \"tail -f $REMOTE_DIR_ABS/backend.log\""
+printf '  ssh %s "tail -f %s/backend.log"\n' "$TARGET" "$REMOTE_DIR_ABS"
 
