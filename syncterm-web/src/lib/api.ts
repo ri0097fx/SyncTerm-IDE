@@ -151,7 +151,7 @@ class HttpSyncApi implements SyncApi {
   }
 
   async createSession(watcherId: string, name: string): Promise<SessionInfo> {
-    return http<SessionInfo>(`/watchers/${encodeURIComponent(watcherId)}/sessions/create`, {
+    return http<SessionInfo>(`/watchers/${encodeURIComponent(watcherId)}/sessions`, {
       method: "POST",
       body: JSON.stringify({ name })
     });

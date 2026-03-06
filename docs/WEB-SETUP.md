@@ -12,7 +12,7 @@
 
 - **中継サーバー（Relay）**  
   - SSH でアクセス可能な Linux サーバーを想定する。  
-  - `config.ini` の `base_path` に従い、`sessions/` および `_registry/` を配置する。  
+  - アプリルート（通常 `~/SyncTerm-IDE`）直下に `sessions/` および `_registry/` を配置する。  
   - **FastAPI バックエンド** を常駐させ、ブラウザからの HTTP リクエストを受ける。
 
 - **クライアント（Web フロント）**  
@@ -23,7 +23,7 @@
 
 ## 2. 前提条件
 
-- **中継サーバー**: Python 3.9 以上、SSH でログイン可能であること。`config.ini` の `base_path` 以下に `sessions/` および `_registry/` が作成可能であること。
+- **中継サーバー**: Python 3.9 以上、SSH でログイン可能であること。アプリルート（通常 `~/SyncTerm-IDE`）直下に `sessions/` および `_registry/` が作成可能であること。
 - **Watcher 側**: SyncTerm-IDE の既存要件を満たし、`watcher_manager_rt.sh` を実行できること。
 - **クライアント（Web フロント実行環境）**: Node.js v18 以上、およびブラウザ（Chrome / Edge / Safari 等）。
 
@@ -44,21 +44,20 @@ cd SyncTerm-IDE
 
 ### 3-2. `config.ini` の確認
 
-`config.ini` の `base_path` が、中継サーバー上の所定の作業ディレクトリを指していることを確認する。
+アプリルートは **`~/SyncTerm-IDE`** に統一される。`sessions/` と `_registry/` はその直下に自動作成される。
 
 ```ini
 [remote]
 server = user@devserver.example.com
-base_path = /home/user/remote_dev
 
 [structure]
 sessions_dir_name = sessions
 registry_dir_name = _registry
 ```
 
-環境に応じて `server` および `base_path` を編集する。FastAPI バックエンドは `base_path` および `sessions_dir_name` / `registry_dir_name` に従い `sessions/` と `_registry/` を参照する。`base_path` に `~` を使うとホームディレクトリに展開される。
+環境に応じて `server` を編集する。FastAPI バックエンドはアプリルート（REPO_ROOT＝config.ini があるディレクトリ）および `sessions_dir_name` / `registry_dir_name` に従い `sessions/` と `_registry/` を参照する。
 
-**デプロイ先を config で指定する場合**: `[remote]` に任意で `deploy_dir = ~/mnt` を追加すると、`./scripts/deploy_backend.sh user@host` 実行時に第2引数を省略したときのデプロイ先として使われる。デプロイ時には `config.ini` の `base_path` に従い、リモートで `base_path`・`sessions`・`_registry` が自動作成される。
+**デプロイ先を config で指定する場合**: `[remote]` に任意で `deploy_dir = ~/mnt` を追加すると、`./scripts/deploy_backend.sh user@host` 実行時に第2引数を省略したときのデプロイ先として使われる。デプロイ時にはリモートのデプロイ先直下に `sessions`・`_registry` が自動作成される。
 
 ### 3-3. バックエンド（FastAPI）のインストールと起動
 
@@ -261,16 +260,16 @@ Watcher 側ではサーバー上のファイルが更新されただけとして
 
 ### Watcher 一覧が空
 
-- 中継サーバーの `{base_path}/_registry/` に `<watcher_id>.json` が存在するか、更新されているかを確認する。
-- `watcher_manager_rt.sh` が稼働しているか、`config.ini` の `base_path` が正しいかを確認する。
+- 中継サーバーのアプリルート（通常 `~/SyncTerm-IDE`）直下の `_registry/` に `<watcher_id>.json` が存在するか、更新されているかを確認する。
+- `watcher_manager_rt.sh` が稼働しているか、Relay のアプリルートと Watcher の base_path が一致しているかを確認する。
 
 ### Session 一覧が空
 
-- `{base_path}/sessions/<watcher_id>/` 配下にセッション名のディレクトリが存在するか確認する。Watcher 側でセッションを作成したうえで再読み込みする。
+- アプリルートの `sessions/<watcher_id>/` 配下にセッション名のディレクトリが存在するか確認する。Watcher 側でセッションを作成したうえで再読み込みする。
 
 ### Terminal に出力が出ない、または遅い
 
-- 中継サーバーで `tail -f {base_path}/sessions/<watcher>/<session>/commands.log` を実行し、ログが追記されているか確認する。
+- 中継サーバーで `tail -f ~/SyncTerm-IDE/sessions/<watcher>/<session>/commands.log` を実行し、ログが追記されているか確認する。
 - FastAPI バックエンド（uvicorn）のログにエラーがないか確認する。
 
 ### Editor の保存が反映されない

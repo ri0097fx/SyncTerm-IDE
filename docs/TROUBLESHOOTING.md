@@ -8,7 +8,7 @@
 
 以下の 3 点がすべて成功するか確認してください（失敗した箇所から読み進めるのが最短です）。
 
-> 以降の例では `server = user@203.0.113.10`、`base_path = /home/user/remote_dev` を仮定します。
+> 以降の例では `server = user@203.0.113.10`、アプリルート `~/SyncTerm-IDE`（例: `/home/user/SyncTerm-IDE`）を仮定します。
 
 ### 0-1) GUI 側 → サーバーに SSH できるか
 
@@ -19,13 +19,13 @@ ssh user@203.0.113.10 -o BatchMode=yes -T true && echo OK || echo NG
 ### 0-2) GUI 側 → サーバーへ rsync でアップロード可能か（ドライラン）
 
 ```bash
-rsync -azvn ~/gui_local_mirror/ user@203.0.113.10:/home/user/remote_dev/sessions/_dryrun/
+rsync -azvn ~/gui_local_mirror/ user@203.0.113.10:~/SyncTerm-IDE/sessions/_dryrun/
 ```
 
 ### 0-3) GUI 側 → サーバーから rsync で取得可能か（レジストリ）
 
 ```bash
-rsync -azv user@203.0.113.10:/home/user/remote_dev/_registry/ ~/gui_local_mirror/_probe_registry/
+rsync -azv user@203.0.113.10:~/SyncTerm-IDE/_registry/ ~/gui_local_mirror/_probe_registry/
 ```
 
 > 0-2/0-3 のどちらかでも失敗する場合は **SSH 鍵設定**・**パス**・**権限**・**ファイアウォール**を確認してください。
@@ -43,7 +43,7 @@ rsync -azv user@203.0.113.10:/home/user/remote_dev/_registry/ ~/gui_local_mirror
 **確認ポイント**
 
 * Watcher 側で `watcher_manager.sh` が動いているか（`ps` / ログ確認）。
-* `config.ini` の `server` / `base_path` が GUI 側と一致しているか。
+* `config.ini` の `server` およびアプリルート（base_path 未設定なら ~/SyncTerm-IDE）が GUI 側と一致しているか。
 * サーバー上の `_registry/` に Watcher のハートビートが作成・更新されているか。
 
 **対処**
@@ -63,7 +63,7 @@ rsync -azv user@203.0.113.10:/home/user/remote_dev/_registry/ ~/gui_local_mirror
 **確認ポイント**
 
 * サーバーのセッションディレクトリに `.watcher_status.json` が生成されているか。
-* `base_path` とパーミッションが正しいか（GUI/Watcher ともに書込権限があるか）。
+* アプリルートとパーミッションが正しいか（GUI/Watcher ともに書込権限があるか）。
 
 **対処**
 
@@ -119,7 +119,7 @@ rsync -azv user@203.0.113.10:/home/user/remote_dev/_registry/ ~/gui_local_mirror
 
 **確認ポイント**
 
-* `server` / `base_path` の設定が全マシンで一致しているか。
+* `server` およびアプリルート（base_path 未設定なら ~/SyncTerm-IDE）の設定が全マシンで一致しているか。
 * 同期の向き（pull/push）の誤解がないか（本システムはサーバーからのプッシュはしない）。
 
 **対処**

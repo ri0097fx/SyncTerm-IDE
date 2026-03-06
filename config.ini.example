@@ -2,9 +2,7 @@
 # 【要編集】接続するリモートサーバーのユーザー名とホスト名
 server = user@relay-host
 
-# 【要編集】サーバー上のセッションを管理するベースディレクトリ（絶対パス）
-# Relay では sessions / _registry がこの下に作られる。デプロイ時に自動作成される。
-base_path = /home/user/remote_dev
+# アプリルートは ~/SyncTerm-IDE に統一。sessions / _registry はその下に自動作成される（base_path は廃止）。
 
 # 【任意】デプロイ先ディレクトリ（scripts/deploy_backend.sh の第2引数省略時に使用）
 # 未指定時は ~/SyncTerm-IDE。Relay 上でアプリを置くパス（例: ~/mnt）

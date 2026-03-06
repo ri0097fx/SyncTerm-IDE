@@ -63,7 +63,7 @@ cd SyncTerm-IDE
 ```ini
 [remote]
 server = user@203.0.113.10
-base_path = /home/user/syncterm_remote   ; サーバー側の作業ルート
+; アプリルートは ~/SyncTerm-IDE に統一（base_path は廃止）
 
 [local_paths]
 ; GUI 側のローカルミラー
@@ -76,7 +76,7 @@ sessions_dir_name = sessions
 registry_dir_name = _registry
 ```
 
-* サーバー上では `base_path` 以下に `sessions/` と `_registry/` が使用されます（存在しなければ自動作成されます）。
+* サーバー上ではアプリルート（通常 `~/SyncTerm-IDE`）直下に `sessions/` と `_registry/` が使用されます（存在しなければ自動作成されます）。
 * GUI / Watcher は、それぞれのローカル側にミラー（キャッシュ）を作ります。
 
 ---
@@ -108,7 +108,7 @@ nohup ./watcher_manager.sh pc-b "PC B" > watcher.log 2>&1 &
 
 * `watcher_id` は GUI で識別するための一意な文字列（例: `pc-b`、`laptop-01`）
 * `<Display Name>` は GUI のプルダウンに表示される名前
-* 正常に動いていれば、サーバーの `base_path/_registry/` に `watcher_id` という名前の JSON が作成・更新されます（ハートビート）
+* 正常に動いていれば、サーバーのアプリルート直下の `_registry/` に `watcher_id` という名前の JSON が作成・更新されます（ハートビート）
 
 ---
 
@@ -131,7 +131,7 @@ GUI から以下の手順で接続します：
 ## 6. 動作確認チェックリスト
 
 * [ ] PC A / PC B から `ssh user@203.0.113.10` でパスワードなしログインできる
-* [ ] サーバーの `base_path/_registry/` に `watcher_id` の JSON が周期的に更新される
+* [ ] サーバーのアプリルート直下の `_registry/` に `watcher_id` の JSON が周期的に更新される
 * [ ] GUI の Watcher 一覧に表示名が出る
 * [ ] セッション作成後、簡単なコマンド（`pwd` など）が GUI のターミナルで実行できる
 
@@ -146,7 +146,7 @@ GUI から以下の手順で接続します：
 * **Watcher が GUI に出てこない**
 
   * PC B 側の `watcher_manager.sh` が起動していない／エラー終了している
-  * サーバーの `base_path/_registry/<watcher_id>` が更新されていない → ネットワーク/権限/パスを確認
+  * サーバーのアプリルート直下の `_registry/<watcher_id>` が更新されていない → ネットワーク/権限/パスを確認
 * **プロンプトが `$` のみで `user@host` が出ない**
 
   * セッション直下の `.watcher_status.json` がまだ生成・同期されていない可能性

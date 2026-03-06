@@ -44,6 +44,7 @@ getv_section() {
 
 SERVER="$(getv server)"
 BASE_REMOTE_ROOT="$(getv base_path)"
+: "${BASE_REMOTE_ROOT:=$HOME/SyncTerm-IDE}"
 SESSIONS_DIR_NAME="$(getv sessions_dir_name)"
 REGISTRY_DIR_NAME="$(getv registry_dir_name)"
 WATCHER_MIRROR_DIR_RAW="$(getv watcher_mirror_dir)"
@@ -63,7 +64,6 @@ DOCKER_IMAGE_NAME="$(getv docker_image_name)"
 DOCKER_WORK_DIR="$(getv docker_work_dir)"
 
 : "${SERVER:?server が config.ini に必要です}"
-: "${BASE_REMOTE_ROOT:?base_path が config.ini に必要です}"
 
 BASE_REMOTE="$BASE_REMOTE_ROOT/$SESSIONS_DIR_NAME"
 REMOTE_WATCHER_DIR="$BASE_REMOTE/$WATCHER_ID"

@@ -5,22 +5,23 @@ set -euo pipefail
 #
 # Usage:
 #   ./scripts/deploy_backend.sh user@relay.example.com
-#   ./scripts/deploy_backend.sh user@relay.example.com ~/SyncTerm-IDE 8000
+#   ./scripts/deploy_backend.sh user@relay.example.com /path/on/relay 8000
 #
 # Args:
 #   1) SSH target (required): user@host
-#   2) Remote app dir (optional, default: ~/SyncTerm-IDE)
+#   2) Remote app dir (optional). 省略時: config.ini の deploy_dir → リレー上で backend_port を監視しているプロセスの cwd → ~/SyncTerm-IDE
 #   3) Backend port (optional, default: 8000)
 
 TARGET="${1:-}"
 BACKEND_PORT="${3:-8000}"
 BACKEND_HOST="${TARGET#*@}"
 
-# REMOTE_DIR: use 2nd arg, or config.ini [remote] deploy_dir, or default
+# REMOTE_DIR: use 2nd arg, or config.ini deploy_dir, or リレー上でバックエンドが動いているディレクトリを検出, or default
 if [[ -n "${2:-}" ]]; then
   REMOTE_DIR="$2"
+  echo "Using remote_dir from argument: $REMOTE_DIR"
 else
-  REMOTE_DIR="~/SyncTerm-IDE"
+  REMOTE_DIR=""
   if [[ -f "config.ini" ]]; then
     DEPLOY_DIR=$(python3 -c "
 import configparser
@@ -33,6 +34,18 @@ if c.has_section('remote') and c.has_option('remote', 'deploy_dir'):
       REMOTE_DIR="$DEPLOY_DIR"
       echo "Using deploy_dir from config.ini: $REMOTE_DIR"
     fi
+  fi
+  if [[ -z "$REMOTE_DIR" ]] && [[ -n "$TARGET" ]]; then
+    # リレー上で BACKEND_PORT を監視しているプロセスの cwd をデプロイ先にする（動いているコードと一致させる）
+    DISCOVERED=$(ssh "$TARGET" "pid=\$(lsof -i :$BACKEND_PORT -t 2>/dev/null | head -1); if [ -n \"\$pid\" ]; then readlink -f /proc/\$pid/cwd 2>/dev/null; fi" 2>/dev/null) || true
+    if [[ -n "$DISCOVERED" ]]; then
+      REMOTE_DIR="$DISCOVERED"
+      echo "Using backend process cwd on relay (port $BACKEND_PORT): $REMOTE_DIR"
+    fi
+  fi
+  if [[ -z "$REMOTE_DIR" ]]; then
+    REMOTE_DIR="~/SyncTerm-IDE"
+    echo "Using default remote_dir: $REMOTE_DIR"
   fi
 fi
 
@@ -74,7 +87,7 @@ rsync -az "./config.ini" "$TARGET:$REMOTE_DIR_ABS/config.ini"
 rsync -az "./watcher_manager_rt.sh" "$TARGET:$REMOTE_DIR_ABS/watcher_manager_rt.sh"
 rsync -az --delete "./scripts/" "$TARGET:$REMOTE_DIR_ABS/scripts/"
 
-echo "[2b/5] Create base_path, sessions, _registry on remote (from config.ini)"
+echo "[2b/5] Create sessions, _registry under app root on remote"
 ssh "$TARGET" "bash -lc 'cd \"$REMOTE_DIR_ABS\" && python3 scripts/ensure_base_path.py'"
 
 echo "[3/5] Create venv and install dependencies"

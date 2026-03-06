@@ -27,16 +27,15 @@ CONFIG_PATH = REPO_ROOT / "config.ini"
 
 
 def load_paths():
+  """アプリルート（REPO_ROOT = config.ini があるディレクトリ）を base に、sessions / _registry をその下に置く。base_path は廃止し ~/SyncTerm-IDE 相当に統一。"""
   if not CONFIG_PATH.exists():
     raise RuntimeError(f"config.ini not found at {CONFIG_PATH}")
   parser = configparser.ConfigParser()
   parser.read(CONFIG_PATH)
-  remote = parser["remote"]
-  structure = parser["structure"]
-  base_path_raw = remote.get("base_path", "")
-  base_path = Path(os.path.expanduser(base_path_raw)) if base_path_raw else Path()
+  structure = dict(parser["structure"]) if parser.has_section("structure") else {}
   sessions_dir_name = structure.get("sessions_dir_name", "sessions")
   registry_dir_name = structure.get("registry_dir_name", "_registry")
+  base_path = REPO_ROOT
   sessions_root = base_path / sessions_dir_name
   registry_root = base_path / registry_dir_name
   return base_path, sessions_root, registry_root
@@ -45,9 +44,8 @@ def load_paths():
 BASE_PATH, SESSIONS_ROOT, REGISTRY_ROOT = load_paths()
 
 # Ensure session/registry dirs exist at startup (e.g. after deploy)
-if BASE_PATH:
-  SESSIONS_ROOT.mkdir(parents=True, exist_ok=True)
-  REGISTRY_ROOT.mkdir(parents=True, exist_ok=True)
+SESSIONS_ROOT.mkdir(parents=True, exist_ok=True)
+REGISTRY_ROOT.mkdir(parents=True, exist_ok=True)
 MAX_FILE_BYTES = 2_000_000  # full-load limit for editor (2MB)
 MAX_CHUNK_BYTES = 300_000   # chunk endpoint limit per request
 MAX_LOG_CHUNK_BYTES = 1_000_000
@@ -427,9 +425,9 @@ def list_sessions(wid: str):
   return sessions
 
 
-@app.post("/watchers/{wid}/sessions/create", response_model=SessionModel)
+@app.post("/watchers/{wid}/sessions", response_model=SessionModel)
 def create_session(wid: str, body: CreateSessionModel):
-  """Relay 上にセッション用ディレクトリを作成する。名前は / .. 不可・空白不可。"""
+  """Relay 上にセッション用ディレクトリを作成する。GET は一覧、POST は作成。名前は / .. 不可・空白不可。"""
   name = (body.name or "").strip()
   if not name:
     raise HTTPException(status_code=400, detail="session name is required")
@@ -841,7 +839,7 @@ def post_command(wid: str, sess: str, payload: CommandPayload):
       detail={
         "code": "command_delivery_failed",
         "rt_failed_reason": rt_error,
-        "hint": "RT failed and session dir does not exist on relay. Check: 1) Watcher is running (watcher_manager_rt.sh), 2) config.ini base_path is the same on Watcher and Relay, 3) GET /watchers/{wid}/rt-status to see rt_port.",
+        "hint": "RT failed and session dir does not exist on relay. Check: 1) Watcher is running (watcher_manager_rt.sh), 2) Relay app root (e.g. ~/SyncTerm-IDE) has sessions/_registry, 3) GET /watchers/{wid}/rt-status to see rt_port.",
       },
     )
   cmd_file = root / "commands.txt"

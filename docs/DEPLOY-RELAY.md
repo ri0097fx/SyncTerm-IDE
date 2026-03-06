@@ -1,7 +1,7 @@
 # リレー（バックエンド）の更新手順
 
 リレーサーバーで動かしている FastAPI バックエンドを、最新コードで更新する手順です。  
-更新後、**セッション作成**（`POST .../sessions/create`）などが利用できます。
+更新後、**セッション作成**（`POST .../sessions`、body: `{"name":"セッション名"}`）などが利用できます。
 
 ---
 
@@ -34,7 +34,7 @@ cd /path/to/SyncTerm-IDE
 1. **[0/5]** リモートのデプロイ先を絶対パスに解決
 2. **[1/5]** `backend/` を rsync で転送
 3. **[2/5]** `config.ini` / `watcher_manager_rt.sh` / `scripts/` を転送
-4. **[2b/5]** `config.ini` の `base_path` に従い `sessions` / `_registry` を作成
+4. **[2b/5]** デプロイ先（アプリルート）直下に `sessions` / `_registry` を作成
 5. **[3/5]** リモートで venv 作成と `pip install -r backend/requirements.txt`
 6. **[4/5]** 既存の uvicorn を停止し、新しく起動（`backend.pid` に PID 保存）
 
@@ -44,20 +44,20 @@ cd /path/to/SyncTerm-IDE
 
 ## 手順 2: リレー上でコードが入っているか確認（任意）
 
-SSH でリレーに入り、**セッション作成**のルートが含まれているか確認します。
+SSH でリレーに入り、**セッション作成**（POST /watchers/{wid}/sessions）が含まれているか確認します。
 
 ```bash
-ssh user@relay-host "grep -n 'sessions/create' ~/SyncTerm-IDE/backend/app/main.py"
+ssh user@relay-host "grep -n 'def create_session' ~/SyncTerm-IDE/backend/app/main.py"
 ```
 
 - `deploy_dir` で別パスにしている場合は、そのパスに置き換える。  
   例: デプロイ先が `~/mnt` の場合:  
-  `ssh user@relay-host "grep -n 'sessions/create' ~/mnt/backend/app/main.py"`
+  `ssh user@relay-host "grep -n 'def create_session' ~/mnt/backend/app/main.py"`
 
 次のような行が出ていれば、最新コードが置けています。
 
 ```
-419:@app.post("/watchers/{wid}/sessions/create", response_model=SessionModel)
+430:def create_session(wid: str, body: CreateSessionModel):
 ```
 
 何も出てこない場合は、デプロイ先のパスが違うか、rsync が失敗している可能性があります。
@@ -76,12 +76,12 @@ ssh user@relay-host "grep -n 'sessions/create' ~/SyncTerm-IDE/backend/app/main.p
 
 2. **セッション作成 API を叩く**
    ```bash
-   curl -s -X POST "http://localhost:8002/watchers/<watcher_id>/sessions/create" \
+   curl -s -X POST "http://localhost:8002/watchers/<watcher_id>/sessions" \
      -H "Content-Type: application/json" \
      -d '{"name":"test-session"}' \
      -w "\nHTTP: %{http_code}\n"
    ```
-   - `<watcher_id>` は `GET http://localhost:8002/watchers` の結果の `id` に合わせて置き換える。
+   - `<watcher_id>` は必ず実際の ID に置き換える（`GET http://localhost:8002/watchers` で一覧の `id` を確認。例: `rtx5090` → `curl .../watchers/rtx5090/sessions`）。
 
 3. **期待する結果**
    - **HTTP: 200** かつ JSON で `{"name":"test-session","watcherId":"<watcher_id>"}` に近い内容  

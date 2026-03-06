@@ -32,7 +32,7 @@ flowchart LR
   end
 
   subgraph S["Server (Relay only)"]
-    STORE["{base_path}/sessions<br/>{base_path}/_registry"]
+    STORE["app_root/sessions<br/>app_root/_registry"]
     NOTE["No push to local<br/>(HTTP API)"]
   end
 
@@ -85,7 +85,7 @@ cp config.ini.example config.ini
 cp .env.tunnel.example .env.tunnel
 ```
 
-- `config.ini`: `[remote]` の `server` と `base_path` を環境に合わせて編集する。
+- `config.ini`: `[remote]` の `server` を環境に合わせて編集する。アプリルートは通常 `~/SyncTerm-IDE`（base_path は廃止）。
 - `.env.tunnel`: `TUNNEL_SSH` を `user@relay-host` の形式で編集する（ローカルから Relay へ SSH トンネルを張るための指定）。
 
 **トンネルで起動する場合**: `syncterm-web/.env.local` を作成し、`VITE_BACKEND_URL=http://localhost:8002` を書く。既定は 8000 のため、トンネル（8002）を使うなら必須。
@@ -183,7 +183,7 @@ cp .env.tunnel.example .env.tunnel   # 未作成なら。TUNNEL_SSH を編集済
 
 * **信頼境界と権限**
   * 通信は **クライアント発** に限る。Web 版は HTTP（必要に応じて SSH トンネル）、Watcher は RT モードで HTTP、従来モードで rsync/SSH。**サーバーからクライアントへはプッシュしない。**
-  * サーバー上の `{base_path}` は専用ユーザ・厳しめのパーミッションで運用すること。第三者が `commands.txt` 等を書きに来られる構成は危険である。
+  * サーバー上のアプリルート（例: ~/SyncTerm-IDE）は専用ユーザ・厳しめのパーミッションで運用すること。第三者が `commands.txt` 等を書きに来られる構成は危険である。
 
 * **ログ・リアルタイム性**
   * **RT モード**: Watcher が Relay へ HTTP でコマンド・ログを送受信するため、遅延は小さい。
