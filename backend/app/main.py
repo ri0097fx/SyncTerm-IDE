@@ -771,15 +771,7 @@ def post_command(wid: str, sess: str, payload: CommandPayload):
     exit_code = rt_resp.get("exitCode", 0)
     out_lines = len(out.splitlines()) if out else 0
     logger.info("command delivered via RT wid=%s sess=%s output_lines=%d exitCode=%s", wid, sess, out_lines, exit_code)
-    # 記録用: Relay にセッション dir があれば commands.txt にも追記（監査・他プロセス用）
-    root = SESSIONS_ROOT / wid / sess
-    if root.exists():
-      try:
-        cmd_file = root / "commands.txt"
-        with cmd_file.open("a", encoding="utf-8") as f:
-          f.write(cmd + "\n")
-      except Exception as e:
-        logger.warning("commands.txt append failed wid=%s sess=%s: %s", wid, sess, e)
+    # RT 成功時は commands.txt に書かない（Watcher が rsync pull で commands.txt を読んで再実行するため二重実行になる）
     return {
       "ok": True,
       "rt": True,
@@ -856,6 +848,15 @@ def cleanup_staged(wid: str, sess: str):
               deleted += 1
             except Exception:
               failed += 1
+    cmd_file = root / "commands.txt"
+    offset_file = root / ".commands.offset"
+    try:
+      if cmd_file.exists():
+        cmd_file.write_text("", encoding="utf-8")
+      if offset_file.exists():
+        offset_file.write_text("0", encoding="utf-8")
+    except Exception as e:
+      logger.warning("commands.txt/offset reset failed wid=%s sess=%s: %s", wid, sess, e)
   watcher_cleaned = _post_command_via_rt(wid, sess, "_internal_cleanup_staged")[0]
   return {
     "ok": True,

@@ -15,6 +15,7 @@ export const TerminalPanel: React.FC = () => {
   const [autoScroll, setAutoScroll] = useState(true);
   const [promptText, setPromptText] = useState("[Remote] $");
   const [promptFullCwd, setPromptFullCwd] = useState<string | null>(null);
+  const [currentDirPath, setCurrentDirPath] = useState<string>("");
   const [history, setHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState<number>(-1);
   const logRef = useRef<HTMLDivElement | null>(null);
@@ -47,9 +48,12 @@ export const TerminalPanel: React.FC = () => {
         const p = `${env}${user}@${host}:${pathDisplay}$`.trim();
         setPromptText(p || "[Remote] $");
         setPromptFullCwd((st?.fullCwd && st.fullCwd.trim()) ? st.fullCwd : null);
+        const cwdRaw = (st?.cwd ?? "").trim().replace(/^\.\/?/, "") || "";
+        setCurrentDirPath(cwdRaw);
       } catch {
         setPromptText("[Remote] $");
         setPromptFullCwd(null);
+        setCurrentDirPath("");
       }
     };
     void load();
@@ -114,9 +118,11 @@ export const TerminalPanel: React.FC = () => {
         const p = `${env}${user}@${host}:${pathDisplay}$`.trim();
         setPromptText(p || "[Remote] $");
         if (!cancelled) setPromptFullCwd((st?.fullCwd && st.fullCwd.trim()) ? st.fullCwd : null);
+        if (!cancelled) setCurrentDirPath(((st?.cwd ?? "").trim().replace(/^\.\/?/, "") || ""));
       } catch {
         if (!cancelled) setPromptText("[Remote] $");
         if (!cancelled) setPromptFullCwd(null);
+        if (!cancelled) setCurrentDirPath("");
       }
       if (!cancelled) setTimeout(tick, 2000);
     };
@@ -125,6 +131,44 @@ export const TerminalPanel: React.FC = () => {
       cancelled = true;
     };
   }, [currentWatcher, currentSession, mode]);
+
+  const handleTabComplete = React.useCallback(async () => {
+    if (!currentWatcher || !currentSession || mode !== "Remote") return;
+    const match = input.match(/(.*\s+)?([^\s]*)$/);
+    const before = match?.[1] ?? "";
+    const token = match?.[2] ?? "";
+    if (!token && !before) return;
+    const hasSlash = token.includes("/");
+    const parentPath = hasSlash ? token.replace(/\/[^/]*$/, "") : currentDirPath;
+    const prefix = hasSlash ? token.replace(/^.*\//, "") : token;
+    const apiParent = (parentPath || "").trim() || "/";
+    try {
+      const entries = await api.listChildren(currentWatcher.id, currentSession.name, apiParent);
+      const candidates = entries.filter(
+        (e) => e.name && e.name.startsWith(prefix) && !e.name.startsWith(".")
+      );
+      if (candidates.length === 0) return;
+      let namePart: string;
+      if (candidates.length === 1) {
+        const name = candidates[0]!.name;
+        namePart = candidates[0]!.kind === "dir" ? `${name}/` : name;
+      } else {
+        const names = candidates.map((c) => c!.name);
+        let common = names[0]!;
+        for (let i = 1; i < names.length; i++) {
+          while (names[i]!.indexOf(common) !== 0 && common.length > 0) {
+            common = common.slice(0, -1);
+          }
+        }
+        const exact = candidates.find((c) => c.name === common);
+        namePart = exact?.kind === "dir" ? `${common}/` : common;
+      }
+      const completion = hasSlash && parentPath ? `${parentPath}/${namePart}` : namePart;
+      setInput(before + completion);
+    } catch {
+      // ignore
+    }
+  }, [currentWatcher, currentSession, mode, input, currentDirPath]);
 
   const handleSend = async () => {
     const trimmed = input.trim();
@@ -323,6 +367,11 @@ export const TerminalPanel: React.FC = () => {
                 return;
               }
               if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "c") {
+                return;
+              }
+              if (e.key === "Tab") {
+                e.preventDefault();
+                void handleTabComplete();
                 return;
               }
               if (e.key === "Enter") {

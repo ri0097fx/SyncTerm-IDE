@@ -437,7 +437,16 @@ class SessionContext:
                                 deleted += 1
                             except Exception:
                                 failed += 1
-            msg = f"Staged キャッシュを削除しました ({deleted} 件)。" + (f" 削除できず: {failed} 件" if failed else "")
+            cmd_file = self.base_dir / "commands.txt"
+            offset_file = self.base_dir / ".commands.offset"
+            try:
+                if cmd_file.exists():
+                    cmd_file.write_text("", encoding="utf-8")
+                if offset_file.exists():
+                    offset_file.write_text("0", encoding="utf-8")
+            except Exception:
+                pass
+            msg = f"Staged キャッシュを削除しました ({deleted} 件)。commands.txt もリセットしました。" + (f" 削除できず: {failed} 件" if failed else "")
             output_lines.append(msg)
             output_lines.append(f"{EOC_MARKER_PREFIX}INTERNAL:0")
             return {}
