@@ -72,6 +72,10 @@ class SessionContext:
     def __init__(self, base_dir: Path):
         self.base_dir = Path(base_dir).resolve()
         self.cwd = self.base_dir
+        # Backend から渡される Watcher/Session ID（部分ログ送信用）
+        self.watcher_id: Optional[str] = None
+        self.session_name: Optional[str] = None
+        self.streamed: bool = False
         self.conda_env: Optional[str] = "base" if HAS_CONDA else None
         # .runner_config.json で conda_env が指定されていれば採用
         cfg = self._get_runner_config()
@@ -153,17 +157,26 @@ class SessionContext:
             return self._wrap_docker_run(cmdline, config)
         return self._wrap_conda(cmdline), ""
 
+    def _append_output(self, text: str, output_lines: List[str]) -> None:
+        """出力をバッファと relay 双方に追加する（可能なら部分ログを即時送信）"""
+        t = text
+        if not KEEP_ANSI:
+            t = ANSI_ESCAPE.sub("", t)
+        if MAX_OUTPUT_CHARS and len(t) > MAX_OUTPUT_CHARS:
+            t = t[:MAX_OUTPUT_CHARS] + "\n...[truncated]"
+        output_lines.append(t)
+        # RT モードでは可能な限り逐次ログ送信して、長時間タスクの進捗を即時反映させる
+        if RELAY_LOG_URL and self.watcher_id and self.session_name and t:
+            try:
+                post_log_to_relay(self.watcher_id, self.session_name, t if t.endswith("\n") else t + "\n")
+                self.streamed = True
+            except Exception as e:
+                print(f"[RT] Failed to post partial log: {e}", flush=True)
+
     def run_command(self, cmdline: str, output_lines: List[str]) -> int:
         """コマンド実行し output_lines に出力を追加。exit_code を返す"""
-        def append(text: str, exit_code: Optional[int] = None):
-            t = text
-            if not KEEP_ANSI:
-                t = ANSI_ESCAPE.sub("", t)
-            if MAX_OUTPUT_CHARS and len(t) > MAX_OUTPUT_CHARS:
-                t = t[:MAX_OUTPUT_CHARS] + "\n...[truncated]"
-            output_lines.append(t)
-            if exit_code is not None:
-                output_lines.append(f"{EOC_MARKER_PREFIX}{exit_code}")
+        def append(text: str) -> None:
+            self._append_output(text, output_lines)
 
         stripped = cmdline.lstrip()
         is_python = stripped.startswith("python ") or stripped.startswith("python3 ")
@@ -566,12 +579,21 @@ _sessions: dict = {}
 _sessions_lock = threading.Lock()
 
 
-def get_session(base_dir: Path) -> SessionContext:
+def get_session(base_dir: Path, watcher_id: Optional[str] = None, session_name: Optional[str] = None) -> SessionContext:
     with _sessions_lock:
         key = str(base_dir)
         if key not in _sessions:
-            _sessions[key] = SessionContext(base_dir)
-        return _sessions[key]
+            ctx = SessionContext(base_dir)
+            ctx.watcher_id = watcher_id
+            ctx.session_name = session_name
+            _sessions[key] = ctx
+        ctx = _sessions[key]
+        # 初期化時に ID が渡されていなかった場合のみ、後から補完する
+        if watcher_id and not ctx.watcher_id:
+            ctx.watcher_id = watcher_id
+        if session_name and not ctx.session_name:
+            ctx.session_name = session_name
+        return ctx
 
 
 def post_log_to_relay(watcher_id: str, session: str, log_text: str) -> bool:
@@ -634,7 +656,8 @@ class RTRequestHandler(BaseHTTPRequestHandler):
             self._send_json(500, {"error": f"session path is not a directory: {session}"})
             return
 
-        ctx = get_session(base_dir)
+        ctx = get_session(base_dir, watcher_id=watcher_id, session_name=session)
+        ctx.streamed = False
         if command.strip().startswith("_internal_move_staged_file::") and "stagedContent" in data:
             ctx._staged_content = data.get("stagedContent") or ""
         try:
@@ -647,11 +670,11 @@ class RTRequestHandler(BaseHTTPRequestHandler):
             if getattr(ctx, "_staged_content", None) is not None:
                 delattr(ctx, "_staged_content")
 
-        log_text = output
-        if not log_text.endswith("\n"):
-            log_text += "\n"
-
-        if RELAY_LOG_URL:
+        # 逐次送信が一度も行われなかった場合のみ、ここでまとめて送る
+        if RELAY_LOG_URL and not ctx.streamed:
+            log_text = output
+            if not log_text.endswith("\n"):
+                log_text += "\n"
             post_log_to_relay(watcher_id, session, log_text)
 
         resp = {"ok": True, "output": output, "exitCode": exit_code, **extra}
@@ -751,7 +774,7 @@ def _poll_commands_loop():
                         offsets[session] = i + 1
                         continue
                     base_dir = session_dir
-                    ctx = get_session(base_dir)
+                    ctx = get_session(base_dir, watcher_id=watcher_id, session_name=session)
                     try:
                         output, _, _ = ctx.execute(cmd)
                     except Exception as e:

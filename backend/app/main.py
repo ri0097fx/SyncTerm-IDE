@@ -782,8 +782,21 @@ def get_log_chunk(wid: str, sess: str, fromOffset: int = 0):
     text = chunk.decode("utf-8", errors="replace")
   except Exception:
     text = ""
-  # Trim pathological long lines so frontend rendering remains responsive.
-  lines = [ln[:4000] for ln in text.splitlines() if ln]
+
+  # 進捗バーなどの \r（キャリッジリターン）を「同じ行の上書き」として扱う。
+  # 文字列を \n 単位で分割し、その中で最後の \r 以降だけを残すことで、
+  # "aaa\rbbb\rccc\n" のような出力は最終状態 "ccc" だけが 1 行として表示される。
+  # 通常の出力には影響しないよう、\n が無い場合もそのまま 1 行として扱う。
+  raw_lines = text.split("\n")
+  lines: list[str] = []
+  for raw in raw_lines:
+    if not raw:
+      continue
+    cleaned = raw.split("\r")[-1]
+    cleaned = cleaned.strip("\r")
+    if cleaned:
+      # Trim pathological long lines so frontend rendering remains responsive.
+      lines.append(cleaned[:4000])
   next_offset = start + len(chunk)
   return LogChunk(lines=lines, nextOffset=next_offset, hasMore=next_offset < total_size)
 
