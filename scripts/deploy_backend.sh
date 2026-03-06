@@ -45,9 +45,7 @@ rsync -az \
 
 echo "[2/5] Sync runtime scripts and config"
 rsync -az "./config.ini" "$TARGET:$REMOTE_DIR/config.ini"
-rsync -az "./watcher_manager.sh" "$TARGET:$REMOTE_DIR/watcher_manager.sh"
 rsync -az "./watcher_manager_rt.sh" "$TARGET:$REMOTE_DIR/watcher_manager_rt.sh"
-rsync -az "./command_watcher.py" "$TARGET:$REMOTE_DIR/command_watcher.py"
 rsync -az --delete "./scripts/" "$TARGET:$REMOTE_DIR/scripts/"
 
 echo "[3/5] Create venv and install dependencies"
@@ -65,7 +63,7 @@ python3 -m venv .venv-backend
 . .venv-backend/bin/activate
 pip install --upgrade pip >/dev/null
 pip install -r \"\$REQ_FILE\"
-chmod +x watcher_manager.sh watcher_manager_rt.sh scripts/*.sh scripts/wsl/*.sh 2>/dev/null || true
+chmod +x watcher_manager_rt.sh scripts/*.sh scripts/wsl/*.sh 2>/dev/null || true
 '"
 
 echo "[4/5] Restart backend service"

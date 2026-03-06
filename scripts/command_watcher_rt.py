@@ -451,6 +451,20 @@ class SessionContext:
             output_lines.append(f"{EOC_MARKER_PREFIX}INTERNAL:0")
             return {}
 
+        if cmd == "_internal_clear_commands":
+            cmd_file = self.base_dir / "commands.txt"
+            offset_file = self.base_dir / ".commands.offset"
+            try:
+                if cmd_file.exists():
+                    cmd_file.write_text("", encoding="utf-8")
+                if offset_file.exists():
+                    offset_file.write_text("0", encoding="utf-8")
+            except Exception:
+                pass
+            output_lines.append("commands.txt と .commands.offset をクリアしました。")
+            output_lines.append(f"{EOC_MARKER_PREFIX}INTERNAL:0")
+            return {}
+
         return None
 
     def execute(self, cmd: str) -> tuple:
@@ -654,7 +668,19 @@ def _poll_commands_loop():
                     lines = cmd_file.read_text("utf-8", errors="replace").splitlines()
                 except Exception:
                     continue
-                start = offsets.get(session, 0)
+                start = offsets.get(session)
+                if start is None:
+                    if offset_file.exists():
+                        try:
+                            start = min(int(offset_file.read_text(encoding="utf-8").strip()), len(lines))
+                        except (ValueError, OSError):
+                            start = len(lines)
+                    else:
+                        start = len(lines)
+                    offsets[session] = start
+                if start > len(lines):
+                    start = len(lines)
+                    offsets[session] = start
                 for i, line in enumerate(lines[start:], start=start):
                     cmd = line.strip()
                     if not cmd or cmd.startswith("#"):

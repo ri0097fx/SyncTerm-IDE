@@ -95,6 +95,12 @@ export interface SyncApi {
     watcher_cleaned: boolean;
     relay_session_exists?: boolean;
   }>;
+
+  /** commands.txt と .commands.offset のみを Relay と Watcher 両方でクリア */
+  clearCommands(watcherId: string, session: string): Promise<{
+    relay_cleared: boolean;
+    watcher_cleaned: boolean;
+  }>;
 }
 
 // --------------------------------------------------------------------------------
@@ -416,6 +422,16 @@ class HttpSyncApi implements SyncApi {
   }> {
     return http(
       `/watchers/${encodeURIComponent(watcherId)}/sessions/${encodeURIComponent(session)}/cleanup-staged`,
+      { method: "POST" }
+    );
+  }
+
+  async clearCommands(
+    watcherId: string,
+    session: string
+  ): Promise<{ relay_cleared: boolean; watcher_cleaned: boolean }> {
+    return http(
+      `/watchers/${encodeURIComponent(watcherId)}/sessions/${encodeURIComponent(session)}/clear-commands`,
       { method: "POST" }
     );
   }

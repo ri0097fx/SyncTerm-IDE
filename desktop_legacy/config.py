@@ -23,8 +23,8 @@ def _read_ini_text_portable(path: Path) -> str:
     enc = 'cp932' if os.name == 'nt' else 'latin-1'
     return b.decode(enc)
 
-# --- 設定ファイルの読み込み ---
-INI_PATH = (Path(__file__).resolve().parent / "config.ini")
+# --- 設定ファイルの読み込み（プロジェクトルートの config.ini を参照） ---
+INI_PATH = (Path(__file__).resolve().parent.parent / "config.ini")
 
 config = configparser.ConfigParser()
 try:

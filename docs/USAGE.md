@@ -1,14 +1,14 @@
 # SyncTerm-IDE / USAGE
 
 *日常の使い方ガイド（基本操作）*
-※ 事前に [docs/SETUP.md](./SETUP.md) の手順を完了してください。
+※ 事前に [docs/WEB-SETUP.md](./WEB-SETUP.md) の手順で Web 版を起動してください（デスクトップ版は廃止、[desktop_legacy/](../desktop_legacy/) 参照）。
 
 ---
 
 ## 0. 前提（構成の要点）
 
-* **GUI（PC A）**：`main.py` を実行して操作する側。
-* **Watcher（PC B など複数可）**：`watcher_manager.sh` が `command_watcher.py` を起動し、**サーバーに置かれたセッション領域**を監視・実行します。
+* **クライアント（PC A）**：ブラウザで **syncterm-web** を開いて操作する側。
+* **Watcher（PC B など複数可）**：`watcher_manager_rt.sh` が `scripts/command_watcher_rt.py` を起動し、**Relay と HTTP（RT）で**セッション領域を監視・実行します。
 * **サーバー**：ファイルを **中継・保管**するだけ。GUI ⇄ サーバー ⇄ Watcher を **SSH/rsync** で同期します。
   ※ 矢印の向きは **ローカル → サーバー** のみ（サーバーからのプッシュはしません）。GUI/Watcher がサーバーへ取りに行く（pull）＆送る（push）動作です。
 
@@ -18,37 +18,31 @@
 
 ## 1. Watcher を起動（制御したい各 PC で）
 
-制御したい PC（PC B など）で実行します。`watcher_id` と `display_name` は任意の識別子です。
+制御したい PC（PC B など）で **RT 版 Watcher** を実行します。`watcher_id` と `display_name` は任意の識別子です。
 
 ```bash
 # 例: PC B 上で
-chmod +x watcher_manager.sh
-./watcher_manager.sh pc-b "PC B" &
-# ログをファイルに残す場合
-nohup ./watcher_manager.sh pc-b "PC B" > watcher.log 2>&1 &
+chmod +x watcher_manager_rt.sh
+./watcher_manager_rt.sh pc-b "PC B"
+# バックグラウンドで
+nohup ./watcher_manager_rt.sh pc-b "PC B" > watcher.log 2>&1 &
 ```
 
 ポイント
 
-* `config.ini` は **GUI 側・Watcher 側・サーバー側で同一**にしておくこと。
-* `base_path` 配下に `sessions/` と `_registry/` が作られます（自動）。
-* Watcher はサーバー上の **自分用セッション**をポーリングし、`commands.txt` を見つけると実行、結果を `commands.log` へ書き戻します。
+* `config.ini` は **Relay・Watcher 側で同一**にし、`[rt]` セクションを用意する。
+* Watcher は Relay へ HTTP（リバーストンネル）でコマンド・ログを送受信する。
 
 ---
 
-## 2. GUI を起動（操作する PC で）
+## 2. Web を起動（操作する PC で）
 
-PC A（操作端末）で GUI を立ち上げます。
-
-```bash
-# 例: PC A 上で
-python main.py
-```
+PC A（操作端末）でブラウザから **syncterm-web** にアクセスする。起動方法は [WEB-SETUP.md](WEB-SETUP.md) を参照。
 
 起動後の流れ
 
-1. 右上の **Watcher** ドロップダウンに、起動中の Watcher が表示されます（自動検出）。
-2. Watcher を選ぶと **Session** の一覧が出ます。
+1. **Watcher** ドロップダウンに、起動中の Watcher が表示される（Relay の _registry から取得）。
+2. Watcher を選ぶと **Session** の一覧が出る。
 
    * 既存を選ぶ
    * または **New** に名前を入れて **Create** で作成
@@ -139,7 +133,7 @@ pip install pillow
 
 * **Watcher が一覧に出ない**
 
-  * サーバーの `_registry/` にハートビートが同期されていない可能性。Watcher 側で `watcher_manager.sh` が動いているか / SSH 鍵 / `config.ini` を確認。
+  * サーバーの `_registry/` に Watcher が登録されていない可能性。Watcher 側で `watcher_manager_rt.sh` が動いているか / SSH 鍵 / `config.ini` を確認。
 * **プロンプトが `$` のみ**
 
   * `.watcher_status.json` 未生成の可能性。少し待つ／Watcher 再起動／`base_path` の権限確認。
@@ -171,19 +165,19 @@ pip install pillow
 
 ## 10. よくあるワークフロー
 
-1. **PC B で Watcher を起動**（常駐させるなら `nohup ... &`）
-2. **PC A で GUI 起動** → Watcher を選ぶ → セッション選択/作成
+1. **PC B で Watcher を起動**（`watcher_manager_rt.sh`。常駐なら `nohup ... &`）
+2. **PC A で Web を起動**（[WEB-SETUP.md](WEB-SETUP.md) 参照）→ Watcher を選ぶ → セッション選択/作成
 3. **Remote モード**でコマンド実行、**エディタ**で編集
 
-   * 保存 → サーバーへ同期 → Watcher が反映／実行
-   * `Clear log file` でログ初期化（必要に応じて）
+   * 保存 → Relay 経由で Watcher に反映
+   * 必要に応じてログ初期化や「commands をクリア」を利用
 4. 必要に応じて **別 Watcher** や **別セッション**に切替
 
 ---
 
 ## 11. 関連ドキュメント
 
-* セットアップ：[`docs/SETUP.md`](./SETUP.md)
+* セットアップ：[`docs/WEB-SETUP.md`](./WEB-SETUP.md)
 * トラブルシュート：[`docs/TROUBLESHOOTING.md`](./TROUBLESHOOTING.md)
 * プロジェクト概要：`README.md`
 

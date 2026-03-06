@@ -12,6 +12,7 @@ type RtStatus = {
 export const SessionBar: React.FC = () => {
   const [showPrefs, setShowPrefs] = React.useState(false);
   const [cleanupMessage, setCleanupMessage] = React.useState<string | null>(null);
+  const [clearCommandsMessage, setClearCommandsMessage] = React.useState<string | null>(null);
   const [showRtDiagnostic, setShowRtDiagnostic] = React.useState(false);
   const [rtStatus, setRtStatus] = React.useState<RtStatus | null>(null);
   const [rtDiagnosticError, setRtDiagnosticError] = React.useState<string | null>(null);
@@ -66,6 +67,27 @@ export const SessionBar: React.FC = () => {
     }
   };
 
+  const handleClearCommands = async () => {
+    if (!currentWatcher || !currentSession) return;
+    try {
+      const res = await api.clearCommands(currentWatcher.id, currentSession.name);
+      const msg =
+        res.watcher_cleaned && res.relay_cleared
+          ? "commands をクリアしました（Relay と Watcher 両方）"
+          : res.watcher_cleaned
+            ? "commands をクリアしました（Watcher 側）"
+            : res.relay_cleared
+              ? "commands をクリアしました（Relay 側）"
+              : "commands をクリアしました";
+      setClearCommandsMessage(msg);
+      setTimeout(() => setClearCommandsMessage(null), 3000);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "クリアに失敗しました";
+      setClearCommandsMessage(message);
+      setTimeout(() => setClearCommandsMessage(null), 5000);
+    }
+  };
+
   return (
     <>
       <header className="session-bar">
@@ -109,14 +131,29 @@ export const SessionBar: React.FC = () => {
             </button>
           )}
           {currentWatcher && currentSession && (
-            <button
-              className="icon-button"
-              style={{ width: "auto", padding: "0 0.5rem", marginLeft: "0.25rem" }}
-              onClick={handleCleanupStaged}
-              title="Staged キャッシュを一括削除"
-            >
-              キャッシュ削除
-            </button>
+            <>
+              <button
+                className="icon-button"
+                style={{ width: "auto", padding: "0 0.5rem", marginLeft: "0.25rem" }}
+                onClick={handleClearCommands}
+                title="commands.txt と .commands.offset をクリア（保留コマンドを捨てる）"
+              >
+                commands をクリア
+              </button>
+              <button
+                className="icon-button"
+                style={{ width: "auto", padding: "0 0.5rem", marginLeft: "0.25rem" }}
+                onClick={handleCleanupStaged}
+                title="Staged キャッシュを一括削除"
+              >
+                キャッシュ削除
+              </button>
+            </>
+          )}
+          {clearCommandsMessage && (
+            <span className="session-bar-message" style={{ marginLeft: "0.5rem", fontSize: "0.85rem", opacity: 0.9 }}>
+              {clearCommandsMessage}
+            </span>
           )}
           {cleanupMessage && (
             <span className="session-bar-message" style={{ marginLeft: "0.5rem", fontSize: "0.85rem", opacity: 0.9 }}>

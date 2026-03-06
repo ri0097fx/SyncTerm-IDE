@@ -867,6 +867,26 @@ def cleanup_staged(wid: str, sess: str):
   }
 
 
+@app.post("/watchers/{wid}/sessions/{sess}/clear-commands")
+def clear_commands(wid: str, sess: str):
+  """commands.txt と .commands.offset のみを Relay と Watcher 両方でクリアする（staged ファイルは触らない）。"""
+  root = SESSIONS_ROOT / wid / sess
+  relay_done = False
+  if root.exists():
+    cmd_file = root / "commands.txt"
+    offset_file = root / ".commands.offset"
+    try:
+      if cmd_file.exists():
+        cmd_file.write_text("", encoding="utf-8")
+      if offset_file.exists():
+        offset_file.write_text("0", encoding="utf-8")
+      relay_done = True
+    except Exception as e:
+      logger.warning("clear-commands relay failed wid=%s sess=%s: %s", wid, sess, e)
+  watcher_cleaned = _post_command_via_rt(wid, sess, "_internal_clear_commands")[0]
+  return {"ok": True, "relay_cleared": relay_done, "watcher_cleaned": watcher_cleaned}
+
+
 def list_dir_entries_via_watcher(wid: str, sess: str, root: Path, rel_path: str) -> List[FileEntryModel]:
   # RT モード: HTTP で即送信し、レスポンスの ls_result を直接使う（rsync 待ち不要）
   cmd = f"_internal_list_dir::{rel_path}"
