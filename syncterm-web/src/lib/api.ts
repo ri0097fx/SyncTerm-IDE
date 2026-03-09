@@ -217,7 +217,26 @@ class HttpSyncApi implements SyncApi {
   async getInitialLog(watcherId: string, session: string): Promise<TerminalLine[]> {
     const k = this.key(watcherId, session);
     this.logOffsets[k] = 0;
-    return this.fetchLogTail(watcherId, session);
+    const allLines: TerminalLine[] = [];
+    const maxChunks = 30;
+    const maxLines = 15000;
+    let from = 0;
+    for (let chunkCount = 0; chunkCount < maxChunks; chunkCount++) {
+      const data = await http<{ lines?: string[]; nextOffset?: number; hasMore?: boolean }>(
+        `/watchers/${encodeURIComponent(watcherId)}/sessions/${encodeURIComponent(session)}/log?fromOffset=${from}`
+      );
+      const lines = Array.isArray(data.lines) ? data.lines : [];
+      const nextOffset = typeof data.nextOffset === "number" ? data.nextOffset : from;
+      for (let idx = 0; idx < lines.length; idx++) {
+        const text = typeof lines[idx] === "string" ? lines[idx] : String(lines[idx] ?? "");
+        allLines.push({ id: `init-${from}-${idx}`, text });
+        if (allLines.length >= maxLines) break;
+      }
+      this.logOffsets[k] = nextOffset;
+      if (!data.hasMore || allLines.length >= maxLines) break;
+      from = nextOffset;
+    }
+    return allLines;
   }
 
   async sendRemoteCommand(

@@ -769,10 +769,8 @@ def get_log_chunk(wid: str, sess: str, fromOffset: int = 0):
   if fromOffset > total_size:
     fromOffset = total_size
 
-  # Initial fetch: return only tail chunk for responsiveness.
+  # 先頭から順に返す。再アクセス・他デバイスからでも保存済みログを最初から取得できる。
   start = fromOffset
-  if fromOffset == 0 and total_size > MAX_LOG_CHUNK_BYTES:
-    start = total_size - MAX_LOG_CHUNK_BYTES
 
   with log_path.open("rb") as f:
     f.seek(start)
