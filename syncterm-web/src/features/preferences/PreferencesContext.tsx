@@ -24,6 +24,8 @@ export interface Preferences {
   showImagePreviewPane: boolean;
   /** コマンド送信後の実行経路表示（[RT] 実行済み 等）を表示する */
   showCommandTrace: boolean;
+  /** GPU 状態ペイン（nvidia-smi 逐次表示）を表示する */
+  showGpuPanel: boolean;
 }
 
 const DEFAULT_PREFERENCES: Preferences = {
@@ -42,7 +44,8 @@ const DEFAULT_PREFERENCES: Preferences = {
   terminalMaxLines: 5000,
   terminalPollMs: 1000,
   showImagePreviewPane: true,
-  showCommandTrace: false
+  showCommandTrace: false,
+  showGpuPanel: false
 };
 
 interface PreferencesContextValue {

@@ -620,8 +620,53 @@ class RTRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == "/command" or self.path.startswith("/command?"):
             self._handle_command()
+        elif self.path == "/gpu-status" or self.path.startswith("/gpu-status?"):
+            self._handle_gpu_status()
         else:
             self.send_error(404)
+
+    def _handle_gpu_status(self):
+        """nvidia-smi 等を実行し結果を返す。ログは relay に送らない（ターミナルに表示しない）。"""
+        try:
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len).decode("utf-8", errors="replace")
+            data = json.loads(body)
+        except Exception as e:
+            self._send_json(400, {"error": str(e)})
+            return
+
+        watcher_id = data.get("watcherId", WATCHER_ID)
+        session = data.get("session", "")
+        command = data.get("command", "nvidia-smi")
+
+        if not session:
+            self._send_json(400, {"error": "session required"})
+            return
+
+        local_watcher_dir = Path(os.environ.get("LOCAL_WATCHER_DIR", str(BASE_DIR.parent)))
+        base_dir = local_watcher_dir / session
+        if not base_dir.exists():
+            try:
+                base_dir.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                self._send_json(500, {"error": f"failed to create session dir {session}: {e}"})
+                return
+        if not base_dir.is_dir():
+            self._send_json(500, {"error": f"session path is not a directory: {session}"})
+            return
+
+        ctx = get_session(base_dir, watcher_id=watcher_id, session_name=session)
+        ctx.streamed = False
+        try:
+            output, exit_code, extra = ctx.execute(command)
+        except Exception as e:
+            output = str(e)
+            exit_code = 1
+            extra = {}
+
+        # 意図的に post_log_to_relay は呼ばない（ターミナルに反映しない）
+        resp = {"ok": True, "output": output, "exitCode": exit_code, **extra}
+        self._send_json(200, resp)
 
     def _handle_command(self):
         try:

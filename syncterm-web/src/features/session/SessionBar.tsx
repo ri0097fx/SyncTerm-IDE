@@ -161,6 +161,16 @@ export const SessionBar: React.FC = () => {
               キャッシュ・commands 削除
             </button>
           )}
+          {currentWatcher && currentSession && (
+            <button
+              className={`icon-button${preferences.showGpuPanel ? " active" : ""}`}
+              style={{ width: "auto", padding: "0 0.5rem", marginLeft: "0.25rem" }}
+              onClick={() => updatePreferences({ showGpuPanel: !preferences.showGpuPanel })}
+              title="GPU 状態 (nvidia-smi) を逐次表示"
+            >
+              GPU
+            </button>
+          )}
           {cleanupMessage && (
             <span className="session-bar-message" style={{ marginLeft: "0.5rem", fontSize: "0.85rem", opacity: 0.9 }}>
               {cleanupMessage}

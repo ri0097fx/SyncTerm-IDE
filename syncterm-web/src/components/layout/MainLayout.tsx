@@ -4,6 +4,7 @@ import { FileTreePanel } from "../../features/file-tree/FileTreePanel";
 import { EditorPanel } from "../../features/editor/EditorPanel";
 import { ImagePreviewPanel } from "../../features/editor/ImagePreviewPanel";
 import { TerminalPanel } from "../../features/terminal/TerminalPanel";
+import { GpuStatusPanel } from "../../features/terminal/GpuStatusPanel";
 import { isImagePath } from "../../lib/fileType";
 import { usePreferences } from "../../features/preferences/PreferencesContext";
 
@@ -18,6 +19,9 @@ export const MainLayout: React.FC = () => {
   const dragModeRef = useRef<"vertical" | "horizontal" | null>(null);
   const mainRef = useRef<HTMLDivElement | null>(null);
   const showImagePreviewPane = openImagePaths.length > 0;
+  const showGpuPanel = preferences.showGpuPanel;
+  const showPreviewPane = showImagePreviewPane || showGpuPanel;
+  const [previewTab, setPreviewTab] = useState<"image" | "gpu">("image");
 
   const handleOpenFile = (path: string) => {
     if (isImagePath(path)) {
@@ -106,7 +110,7 @@ export const MainLayout: React.FC = () => {
           />
           <div className="app-right-pane">
             <div className="editor-preview-layout">
-              <div className={`editor-main-pane${showImagePreviewPane ? " with-preview" : ""}`}>
+              <div className={`editor-main-pane${showPreviewPane ? " with-preview" : ""}`}>
                 <EditorPanel
                   filePath={activeEditorPath}
                   openFilePaths={openEditorPaths}
@@ -114,14 +118,47 @@ export const MainLayout: React.FC = () => {
                   onCloseFile={handleCloseEditorFile}
                 />
               </div>
-              {showImagePreviewPane && (
-                <div className="image-preview-pane">
-                  <ImagePreviewPanel
-                    filePath={activeImagePath}
-                    openImagePaths={openImagePaths}
-                    onSelectImage={handleSelectImageFile}
-                    onCloseImage={handleCloseImageFile}
-                  />
+              {showPreviewPane && (
+                <div className="image-preview-pane preview-pane-slot">
+                  {showImagePreviewPane && showGpuPanel ? (
+                    <>
+                      <div className="editor-tabs image-preview-tabs">
+                        <button
+                          type="button"
+                          className={`editor-tab${previewTab === "image" ? " active" : ""}`}
+                          onClick={() => setPreviewTab("image")}
+                        >
+                          <span className="editor-tab-label">Image Preview</span>
+                        </button>
+                        <button
+                          type="button"
+                          className={`editor-tab${previewTab === "gpu" ? " active" : ""}`}
+                          onClick={() => setPreviewTab("gpu")}
+                        >
+                          <span className="editor-tab-label">GPU</span>
+                        </button>
+                      </div>
+                      {previewTab === "image" ? (
+                        <ImagePreviewPanel
+                          filePath={activeImagePath}
+                          openImagePaths={openImagePaths}
+                          onSelectImage={handleSelectImageFile}
+                          onCloseImage={handleCloseImageFile}
+                        />
+                      ) : (
+                        <GpuStatusPanel />
+                      )}
+                    </>
+                  ) : showImagePreviewPane ? (
+                    <ImagePreviewPanel
+                      filePath={activeImagePath}
+                      openImagePaths={openImagePaths}
+                      onSelectImage={handleSelectImageFile}
+                      onCloseImage={handleCloseImageFile}
+                    />
+                  ) : (
+                    <GpuStatusPanel />
+                  )}
                 </div>
               )}
             </div>

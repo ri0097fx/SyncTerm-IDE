@@ -129,6 +129,14 @@ export interface SyncApi {
     watcher_cleaned: boolean;
     relay_session_exists?: boolean;
   }>;
+
+  /** Watcher 上で nvidia-smi を実行した結果（逐次表示用にポーリング） */
+  getGpuStatus(watcherId: string, session: string): Promise<{
+    output: string;
+    error?: string;
+    ok: boolean;
+    exitCode?: number;
+  }>;
 }
 
 // --------------------------------------------------------------------------------
@@ -525,6 +533,15 @@ class HttpSyncApi implements SyncApi {
     return http(
       `/watchers/${encodeURIComponent(watcherId)}/sessions/${encodeURIComponent(session)}/cleanup-staged`,
       { method: "POST" }
+    );
+  }
+
+  async getGpuStatus(
+    watcherId: string,
+    session: string
+  ): Promise<{ output: string; error?: string; ok: boolean; exitCode?: number }> {
+    return http(
+      `/watchers/${encodeURIComponent(watcherId)}/sessions/${encodeURIComponent(session)}/gpu-status`
     );
   }
 }

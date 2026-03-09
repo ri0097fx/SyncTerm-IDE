@@ -829,8 +829,8 @@ def _post_command_via_rt(wid: str, sess: str, command: str) -> tuple[bool, str]:
     return False, str(e)
 
 
-def _post_command_via_rt_with_response(wid: str, sess: str, command: str) -> tuple[Optional[dict], str]:
-  """RT 経由でコマンド送信し、(レスポンス JSON, 失敗時は理由) を返す。Watcher が 404 の場合は reason に 'session_not_found' を返す。"""
+def _post_command_via_rt_with_response(wid: str, sess: str, command: str, timeout: int = 7200) -> tuple[Optional[dict], str]:
+  """RT 経由でコマンド送信し、(レスポンス JSON, 失敗時は理由) を返す。Watcher が 404 の場合は reason に 'session_not_found' を返す。timeout は秒（省略時 7200）。"""
   port = _get_rt_port(wid)
   if port is None:
     return None, "rt_port_not_found"
@@ -838,7 +838,28 @@ def _post_command_via_rt_with_response(wid: str, sess: str, command: str) -> tup
   body = json.dumps({"watcherId": wid, "session": sess, "command": command}, ensure_ascii=False).encode("utf-8")
   try:
     req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+      return json.loads(resp.read().decode("utf-8", errors="replace")), ""
+  except urllib.error.HTTPError as e:
+    if e.code == 404:
+      return None, "session_not_found"
+    return None, f"HTTP {e.code}"
+  except urllib.error.URLError as e:
+    return None, str(e.reason) if e.reason else str(e)
+  except Exception as e:
+    return None, str(e)
+
+
+def _post_gpu_status_via_rt(wid: str, sess: str) -> tuple[Optional[dict], str]:
+  """Watcher の /gpu-status を呼ぶ。ログに流さず結果だけ返す。"""
+  port = _get_rt_port(wid)
+  if port is None:
+    return None, "rt_port_not_found"
+  url = f"http://127.0.0.1:{port}/gpu-status"
+  body = json.dumps({"watcherId": wid, "session": sess, "command": "nvidia-smi"}, ensure_ascii=False).encode("utf-8")
+  try:
+    req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=15) as resp:
       return json.loads(resp.read().decode("utf-8", errors="replace")), ""
   except urllib.error.HTTPError as e:
     if e.code == 404:
@@ -874,6 +895,19 @@ def get_rt_status(wid: str):
     "registry_root": str(REGISTRY_ROOT),
     "rt_port_file_exists": port_file.exists(),
     "rt_port": port,
+  }
+
+
+@app.get("/watchers/{wid}/sessions/{sess}/gpu-status")
+def get_gpu_status(wid: str, sess: str):
+  """Watcher の /gpu-status で nvidia-smi を実行。ターミナルログには流さない。"""
+  data, reason = _post_gpu_status_via_rt(wid, sess)
+  if data is None:
+    return {"output": "", "error": reason, "ok": False}
+  return {
+    "output": data.get("output", ""),
+    "exitCode": data.get("exitCode"),
+    "ok": data.get("ok", False),
   }
 
 
