@@ -6,19 +6,35 @@ set -euo pipefail
 # Usage:
 #   ./scripts/deploy_backend.sh user@relay.example.com
 #   ./scripts/deploy_backend.sh user@relay.example.com /path/on/relay 8000
+#   ./scripts/deploy_backend.sh user@relay.example.com --setup-ollama   # デプロイ後に Relay 上で Ollama をインストール・起動・モデル pull
 #
 # Args:
 #   1) SSH target (required): user@host
 #   2) Remote app dir (optional). 省略時: config.ini の deploy_dir → リレー上で backend_port を監視しているプロセスの cwd → ~/SyncTerm-IDE
 #   3) Backend port (optional, default: 8000)
+#   --setup-ollama  Relay 上で Ollama のインストール・ollama serve 起動・config.ini の ollama_model を pull（任意）
+#
+# AI (Ollama): リモートの config.ini に [ai] を追加すると、Ollama の URL/モデル等を指定可能。
+# 例: ollama_base_url = http://127.0.0.1:11434, ollama_model = qwen2.5-coder:7b
 
-TARGET="${1:-}"
-BACKEND_PORT="${3:-8000}"
+SETUP_OLLAMA="${SETUP_OLLAMA:-0}"
+ARGS=()
+for a in "$@"; do
+  if [[ "$a" == "--setup-ollama" ]]; then
+    SETUP_OLLAMA=1
+  else
+    ARGS+=("$a")
+  fi
+done
+
+TARGET="${ARGS[0]:-}"
+REMOTE_ARG="${ARGS[1]:-}"
+BACKEND_PORT="${ARGS[2]:-8000}"
 BACKEND_HOST="${TARGET#*@}"
 
 # REMOTE_DIR: use 2nd arg, or config.ini deploy_dir, or リレー上でバックエンドが動いているディレクトリを検出, or default
-if [[ -n "${2:-}" ]]; then
-  REMOTE_DIR="$2"
+if [[ -n "${REMOTE_ARG:-}" ]]; then
+  REMOTE_DIR="$REMOTE_ARG"
   echo "Using remote_dir from argument: $REMOTE_DIR"
 else
   REMOTE_DIR=""
@@ -51,8 +67,9 @@ if c.has_section('remote') and c.has_option('remote', 'deploy_dir'):
 fi
 
 if [[ -z "$TARGET" ]]; then
-  echo "Usage: $0 <user@host> [remote_dir] [backend_port]"
+  echo "Usage: $0 <user@host> [remote_dir] [backend_port] [--setup-ollama]"
   echo "  remote_dir: optional; default from config.ini [remote] deploy_dir, else ~/SyncTerm-IDE"
+  echo "  --setup-ollama: optional; on Relay install Ollama, start ollama serve, pull config.ini [ai] ollama_model"
   exit 1
 fi
 
@@ -94,7 +111,12 @@ rsync -az --delete "./scripts/" "$TARGET:$(rempath_quoted "$REMOTE_DIR_ABS")/scr
 echo "[2b/5] Create sessions, _registry under app root on remote"
 ssh "$TARGET" "bash -lc 'cd $(rempath_quoted "$REMOTE_DIR_ABS") && python3 scripts/ensure_base_path.py'"
 
-echo "[3/5] Create venv and install dependencies"
+if [[ "$SETUP_OLLAMA" -eq 1 ]]; then
+  echo "[2c/5] Setup Ollama on Relay (install / ollama serve / model pull)"
+  ssh "$TARGET" "bash -lc 'cd $(rempath_quoted "$REMOTE_DIR_ABS") && chmod +x scripts/relay_setup_ollama.sh && bash scripts/relay_setup_ollama.sh .'"
+fi
+
+echo "[3/5] Create venv and install dependencies (may take 1–2 min, please wait)..."
 ssh "$TARGET" "bash -lc '
 set -euo pipefail
 cd $(rempath_quoted "$REMOTE_DIR_ABS")
@@ -104,9 +126,11 @@ if [[ ! -f \"\$REQ_FILE\" ]]; then
   echo \"ERROR: \$REQ_FILE not found. Ensure [1/5] sync completed and remote path contains backend/\"
   exit 1
 fi
+echo \"  Creating .venv-backend...\"
 python3 -m venv .venv-backend
 . .venv-backend/bin/activate
-pip install --upgrade pip >/dev/null
+pip install --upgrade pip -q
+echo \"  Installing packages from requirements.txt...\"
 pip install -r \"\$REQ_FILE\"
 chmod +x watcher_manager_rt.sh scripts/*.sh scripts/wsl/*.sh 2>/dev/null || true
 '"

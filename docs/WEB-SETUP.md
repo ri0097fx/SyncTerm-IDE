@@ -278,9 +278,82 @@ Watcher 側ではサーバー上のファイルが更新されただけとして
 
 ---
 
-## 8. まとめ
+## 8. AI アシスト（Relay 上で Ollama を利用・API キー不要）
+
+エディタの AI アシスト／インライン補完は、**Relay（中継サーバー）上のバックエンド**が処理する。外部 API キーは不要で、**Ollama** を Relay に置けばそのまま利用できる。
+
+### 8-1. Relay で Ollama を起動する
+
+**方法 A: デプロイ時にまとめてセットアップ（推奨）**
+
+バックエンドをデプロイする際に `--setup-ollama` を付けると、Relay 上で Ollama のインストール・起動・モデル pull まで自動で行う。**Ollama のインストール自体は sudo 不要**（`$HOME/.local/ollama` にバイナリを配置）。展開には (1) システムの **zstd** があればそれを使用し、(2) 無い場合は **Python 3** の `zstandard` を `pip install --user` で取得して使用する。zstd も Python も無い場合は、Relay で `sudo apt install zstd` を 1 回実行するか、`curl -fsSL https://ollama.com/install.sh | sh`（要 sudo）で手動インストールする。
+
+```bash
+./scripts/deploy_backend.sh user@relay.example.com --setup-ollama
+# または remote_dir を指定する場合
+./scripts/deploy_backend.sh user@relay.example.com '~/SyncTerm-IDE' 8000 --setup-ollama
+```
+
+使用するモデルは Relay に転送済みの **config.ini** の `[ai]` → `ollama_model` を参照する（未設定時は `qwen2.5-coder:7b`）。初回の `ollama pull` は通信量・時間がかかることがある。
+
+**方法 B: Relay に SSH して手動でセットアップ**
+
+Relay サーバー上で [Ollama](https://ollama.com/) をインストールし、軽量なコード用モデルを用意する。
+
+```bash
+# 例: Ubuntu / Debian
+curl -fsSL https://ollama.com/install.sh | sh
+ollama serve   # バックグラウンドで実行する場合は nohup 等を使う
+ollama pull qwen2.5-coder:7b   # コード用モデル（約 4.7GB）
+```
+
+`ollama serve` はデフォルトで `http://127.0.0.1:11434` で待ち受ける。
+
+### 8-2. オプション設定（config.ini の [ai]）
+
+バックエンド起動時に **config.ini** の **[ai]** セクションを読み込む。起動スクリプトで環境変数を export する必要はない。
+
+| オプション | 説明 | 既定値 |
+|------------|------|--------|
+| `ai_provider` | `ollama` または `openai`。未設定かつ `OPENAI_API_KEY` も無い場合は `ollama` を使用。 | （Ollama 優先） |
+| `ollama_base_url` | Ollama の URL | `http://127.0.0.1:11434` |
+| `ollama_model` | 使用するモデル名 | `qwen2.5-coder:7b` |
+
+**例**（Relay の config.ini に追記）:
+
+```ini
+[ai]
+ai_provider = ollama
+ollama_base_url = http://127.0.0.1:11434
+ollama_model = qwen2.5-coder:7b
+```
+
+OpenAI を使う場合は `OPENAI_API_KEY` を環境変数で設定し、`ai_provider = openai` を指定する。
+
+### 8-3. 動作確認
+
+- エディタで AI アシストパネルを有効にし、プロンプトを入力して実行する。
+- リクエストはブラウザ → Relay バックエンド → Ollama の順で処理され、**ローカル PC に AI を置く必要はない**。
+
+### 8-4. エラー「Ollama に接続できません（Connection refused）」の場合
+
+このエラーは **Relay サーバー上で Ollama が動いていない**ときに出ます。
+
+1. **Relay サーバー（例: A6000）に SSH して次を実行**
+   ```bash
+   ollama serve    # 起動していない場合。バックグラウンドなら nohup ollama serve &
+   ollama list     # モデル一覧。未 pull なら ollama pull qwen2.5-coder:7b
+   ```
+2. **config.ini の `ollama_base_url` を確認**  
+   Ollama を同じマシンで動かす場合は `http://127.0.0.1:11434` のままでよい。別マシンで動かす場合はそのホストの URL を指定する。
+3. 変更後は **バックエンド（Relay）を再起動**してから再度 AI アシストを試す。
+
+---
+
+## 9. まとめ
 
 - Watcher 側の構成は従来のままとして、GUI を Web（React）と FastAPI バックエンドに置き換えた構成である。
+- AI アシストは Relay 上の Ollama（API キー不要）または OpenAI で利用可能。
 - 中継サーバー上のファイル・ログに HTTP で直接アクセスし、rsync ポーリングに依存しない運用が可能である。
 - 運用の流れ: (1) Watcher を起動、(2) 中継サーバーで FastAPI を起動、(3) ローカルで `syncterm-web` を起動してブラウザでアクセス。以降は画面上で操作する。
 

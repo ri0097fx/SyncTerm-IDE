@@ -6,6 +6,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import subprocess
 import time
 import urllib.error
@@ -17,7 +18,7 @@ from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,32 @@ def load_paths():
 
 
 BASE_PATH, SESSIONS_ROOT, REGISTRY_ROOT = load_paths()
+
+
+def load_ai_config() -> None:
+  """config.ini の [ai] を読み、未設定の環境変数にだけ反映する（起動スクリプトで export しなくてよい）。"""
+  if not CONFIG_PATH.exists():
+    return
+  parser = configparser.ConfigParser()
+  try:
+    parser.read(CONFIG_PATH)
+  except Exception:
+    return
+  if not parser.has_section("ai"):
+    return
+  mapping = [
+    ("ollama_base_url", "OLLAMA_BASE_URL"),
+    ("ollama_model", "OLLAMA_MODEL"),
+    ("ai_provider", "AI_PROVIDER"),
+  ]
+  for ini_key, env_key in mapping:
+    if parser.has_option("ai", ini_key):
+      val = parser.get("ai", ini_key).strip()
+      if val and env_key not in os.environ:
+        os.environ[env_key] = val
+
+
+load_ai_config()
 
 # Ensure session/registry dirs exist at startup (e.g. after deploy)
 SESSIONS_ROOT.mkdir(parents=True, exist_ok=True)
@@ -169,12 +196,26 @@ def _norm_rel(path: str) -> str:
   return p or "."
 
 
+class ChatMessage(BaseModel):
+  role: str  # "user" | "assistant"
+  content: str
+
+
 class AiAssistPayload(BaseModel):
   path: str
   action: str
   prompt: str
   selectedText: Optional[str] = None
   fileContent: str
+  history: Optional[List[ChatMessage]] = None
+  model: Optional[str] = None
+  mode: Optional[str] = None  # agent | plan | debug | ask
+  # Agent 用: エディタの現在のコンテキスト（コード直接変更・推論に利用）
+  editorPath: Optional[str] = None
+  editorSelectedText: Optional[str] = None
+  editorContent: Optional[str] = None
+  # 思考レベル: quick | balanced | deep
+  thinking: Optional[str] = None
 
 
 class AiInlinePayload(BaseModel):
@@ -182,6 +223,11 @@ class AiInlinePayload(BaseModel):
   prefix: str
   suffix: str
   language: Optional[str] = None
+  model: Optional[str] = None
+
+
+class AiEnsureModelPayload(BaseModel):
+  model: str
 
 
 def watcher_registry_files():
@@ -786,7 +832,7 @@ def get_log_chunk(wid: str, sess: str, fromOffset: int = 0):
   # "aaa\rbbb\rccc\n" のような出力は最終状態 "ccc" だけが 1 行として表示される。
   # 通常の出力には影響しないよう、\n が無い場合もそのまま 1 行として扱う。
   raw_lines = text.split("\n")
-  lines: list[str] = []
+  lines: List[str] = []
   for raw in raw_lines:
     if not raw:
       continue
@@ -1364,7 +1410,9 @@ def build_ai_prompt(payload: AiAssistPayload) -> str:
   scope_label = "selected text" if target_text else "full file"
   scope_text = target_text if target_text else payload.fileContent
   return (
-    "You are a concise coding assistant. Return only the edited code text (no markdown fences).\n"
+    "You are a concise coding assistant. Think carefully about the best change, but RETURN ONLY the edited code text.\n"
+    "Do not include markdown fences, comments explaining the change, or placeholder code such as '...' or 'pass' unless the original also used them intentionally.\n"
+    "Always return valid, directly usable code that can replace the target scope.\n"
     f"Action: {payload.action}\n"
     f"User instruction: {payload.prompt}\n"
     f"File path: {payload.path}\n"
@@ -1374,7 +1422,47 @@ def build_ai_prompt(payload: AiAssistPayload) -> str:
   )
 
 
-def call_openai_chat(system_prompt: str, user_prompt: str) -> str:
+def _call_ollama(messages: list, max_tokens: int = 512, temperature: float = 0.2, model: Optional[str] = None) -> str:
+  """Ollama を呼ぶ（API キー不要。Relay 上で ollama serve を起動しておく）。"""
+  base = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+  model = model or os.environ.get("OLLAMA_MODEL", "qwen2.5-coder:7b")
+  body = json.dumps(
+    {
+      "model": model,
+      "messages": messages,
+      "stream": False,
+      "options": {"temperature": temperature, "num_predict": max_tokens},
+    }
+  ).encode("utf-8")
+  req = urllib.request.Request(
+    f"{base.rstrip('/')}/api/chat",
+    data=body,
+    headers={"Content-Type": "application/json"},
+    method="POST",
+  )
+  try:
+    with urllib.request.urlopen(req, timeout=120) as resp:
+      data = json.loads(resp.read().decode("utf-8", errors="replace"))
+  except urllib.error.HTTPError as e:
+    detail = e.read().decode("utf-8", errors="replace")
+    raise HTTPException(status_code=502, detail=f"Ollama error: {detail}")
+  except OSError as e:
+    if e.errno == 111:  # Connection refused
+      base = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+      raise HTTPException(
+        status_code=502,
+        detail=f"Ollama に接続できません（Connection refused）。Relay サーバー上で ollama serve を起動し、ollama_base_url={base} が正しいか config.ini を確認してください。"
+      )
+    raise HTTPException(status_code=502, detail=f"Ollama request failed: {e}")
+  except Exception as e:
+    raise HTTPException(status_code=502, detail=f"Ollama request failed: {e}")
+  try:
+    return str(data.get("message", {}).get("content", "")).strip()
+  except Exception:
+    raise HTTPException(status_code=500, detail="invalid Ollama response format")
+
+
+def _call_openai(messages: list, max_tokens: int = 512, temperature: float = 0.2) -> str:
   api_key = os.environ.get("OPENAI_API_KEY")
   if not api_key:
     raise HTTPException(status_code=503, detail="OPENAI_API_KEY is not set")
@@ -1382,11 +1470,9 @@ def call_openai_chat(system_prompt: str, user_prompt: str) -> str:
   body = json.dumps(
     {
       "model": model,
-      "temperature": 0.2,
-      "messages": [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-      ],
+      "temperature": temperature,
+      "max_tokens": max_tokens,
+      "messages": messages,
     }
   ).encode("utf-8")
   req = urllib.request.Request(
@@ -1403,52 +1489,264 @@ def call_openai_chat(system_prompt: str, user_prompt: str) -> str:
       data = json.loads(resp.read().decode("utf-8", errors="replace"))
   except urllib.error.HTTPError as e:
     detail = e.read().decode("utf-8", errors="replace")
-    raise HTTPException(status_code=502, detail=f"ai upstream error: {detail}")
+    raise HTTPException(status_code=502, detail=f"OpenAI error: {detail}")
   except Exception as e:
-    raise HTTPException(status_code=502, detail=f"ai request failed: {e}")
+    raise HTTPException(status_code=502, detail=f"OpenAI request failed: {e}")
   try:
     return str(data["choices"][0]["message"]["content"]).strip()
   except Exception:
-    raise HTTPException(status_code=500, detail="invalid ai response format")
+    raise HTTPException(status_code=500, detail="invalid OpenAI response format")
 
 
-def call_openai_chat_limited(system_prompt: str, user_prompt: str, max_tokens: int = 160) -> str:
-  api_key = os.environ.get("OPENAI_API_KEY")
-  if not api_key:
-    raise HTTPException(status_code=503, detail="OPENAI_API_KEY is not set")
-  model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-  body = json.dumps(
-    {
-      "model": model,
-      "temperature": 0.2,
-      "max_tokens": max_tokens,
-      "messages": [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-      ],
-    }
-  ).encode("utf-8")
+def _call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 512, temperature: float = 0.2, model: Optional[str] = None) -> str:
+  """AI_PROVIDER または OPENAI_API_KEY の有無で Ollama / OpenAI を切り替え。未設定なら Ollama 優先（API フリー）。"""
+  provider = (os.environ.get("AI_PROVIDER") or "").strip().lower()
+  if not provider and os.environ.get("OPENAI_API_KEY"):
+    provider = "openai"
+  if not provider:
+    provider = "ollama"
+  messages = [
+    {"role": "system", "content": system_prompt},
+    {"role": "user", "content": user_prompt},
+  ]
+  if provider == "ollama":
+    return _call_ollama(messages, max_tokens=max_tokens, temperature=temperature, model=model)
+  if provider == "openai":
+    return _call_openai(messages, max_tokens=max_tokens, temperature=temperature)
+  raise HTTPException(status_code=400, detail=f"unsupported AI_PROVIDER: {provider}")
+
+
+def _call_llm_messages(messages: List[dict], max_tokens: int = 900, temperature: float = 0.2, model: Optional[str] = None) -> str:
+  """複数メッセージ（会話履歴含む）で LLM を呼ぶ。"""
+  provider = (os.environ.get("AI_PROVIDER") or "").strip().lower()
+  if not provider and os.environ.get("OPENAI_API_KEY"):
+    provider = "openai"
+  if not provider:
+    provider = "ollama"
+  if provider == "ollama":
+    return _call_ollama(messages, max_tokens=max_tokens, temperature=temperature, model=model)
+  if provider == "openai":
+    return _call_openai(messages, max_tokens=max_tokens, temperature=temperature)
+  raise HTTPException(status_code=400, detail=f"unsupported AI_PROVIDER: {provider}")
+
+
+def call_openai_chat(system_prompt: str, user_prompt: str, model: Optional[str] = None) -> str:
+  return _call_llm(system_prompt, user_prompt, max_tokens=900, temperature=0.2, model=model)
+
+
+def call_openai_chat_limited(system_prompt: str, user_prompt: str, max_tokens: int = 160, model: Optional[str] = None) -> str:
+  return _call_llm(system_prompt, user_prompt, max_tokens=max_tokens, temperature=0.1, model=model)
+
+
+def _ollama_request(path: str, method: str = "GET", data: Optional[bytes] = None, timeout: float = 30) -> dict:
+  base = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+  url = f"{base.rstrip('/')}{path}"
+  req = urllib.request.Request(url, data=data, method=method)
+  if data:
+    req.add_header("Content-Type", "application/json")
+  with urllib.request.urlopen(req, timeout=timeout) as resp:
+    return json.loads(resp.read().decode("utf-8", errors="replace"))
+
+
+def _ollama_pull(model: str, timeout: float = 600) -> None:
+  base = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+  body = json.dumps({"name": model, "stream": False}).encode("utf-8")
   req = urllib.request.Request(
-    "https://api.openai.com/v1/chat/completions",
+    f"{base.rstrip('/')}/api/pull",
     data=body,
-    headers={
-      "Content-Type": "application/json",
-      "Authorization": f"Bearer {api_key}",
-    },
+    headers={"Content-Type": "application/json"},
+    method="POST",
+  )
+  with urllib.request.urlopen(req, timeout=timeout) as resp:
+    data = json.loads(resp.read().decode("utf-8", errors="replace"))
+  if data.get("status") != "success":
+    raise HTTPException(status_code=502, detail=f"Ollama pull failed: {data.get('status', 'unknown')}")
+
+
+def _ollama_pull_stream(model: str, timeout: float = 600):
+  """Ollama pull を stream で実行し、各イベントを yield する。"""
+  base = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+  body = json.dumps({"name": model, "stream": True}).encode("utf-8")
+  req = urllib.request.Request(
+    f"{base.rstrip('/')}/api/pull",
+    data=body,
+    headers={"Content-Type": "application/json"},
     method="POST",
   )
   try:
-    with urllib.request.urlopen(req, timeout=20) as resp:
-      data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+      buf = b""
+      while True:
+        chunk = resp.read(4096)
+        if not chunk:
+          if buf.strip():
+            try:
+              yield json.loads(buf.decode("utf-8", errors="replace"))
+            except json.JSONDecodeError:
+              pass
+          break
+        buf += chunk
+        while b"\n" in buf:
+          line, buf = buf.split(b"\n", 1)
+          line = line.strip()
+          if not line:
+            continue
+          try:
+            yield json.loads(line.decode("utf-8", errors="replace"))
+          except json.JSONDecodeError:
+            pass
   except urllib.error.HTTPError as e:
-    detail = e.read().decode("utf-8", errors="replace")
-    raise HTTPException(status_code=502, detail=f"ai upstream error: {detail}")
+    yield {"status": "error", "error": e.read().decode("utf-8", errors="replace")}
   except Exception as e:
-    raise HTTPException(status_code=502, detail=f"ai request failed: {e}")
+    yield {"status": "error", "error": str(e)}
+
+
+def _ollama_stop_model(name: str, timeout: float = 10) -> None:
+  base = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+  body = json.dumps({"name": name}).encode("utf-8")
+  req = urllib.request.Request(
+    f"{base.rstrip('/')}/api/stop",
+    data=body,
+    headers={"Content-Type": "application/json"},
+    method="POST",
+  )
   try:
-    return str(data["choices"][0]["message"]["content"]).strip()
+    with urllib.request.urlopen(req, timeout=timeout):
+      return
   except Exception:
-    raise HTTPException(status_code=500, detail="invalid ai response format")
+    # モデルが既にアンロード済み or 未起動などは無視
+    return
+
+
+def _ollama_stop_unselected(chosen_model: str) -> None:
+  """現在ロードされているモデルのうち、選択中以外をアンロードしてメモリを解放する。"""
+  base_name = (chosen_model or "").strip()
+  if not base_name:
+    return
+  # コロンなし表記にも対応
+  base_name_short = base_name.split(":", 1)[0]
+  try:
+    data = _ollama_request("/api/ps", timeout=5)
+    models = data.get("models", []) or []
+    for m in models:
+      name = (m.get("name") or "").strip()
+      if not name:
+        continue
+      short = name.split(":", 1)[0]
+      if short != base_name_short:
+        _ollama_stop_model(name)
+  except Exception:
+    # ps 取得に失敗した場合は何もしない（安全優先）
+    return
+
+
+def _ollama_suggested_models() -> List[str]:
+  try:
+    parser = configparser.ConfigParser()
+    parser.read(CONFIG_PATH)
+    if parser.has_section("ai") and parser.has_option("ai", "ollama_models"):
+      raw = parser.get("ai", "ollama_models").strip()
+      if raw:
+        user_models = [m.strip() for m in raw.split(",") if m.strip()]
+        # ユーザー指定 + デフォルト候補をマージ（重複は前者優先）
+        base_defaults = [
+          "qwen2.5-coder:1.5b",
+          "qwen2.5-coder:3b",
+          "qwen2.5-coder:7b",
+          "qwen2.5-coder:14b",
+          "qwen2.5-coder:32b",
+          "deepseek-coder:6.7b",
+          "deepseek-coder:33b",
+          "llama3.2",
+          "mistral",
+        ]
+        merged: List[str] = []
+        for name in user_models + base_defaults:
+          if name and name not in merged:
+            merged.append(name)
+        return merged
+  except Exception:
+    pass
+  # デフォルトの候補（すべて無料のオープンモデル）
+  # - qwen2.5-coder 系: コード特化で高性能（サイズ違い）
+  # - deepseek-coder 系: 強力なコード向けモデル
+  # - llama3.2 / mistral: 汎用タスク向け
+  return [
+    "qwen2.5-coder:1.5b",
+    "qwen2.5-coder:3b",
+    "qwen2.5-coder:7b",
+    "qwen2.5-coder:14b",
+    "qwen2.5-coder:32b",
+    "deepseek-coder:6.7b",
+    "deepseek-coder:33b",
+    "llama3.2",
+    "mistral",
+  ]
+
+
+@app.get("/watchers/{wid}/sessions/{sess}/ai-models")
+def get_ai_models(wid: str, sess: str):
+  session_root(wid, sess)
+  provider = (os.environ.get("AI_PROVIDER") or "").strip().lower()
+  if not provider and os.environ.get("OPENAI_API_KEY"):
+    provider = "openai"
+  if not provider:
+    provider = "ollama"
+  if provider != "ollama":
+    return {"installed": [], "suggested": [], "provider": provider}
+  try:
+    data = _ollama_request("/api/tags", timeout=10)
+    installed = [m.get("name", "").strip() for m in data.get("models", []) if m.get("name")]
+    installed = list(dict.fromkeys(installed))
+  except Exception:
+    installed = []
+  suggested = _ollama_suggested_models()
+  default = (os.environ.get("OLLAMA_MODEL") or "qwen2.5-coder:7b").strip()
+  if default and default not in suggested:
+    suggested = [default] + [s for s in suggested if s != default]
+  return {"installed": installed, "suggested": suggested, "provider": provider}
+
+
+@app.post("/watchers/{wid}/sessions/{sess}/ai-ensure-model")
+def ai_ensure_model(wid: str, sess: str, payload: AiEnsureModelPayload):
+  session_root(wid, sess)
+  if (os.environ.get("AI_PROVIDER") or "").strip().lower() == "openai":
+    return {"ok": True, "message": "OpenAI does not require model install"}
+  try:
+    model = payload.model.strip()
+    _ollama_pull(model, timeout=600)
+    _ollama_stop_unselected(model)
+  except urllib.error.HTTPError as e:
+    raise HTTPException(status_code=e.code, detail=e.read().decode("utf-8", errors="replace"))
+  except Exception as e:
+    raise HTTPException(status_code=502, detail=str(e))
+  return {"ok": True}
+
+
+@app.post("/watchers/{wid}/sessions/{sess}/ai-ensure-model-stream")
+def ai_ensure_model_stream(wid: str, sess: str, payload: AiEnsureModelPayload):
+  """モデル pull の進捗を SSE でストリームする。"""
+  session_root(wid, sess)
+  if (os.environ.get("AI_PROVIDER") or "").strip().lower() == "openai":
+    def _openai_done():
+      yield f"data: {json.dumps({'status': 'success', 'message': 'OpenAI does not require model install'})}\n\n"
+    return StreamingResponse(_openai_done(), media_type="text/event-stream")
+
+  def _gen():
+    model = payload.model.strip()
+    for ev in _ollama_pull_stream(model, timeout=600):
+      if ev.get("status") == "error":
+        yield f"data: {json.dumps(ev)}\n\n"
+        return
+      total = ev.get("total")
+      completed = ev.get("completed")
+      if isinstance(total, (int, float)) and total and isinstance(completed, (int, float)):
+        ev = {**ev, "percent": min(100, round(100 * completed / total))}
+      yield f"data: {json.dumps(ev)}\n\n"
+    # pull 完了後に他モデルをアンロード
+    _ollama_stop_unselected(model)
+
+  return StreamingResponse(_gen(), media_type="text/event-stream")
 
 
 @app.post("/watchers/{wid}/sessions/{sess}/links")
@@ -1547,20 +1845,221 @@ def upload_file(wid: str, sess: str, payload: UploadFilePayload):
   return {"ok": True, "rt": False}
 
 
+def _extract_command_from_response(text: str) -> Optional[str]:
+  m = re.search(r"<command>\s*(.*?)\s*</command>", text, re.DOTALL | re.IGNORECASE)
+  if not m:
+    return None
+  return m.group(1).strip()
+
+
+def _strip_command_tags(text: str) -> str:
+  return re.sub(r"<command>[\s\S]*?</command>", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
+
+
+def _is_potentially_destructive_command(cmd: str) -> bool:
+  c = cmd.strip().lower()
+  # very rough denylist; user can still run these manually via Terminal panel if needed
+  dangerous = [
+    "rm -rf",
+    "mkfs",
+    "dd ",
+    "shutdown",
+    "reboot",
+    "kill -9",
+    "killall",
+    "diskutil erase",
+    "format ",
+  ]
+  return any(d in c for d in dangerous)
+
+
+def _run_agent_loop(
+  wid: str,
+  sess: str,
+  messages: List[dict],
+  model: Optional[str],
+  max_iterations: int = 10,
+  max_tokens: int = 900,
+  temperature: float = 0.2,
+) -> AiAssistResponse:
+  """Agent モード: 安全な <command> を自動実行し、出力を受け取って推論を続ける。
+  危険そうなコマンドは実行せず、ユーザー承認用に返す。
+  """
+  for _ in range(max_iterations):
+    response = _call_llm_messages(messages, max_tokens=max_tokens, temperature=temperature, model=model)
+    cmd = _extract_command_from_response(response)
+    if not cmd:
+      return AiAssistResponse(result=response)
+    if _is_potentially_destructive_command(cmd):
+      cleaned = _strip_command_tags(response)
+      if not cleaned:
+        cleaned = f"危険な可能性があるコマンドのため自動実行できません。\n\n提案コマンド:\n{cmd}"
+      return AiAssistResponse(result=cleaned, command=cmd, needsApproval=True)
+    rt_resp, rt_error = _post_command_via_rt_with_response(wid, sess, cmd, timeout=120)
+    if rt_resp is not None:
+      out = rt_resp.get("output", "")
+      exit_code = rt_resp.get("exitCode", 0)
+      if len(out) > 8000:
+        out = "... (truncated) ...\n" + out[-8000:]
+      feedback = f"[Command executed]\n$ {cmd}\n\nExit code: {exit_code}\n\nOutput:\n{out}"
+    else:
+      feedback = f"[Command failed - terminal unavailable]\n$ {cmd}\n\nError: {rt_error}\n\nContinue without running more commands; provide your answer based on what you know."
+    messages.append({"role": "assistant", "content": response})
+    messages.append({"role": "user", "content": feedback})
+  final = _call_llm_messages(messages, max_tokens=max_tokens, temperature=temperature, model=model)
+  return AiAssistResponse(result=final)
+
+
+class AiAssistResponse(BaseModel):
+  result: str
+  command: Optional[str] = None
+  needsApproval: bool = False
+
+
 @app.post("/watchers/{wid}/sessions/{sess}/ai-assist")
 def ai_assist(wid: str, sess: str, payload: AiAssistPayload):
-  # Validate session access first
   session_root(wid, sess)
   if not payload.prompt.strip():
     raise HTTPException(status_code=400, detail="prompt is required")
 
-  system_prompt = (
-    "You are an expert software engineer. Keep responses concise and return only code text "
-    "that can directly replace the target scope."
-  )
-  user_prompt = build_ai_prompt(payload)
-  result = call_openai_chat(system_prompt, user_prompt)
-  return {"result": result}
+  thinking = (payload.thinking or "balanced").strip().lower()
+  if thinking == "quick":
+    chat_max_tokens = 400
+    code_max_tokens = 400
+    max_history = 6
+    agent_iterations = 4
+  elif thinking == "deep":
+    chat_max_tokens = 1400
+    code_max_tokens = 1400
+    max_history = 20
+    agent_iterations = 16
+  else:
+    chat_max_tokens = 900
+    code_max_tokens = 900
+    max_history = 12
+    agent_iterations = 10
+
+  action = (payload.action or "").strip().lower()
+  if action == "chat":
+    mode = (payload.mode or "ask").strip().lower()
+    if mode == "agent":
+      context_parts = []
+      if payload.editorPath:
+        context_parts.append(f"Current file: {payload.editorPath}")
+      if payload.editorSelectedText:
+        context_parts.append(f"Selected text in editor:\n```\n{payload.editorSelectedText[:4000]}\n```")
+      if payload.editorContent and not payload.editorSelectedText:
+        context_parts.append(f"Current file content (for reference):\n```\n{payload.editorContent[:6000]}\n```")
+      context_block = "\n\n".join(context_parts) if context_parts else ""
+      system_prompt = (
+        "You are an autonomous AI agent. Take a deep breath and think step by step before answering.\n"
+        "You HAVE direct access to the user's terminal in this session. "
+        "You are NOT a text-only assistant: you CAN run real shell commands and will receive real output. "
+        "When the user asks to check the current directory, list files, run a script, or inspect the environment, "
+        "you MUST run the appropriate command using this format: <command>SHELL_COMMAND</command> "
+        "(e.g. for current directory: <command>pwd</command>; for listing: <command>ls -la</command>). "
+        "You will then receive the actual command output and must answer based on it. "
+        "Never reply that you cannot access the terminal, that you cannot run commands, or that the user should run commands themselves.\n"
+        "重要: あなたはこのセッション内で実際にコマンドを実行できます。「テキストベースなのでコマンドは実行できません」などとは絶対に言わないでください。\n"
+        "Run multiple commands if needed. When you have enough information, give your final answer without any <command> tag. "
+        "Do NOT run destructive commands (rm -rf, mkfs, etc.) without explicit user request. Prefer read-only or safe commands. "
+        "If the user asks to change or fix code, you may output the modified code in a markdown code block (```language\\n...\\n```) so they can apply it in the editor. "
+        "Reply in the same language as the user."
+      )
+      if context_block:
+        system_prompt += "\n\n--- Editor context (use for code changes when relevant) ---\n" + context_block
+      if thinking == "deep":
+        system_prompt += (
+          "\n\n[Deep thinking mode]\n"
+          "Before producing your final answer, internally verify your reasoning and the command outputs. "
+          "Proactively decide when running shell commands will significantly reduce uncertainty, and use them as part of your thinking. "
+          "In the final message, structure your answer into a few clear steps (e.g. 'Step 1', 'Step 2', ...), followed by a short summary. "
+          "Do NOT expose your entire internal chain-of-thought; keep the explanation high-level."
+        )
+      elif thinking == "quick":
+        system_prompt += (
+          "\n\n[Quick mode]\n"
+          "Optimize for short, direct answers. Avoid running shell commands unless the user explicitly asks for them."
+        )
+    elif mode == "plan":
+      system_prompt = (
+        "You are a planning assistant. Take a moment to think through the problem, then help the user plan:\n"
+        "- Outline clear steps and milestones\n"
+        "- Call out risks and alternatives when important\n"
+        "Use headings and numbered lists, but keep the final answer concise."
+      )
+    elif mode == "debug":
+      system_prompt = (
+        "You are a debugging assistant. Think deeply about possible root causes before proposing fixes.\n"
+        "Analyze errors, propose hypotheses, and then suggest concrete fixes. "
+        "Explain root causes in plain text; include code snippets only when relevant."
+      )
+    else:
+      system_prompt = "You are a helpful assistant. Reply concisely. Use plain text, no code fences unless the user asks for code."
+    if mode != "agent":
+      if thinking == "deep":
+        system_prompt += (
+          "\n\n[Deep thinking mode]\n"
+          "Take a moment to reason internally about multiple possibilities and sanity-check your final answer. "
+          "In the final output, present 2–4 concise steps (or sections) that show the high-level flow of your reasoning, "
+          "followed by a short conclusion. Do not expose every tiny internal reasoning step."
+        )
+      elif thinking == "quick":
+        system_prompt += (
+          "\n\n[Quick mode]\n"
+          "Answer in a single short paragraph or list when possible. Focus on the most important points only."
+        )
+    history = payload.history or []
+    history = history[-max_history:]
+    messages = [{"role": "system", "content": system_prompt}]
+    for m in history:
+      role = (m.role or "user").strip().lower()
+      if role not in ("user", "assistant"):
+        role = "user"
+      messages.append({"role": role, "content": (m.content or "").strip()})
+    user_content = payload.prompt.strip()
+    if mode == "agent" and (payload.editorPath or payload.editorSelectedText or payload.editorContent):
+      user_content = "[User request]\n" + user_content
+    messages.append({"role": "user", "content": user_content})
+    if mode == "agent":
+      agent_res = _run_agent_loop(
+        wid,
+        sess,
+        messages,
+        payload.model,
+        max_iterations=agent_iterations,
+        max_tokens=chat_max_tokens,
+      )
+      return agent_res
+    else:
+      result = _call_llm_messages(messages, max_tokens=chat_max_tokens, temperature=0.2, model=payload.model)
+  else:
+    mode = (payload.mode or "ask").strip().lower()
+    if mode == "agent":
+      system_prompt = (
+        "You are an autonomous coding agent. Take a deep breath and think step by step about the best change.\n"
+        "Break down the request into steps, apply changes, and return only the final code text that can directly "
+        "replace the target scope. No markdown fences. Do not use placeholder code like '...' – always return "
+        "complete, compilable code."
+      )
+    elif mode == "plan":
+      system_prompt = (
+        "You are a planning-oriented coding assistant. First reason about the best approach, then outline it briefly. "
+        "Finally, return only the code text that can directly replace the target scope. No markdown fences."
+      )
+    elif mode == "debug":
+      system_prompt = (
+        "You are a debugging expert. Think carefully about likely root causes, then fix the issue and return only the "
+        "corrected code text that can directly replace the target scope. No markdown fences and no placeholder code."
+      )
+    else:
+      system_prompt = (
+        "You are an expert software engineer. Keep responses concise and return only code text "
+        "that can directly replace the target scope."
+      )
+    user_prompt = build_ai_prompt(payload)
+    result = _call_llm(system_prompt, user_prompt, max_tokens=code_max_tokens, temperature=0.2, model=payload.model)
+  return AiAssistResponse(result=result)
 
 
 @app.post("/watchers/{wid}/sessions/{sess}/ai-inline")
@@ -1571,24 +2070,81 @@ def ai_inline(wid: str, sess: str, payload: AiInlinePayload):
   if not prefix.strip():
     return {"completion": ""}
 
+  prefix_last_line = prefix.split("\n")[-1] if prefix else ""
+  base_indent = ""
+  for c in prefix_last_line:
+    if c in " \t":
+      base_indent += c
+    else:
+      break
+
   system_prompt = (
-    "You are an inline code completion engine. "
-    "Return only the immediate continuation text. "
-    "Do not add markdown, code fences, or explanations."
+    "You are an inline code completion engine. Output only the completion text. No markdown, no code fences, no explanations. "
+    "The cursor is at the end of the last line of 'Text before cursor'. "
+    "RULE 1: If the completion should start on a NEW line (e.g. after ':', after '{', function/block body), start your output with a newline and then indented lines. "
+    "RULE 2: Do NOT put block bodies on the same line. Use newlines: after 'def foo():' or '{' output a newline then indentation then the body. "
+    "RULE 3: First line of your output = continuation of the current line (no leading spaces). Any further lines must start with the same indentation as the last line of 'Text before cursor' (or deeper for nested blocks). "
+    "Use spaces or tabs to match the file. Preserve indentation."
   )
   user_prompt = (
     f"Language: {payload.language or 'unknown'}\n"
     f"File: {payload.path}\n\n"
-    "Complete the code at the cursor.\n"
+    "Complete the code at the cursor. Use newlines and indentation for blocks (do not put everything on one line).\n\n"
     "Text before cursor:\n"
     f"{prefix}\n\n"
     "Text after cursor:\n"
     f"{suffix}\n"
   )
-  out = call_openai_chat_limited(system_prompt, user_prompt, max_tokens=120)
-  # Safety trim: one suggestion block only
-  out = out.replace("\r\n", "\n")
-  return {"completion": out}
+  out = call_openai_chat_limited(system_prompt, user_prompt, max_tokens=256, model=payload.model)
+  out = out.replace("\r\n", "\n").strip()
+  lines = out.split("\n")
+  if lines and lines[0].strip().startswith("```"):
+    first = lines[0].strip().lstrip("`").strip()
+    if first.startswith("python"):
+      first = first[6:].strip()
+      if first:
+        lines[0] = first
+      else:
+        lines = lines[1:]
+    elif first.startswith("py"):
+      first = first[2:].strip()
+      if first:
+        lines[0] = first
+      else:
+        lines = lines[1:]
+    else:
+      lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+      lines = lines[:-1]
+  completion = "\n".join(lines).strip()
+  if completion:
+    last_stripped = prefix_last_line.rstrip()
+    if last_stripped and last_stripped[-1] in ")]}\";'":
+      if not (completion.startswith("\n") or completion.startswith(" ")):
+        first = completion.lstrip()
+        if first and (first[0].isalpha() or first[0] in "."):
+          completion = "\n" + completion
+  if base_indent and completion:
+    out_lines = completion.split("\n")
+    normalized = [out_lines[0]]
+    for line in out_lines[1:]:
+      leading = ""
+      for c in line:
+        if c in " \t":
+          leading += c
+        else:
+          break
+      if len(leading) < len(base_indent):
+        normalized.append(base_indent + line.lstrip(" \t"))
+      else:
+        normalized.append(line)
+    completion = "\n".join(normalized)
+  max_lines = 25
+  if completion.count("\n") >= max_lines:
+    completion = "\n".join(completion.split("\n")[:max_lines])
+  if len(completion) > 1500:
+    completion = completion[:1500].rsplit("\n", 1)[0] if "\n" in completion[:1500] else completion[:1500]
+  return {"completion": completion}
 
 
 @app.get("/watchers/{wid}/sessions/{sess}/runner-config", response_model=Optional[RunnerConfigModel])

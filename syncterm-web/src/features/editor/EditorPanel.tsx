@@ -4,9 +4,11 @@ import type { Monaco } from "@monaco-editor/react";
 import type { editor as MonacoEditorType, IDisposable } from "monaco-editor";
 import { useSession } from "../session/SessionContext";
 import { api } from "../../lib/api";
+import { getStoredAiModel } from "./AiChatPanel";
 import { isImagePath } from "../../lib/fileType";
-import { detectEditorLanguage } from "../../lib/editorLanguage";
+import { detectEditorLanguage, INLINE_COMPLETION_LANGUAGES } from "../../lib/editorLanguage";
 import { usePreferences } from "../preferences/PreferencesContext";
+import { useActiveEditor } from "./ActiveEditorContext";
 
 interface OpenFile {
   path: string;
@@ -86,15 +88,28 @@ function trimEchoedPrefix(prefix: string, completion: string): string {
 }
 
 function sanitizeInlineCompletion(raw: string, prefix: string): string {
-  let text = (raw || "").replace(/\r\n/g, "\n");
+  let text = (raw || "").replace(/\r\n/g, "\n").trim();
+  if (!text) return "";
+  const lines = text.split("\n");
+  const firstLineContent = lines[0] ?? "";
+  if (firstLineContent.includes("```")) return "";
+  const firstLineTrimmed = trimEchoedPrefix(prefix, firstLineContent);
+  const restLines = lines.slice(1);
+  text = restLines.length > 0 ? [firstLineTrimmed, ...restLines].join("\n") : firstLineTrimmed;
   if (!text.trim()) return "";
-  if (text.includes("```")) return "";
-  text = text.split("\n", 1)[0].replace(/\s+$/, "");
-  text = trimEchoedPrefix(prefix, text);
-  if (!text.trim()) return "";
-  if (text.length > 160) text = text.slice(0, 160).replace(/\s+$/, "");
-  const lower = text.toLowerCase();
-  if (lower.startsWith("import ") || lower.startsWith("from ")) {
+  const maxLen = 800;
+  const maxLines = 25;
+  const outLines = text.split("\n");
+  if (outLines.length > maxLines) {
+    text = outLines.slice(0, maxLines).join("\n");
+  }
+  if (text.length > maxLen) {
+    const truncated = text.slice(0, maxLen);
+    const lastNewline = truncated.lastIndexOf("\n");
+    text = lastNewline > 0 ? truncated.slice(0, lastNewline + 1) : truncated;
+  }
+  const lower = text.trimStart().toLowerCase();
+  if (text.length > 15 && (lower.startsWith("import ") || lower.startsWith("from "))) {
     return "";
   }
   return text;
@@ -115,12 +130,8 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
   const [saveBadge, setSaveBadge] = useState<"saved" | "error" | null>(null);
   const [editorInstance, setEditorInstance] = useState<MonacoEditorType.IStandaloneCodeEditor | null>(null);
   const [monacoInstance, setMonacoInstance] = useState<Monaco | null>(null);
-  const [aiPrompt, setAiPrompt] = useState("");
-  const [aiAction, setAiAction] = useState("refactor");
-  const [aiResult, setAiResult] = useState("");
-  const [aiLoading, setAiLoading] = useState(false);
-  const [aiError, setAiError] = useState<string | null>(null);
   const inlineReqSeqRef = useRef(0);
+  const { setActiveEditorState, registerApplyToSelection, registerAppendAtCursor } = useActiveEditor();
   const isImageFile = !!filePath && isImagePath(filePath);
   const file = filePath ? filesByPath[filePath] ?? null : null;
   const filesByPathRef = useRef<Record<string, OpenFile>>({});
@@ -276,70 +287,81 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
     await editorInstance.getAction("editor.action.commentLine")?.run();
   };
 
-  const handleAiAssist = async () => {
-    const activePath = filePathRef.current;
-    const watcherId = watcherIdRef.current;
-    const sessionName = sessionNameRef.current;
-    if (!activePath || !watcherId || !sessionName || !editorInstance) return;
-    const activeFile = filesByPathRef.current[activePath];
-    if (!activeFile) return;
-    setAiLoading(true);
-    setAiError(null);
-    try {
-      const selection = editorInstance.getSelection();
+  useEffect(() => {
+    if (!editorInstance || !file) {
+      setActiveEditorState({ path: null, content: "", selectedText: "" });
+      return;
+    }
+    const updateContent = () => {
+      setActiveEditorState({ path: file.path, content: editorInstance.getValue() });
+    };
+    updateContent();
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const d = editorInstance.onDidChangeModelContent(() => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(updateContent, 400);
+    });
+    return () => {
+      if (timer) clearTimeout(timer);
+      d.dispose();
+    };
+  }, [editorInstance, file?.path, setActiveEditorState]);
+
+  useEffect(() => {
+    if (!editorInstance) return;
+    const updateSelection = () => {
+      const sel = editorInstance.getSelection();
       const selectedText =
-        selection && !selection.isEmpty() ? editorInstance.getModel()?.getValueInRange(selection) ?? "" : "";
-      const res = await api.runAiAssist(watcherId, sessionName, {
-        path: activePath,
-        action: aiAction,
-        prompt: aiPrompt.trim() || "Improve this code",
-        selectedText,
-        fileContent: editorInstance.getValue()
-      });
-      setAiResult(res.result || "");
-    } catch (e) {
-      setAiError(e instanceof Error ? e.message : "AI assist failed");
-    } finally {
-      setAiLoading(false);
-    }
-  };
+        sel && !sel.isEmpty() ? editorInstance.getModel()?.getValueInRange(sel) ?? "" : "";
+      setActiveEditorState({ selectedText });
+    };
+    updateSelection();
+    const d = editorInstance.onDidChangeCursorSelection(updateSelection);
+    return () => d.dispose();
+  }, [editorInstance, setActiveEditorState]);
 
-  const applyAiToSelection = () => {
-    if (!editorInstance || !aiResult) return;
-    const selection = editorInstance.getSelection();
-    if (!selection || selection.isEmpty()) return;
-    const model = editorInstance.getModel();
-    if (!model) return;
-    editorInstance.executeEdits("ai-assist", [{ range: selection, text: aiResult, forceMoveMarkers: true }]);
-    const next = model.getValue();
-    if (filePathRef.current) {
-      setFilesByPath((prev) => {
-        const cur = prev[filePathRef.current as string];
-        if (!cur) return prev;
-        return { ...prev, [filePathRef.current as string]: { ...cur, content: next, isDirty: true } };
-      });
+  useEffect(() => {
+    if (!editorInstance || !monacoInstance) {
+      registerApplyToSelection(null);
+      registerAppendAtCursor(null);
+      return;
     }
-  };
-
-  const appendAiResult = () => {
-    if (!editorInstance || !aiResult || !monacoInstance) return;
     const model = editorInstance.getModel();
-    if (!model) return;
-    const lastLine = model.getLineCount();
-    const lastCol = model.getLineMaxColumn(lastLine);
-    const range = new monacoInstance.Range(lastLine, lastCol, lastLine, lastCol);
-    editorInstance.executeEdits("ai-assist", [
-      { range, text: `\n\n${aiResult}\n`, forceMoveMarkers: true }
-    ]);
-    const next = model.getValue();
-    if (filePathRef.current) {
-      setFilesByPath((prev) => {
-        const cur = prev[filePathRef.current as string];
-        if (!cur) return prev;
-        return { ...prev, [filePathRef.current as string]: { ...cur, content: next, isDirty: true } };
-      });
-    }
-  };
+    registerApplyToSelection((text: string) => {
+      const sel = editorInstance.getSelection();
+      if (!sel || sel.isEmpty()) return;
+      editorInstance.executeEdits("ai-assist", [{ range: sel, text, forceMoveMarkers: true }]);
+      const m = editorInstance.getModel();
+      if (m && filePathRef.current) {
+        setFilesByPath((prev) => {
+          const cur = prev[filePathRef.current!];
+          if (!cur) return prev;
+          return { ...prev, [filePathRef.current!]: { ...cur, content: m.getValue(), isDirty: true } };
+        });
+      }
+    });
+    registerAppendAtCursor((text: string) => {
+      const m = editorInstance.getModel();
+      if (!m) return;
+      const lastLine = m.getLineCount();
+      const lastCol = m.getLineMaxColumn(lastLine);
+      const range = new monacoInstance.Range(lastLine, lastCol, lastLine, lastCol);
+      editorInstance.executeEdits("ai-assist", [
+        { range, text: `\n\n${text}\n`, forceMoveMarkers: true }
+      ]);
+      if (filePathRef.current) {
+        setFilesByPath((prev) => {
+          const cur = prev[filePathRef.current!];
+          if (!cur) return prev;
+          return { ...prev, [filePathRef.current!]: { ...cur, content: m.getValue(), isDirty: true } };
+        });
+      }
+    });
+    return () => {
+      registerApplyToSelection(null);
+      registerAppendAtCursor(null);
+    };
+  }, [editorInstance, monacoInstance, registerApplyToSelection, registerAppendAtCursor]);
 
   useEffect(() => {
     if (!editorInstance || !monacoInstance) return;
@@ -391,18 +413,21 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
     };
   }, [editorInstance, monacoInstance, preferences.editorKeymap, file?.path, currentWatcher?.id, currentSession?.name]);
 
-  // AI inline completion provider (ghost text).
+  // AI inline completion provider (ghost text). 複数言語に登録して言語不一致で呼ばれないことを防ぐ。
   useEffect(() => {
     if (!editorInstance || !monacoInstance || !file || !currentWatcher || !currentSession) return;
     const model = editorInstance.getModel();
     if (!model) return;
     const language = detectEditorLanguage(file.path);
     let disposed = false;
-    const providerDisposable = monacoInstance.languages.registerInlineCompletionsProvider(language, {
-      provideInlineCompletions: async (m, position, _context, _token) => {
-        if (disposed || file.isChunked) {
-          return { items: [] };
-        }
+    const provider = {
+      provideInlineCompletions: async (
+        m: MonacoEditorType.ITextModel,
+        position: MonacoEditorType.Position,
+        _context: unknown,
+        _token: unknown
+      ) => {
+        if (disposed || file.isChunked) return { items: [] };
         const prefix = m.getValueInRange(
           new monacoInstance.Range(1, 1, position.lineNumber, position.column)
         );
@@ -414,19 +439,27 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
             m.getLineMaxColumn(m.getLineCount())
           )
         );
-        // Avoid excessive requests for extremely short context.
         if (prefix.trim().length < 2) return { items: [] };
         const reqId = ++inlineReqSeqRef.current;
+        const log = import.meta.env?.DEV ? console.log : () => {};
         try {
+          log("[inline] requesting", { path: file.path, prefixLen: prefix.length });
+          const model = getStoredAiModel(currentWatcher.id, currentSession.name) ?? undefined;
           const out = await api.getAiInlineCompletion(currentWatcher.id, currentSession.name, {
             path: file.path,
             prefix,
             suffix,
-            language
+            language,
+            model
           });
           if (disposed || reqId !== inlineReqSeqRef.current) return { items: [] };
-          const text = sanitizeInlineCompletion(out.completion || "", prefix);
-          if (!text) return { items: [] };
+          const raw = (out.completion || "").trim();
+          const text = sanitizeInlineCompletion(raw, prefix);
+          if (!text) {
+            if (raw && import.meta.env?.DEV) console.warn("[inline] sanitize dropped", { raw: raw.slice(0, 80) });
+            return { items: [] };
+          }
+          log("[inline] got suggestion", text.slice(0, 40));
           return {
             items: [
               {
@@ -440,30 +473,39 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
               }
             ]
           };
-        } catch {
+        } catch (e) {
+          if (typeof console !== "undefined" && console.warn) {
+            console.warn("[inline] AI inline completion failed", e);
+          }
           return { items: [] };
         }
       },
-      freeInlineCompletions: () => {}
-    });
+      freeInlineCompletions: () => {},
+      disposeInlineCompletions: () => {}
+    };
+    const disposables = INLINE_COMPLETION_LANGUAGES.map((lang) =>
+      monacoInstance.languages.registerInlineCompletionsProvider(lang, provider)
+    );
     return () => {
       disposed = true;
-      providerDisposable.dispose();
+      disposables.forEach((d) => d.dispose());
     };
   }, [editorInstance, monacoInstance, file?.path, file?.isChunked, currentWatcher?.id, currentSession?.name]);
 
-  // Trigger inline suggestions shortly after typing so ghost text appears consistently.
+  // Trigger inline suggestions after typing so ghost text appears.
   useEffect(() => {
     if (!editorInstance || !file || file.isChunked) return;
     const model = editorInstance.getModel();
     if (!model) return;
 
     let timer: ReturnType<typeof setTimeout> | null = null;
+    const trigger = () => {
+      const action = editorInstance.getAction("editor.action.inlineSuggest.trigger");
+      if (action) void action.run();
+    };
     const disposable = editorInstance.onDidChangeModelContent(() => {
       if (timer) clearTimeout(timer);
-      timer = setTimeout(() => {
-        void editorInstance.getAction("editor.action.inlineSuggest.trigger")?.run();
-      }, 220);
+      timer = setTimeout(trigger, 350);
     });
 
     return () => {
@@ -610,57 +652,6 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
               }}
               options={monacoOptions}
             />
-            {preferences.showAiAssistPanel && (
-              <div className="ai-assist-panel">
-                <div className="ai-assist-row">
-                  <select
-                    className="session-select"
-                    value={aiAction}
-                    onChange={(e) => setAiAction(e.target.value)}
-                  >
-                    <option value="refactor">Refactor</option>
-                    <option value="fix">Fix</option>
-                    <option value="explain">Explain as code comments</option>
-                    <option value="generate">Generate code</option>
-                  </select>
-                  <input
-                    className="terminal-input"
-                    value={aiPrompt}
-                    onChange={(e) => setAiPrompt(e.target.value)}
-                    placeholder="AI instruction..."
-                  />
-                  <button className="primary-button" disabled={aiLoading} onClick={() => void handleAiAssist()}>
-                    {aiLoading ? "Thinking..." : "AI Assist"}
-                  </button>
-                </div>
-                {aiError && (
-                  <div className="pane-empty" style={{ color: "#fca5a5", paddingTop: 6 }}>
-                    {aiError}
-                  </div>
-                )}
-                {aiResult && (
-                  <div className="ai-assist-result">
-                    <div className="ai-assist-actions">
-                      <button
-                        className="icon-button"
-                        style={{ width: "auto", padding: "0 0.7rem" }}
-                        onClick={applyAiToSelection}
-                      >
-                        Replace Selection
-                      </button>
-                      <button
-                        className="icon-button"
-                        style={{ width: "auto", padding: "0 0.7rem" }}
-                        onClick={appendAiResult}
-                      >
-                        Append Result
-                      </button>
-                    </div>
-                    <pre className="terminal-line">{aiResult}</pre>
-                  </div>
-                )}
-              </div>
-            )}
           </>
         ) : loadingPath && loadingPath === filePath ? (
           <div className="pane-empty">読み込み中...</div>

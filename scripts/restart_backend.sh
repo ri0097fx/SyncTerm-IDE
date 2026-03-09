@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Restart SyncTerm web backend (run on Relay server).
 # Example: ssh user@relay 'cd /path/to/app && ./scripts/restart_backend.sh'
+#
+# AI (Ollama): config.ini の [ai] で ollama_base_url / ollama_model / ai_provider を指定可能。
+# 未指定時はバックエンドが Ollama を優先（API キー不要）。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

@@ -1,3 +1,10 @@
+/** インライン補完プロバイダを登録する言語（すべて登録して言語不一致を防ぐ） */
+export const INLINE_COMPLETION_LANGUAGES = [
+  "typescript", "javascript", "python", "java", "go", "rust", "cpp", "c", "csharp",
+  "php", "ruby", "swift", "kotlin", "shell", "sql", "html", "css", "scss", "json",
+  "yaml", "xml", "markdown", "dockerfile", "plaintext"
+];
+
 export function detectEditorLanguage(path: string): string {
   const lower = path.toLowerCase();
 

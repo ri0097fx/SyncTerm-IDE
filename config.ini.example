@@ -27,3 +27,12 @@ registry_dir_name = _registry
 rt_port = 9001
 backend_port = 8000
 relay_local_port = 8001
+
+[ai]
+# エディタの AI アシスト用（任意）。未設定時は Ollama を優先（API キー不要）
+# 使用するプロバイダー: ollama または openai
+# ai_provider = ollama
+# Ollama の URL（Relay 上で ollama serve を起動している場合）
+# ollama_base_url = http://127.0.0.1:11434
+# Ollama のモデル名（軽量: qwen2.5-coder:1.5b / 標準: qwen2.5-coder:7b）
+# ollama_model = qwen2.5-coder:7b

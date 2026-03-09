@@ -16,6 +16,10 @@ export const SessionBar: React.FC = () => {
   const [rtStatus, setRtStatus] = React.useState<RtStatus | null>(null);
   const [rtDiagnosticError, setRtDiagnosticError] = React.useState<string | null>(null);
   const [debugRtResult, setDebugRtResult] = React.useState<{ ok: boolean; error?: string; response?: unknown } | null>(null);
+  const [aiTestResult, setAiTestResult] = React.useState<{ ok: boolean; message: string } | null>(null);
+  const [aiInlineTestResult, setAiInlineTestResult] = React.useState<{ ok: boolean; raw: string } | null>(null);
+  const [aiTestLoading, setAiTestLoading] = React.useState(false);
+  const [aiInlineTestLoading, setAiInlineTestLoading] = React.useState(false);
   const [newSessionName, setNewSessionName] = React.useState("");
   const [createSessionError, setCreateSessionError] = React.useState<string | null>(null);
   const { watchers, sessions, currentWatcher, currentSession, setWatcher, setSession, refreshWatchers, refreshSessions, runnerConfig } =
@@ -44,6 +48,46 @@ export const SessionBar: React.FC = () => {
       setDebugRtResult({ ok: res.ok, error: res.error, response: res.response });
     } catch (err) {
       setDebugRtResult({ ok: false, error: err instanceof Error ? err.message : "接続テストに失敗しました" });
+    }
+  };
+
+  const handleAiAssistTest = async () => {
+    if (!currentWatcher || !currentSession) return;
+    setAiTestResult(null);
+    setAiTestLoading(true);
+    try {
+      const res = await api.runAiAssist(currentWatcher.id, currentSession.name, {
+        path: "",
+        action: "chat",
+        prompt: "Say exactly: OK",
+        fileContent: "",
+        history: []
+      });
+      setAiTestResult({ ok: true, message: (res.result ?? "").trim() || "(empty reply)" });
+    } catch (err) {
+      setAiTestResult({ ok: false, message: err instanceof Error ? err.message : "Request failed" });
+    } finally {
+      setAiTestLoading(false);
+    }
+  };
+
+  const handleAiInlineTest = async () => {
+    if (!currentWatcher || !currentSession) return;
+    setAiInlineTestResult(null);
+    setAiInlineTestLoading(true);
+    try {
+      const res = await api.getAiInlineCompletion(currentWatcher.id, currentSession.name, {
+        path: "test.py",
+        prefix: "def hello",
+        suffix: "",
+        language: "python"
+      });
+      const raw = (res.completion ?? "").trim();
+      setAiInlineTestResult({ ok: true, raw: raw || "(空)" });
+    } catch (err) {
+      setAiInlineTestResult({ ok: false, raw: err instanceof Error ? err.message : "Request failed" });
+    } finally {
+      setAiInlineTestLoading(false);
     }
   };
 
@@ -146,19 +190,9 @@ export const SessionBar: React.FC = () => {
               className="icon-button"
               style={{ width: "auto", padding: "0 0.5rem", marginLeft: "0.5rem" }}
               onClick={handleRtDiagnostic}
-              title="RT 接続診断（rt_port の有無を確認）"
+              title="診断（RT・AI 動作確認・キャッシュ削除）"
             >
-              接続診断
-            </button>
-          )}
-          {currentWatcher && currentSession && (
-            <button
-              className="icon-button"
-              style={{ width: "auto", padding: "0 0.5rem", marginLeft: "0.25rem" }}
-              onClick={handleCleanupStaged}
-              title="Staged キャッシュと commands を一括削除"
-            >
-              キャッシュ・commands 削除
+              診断
             </button>
           )}
           {currentWatcher && currentSession && (
@@ -169,6 +203,16 @@ export const SessionBar: React.FC = () => {
               title="GPU 状態 (nvidia-smi) を逐次表示"
             >
               GPU
+            </button>
+          )}
+          {currentWatcher && currentSession && (
+            <button
+              className={`icon-button${preferences.showAiChatPanel ? " active" : ""}`}
+              style={{ width: "auto", padding: "0 0.5rem", marginLeft: "0.25rem" }}
+              onClick={() => updatePreferences({ showAiChatPanel: !preferences.showAiChatPanel })}
+              title="AI チャット・動作確認"
+            >
+              AI
             </button>
           )}
           {cleanupMessage && (
@@ -196,53 +240,97 @@ export const SessionBar: React.FC = () => {
       </header>
 
       {showRtDiagnostic && (
-        <div className="modal-overlay" onClick={() => { setShowRtDiagnostic(false); setRtStatus(null); setRtDiagnosticError(null); setDebugRtResult(null); }}>
+        <div className="modal-overlay" onClick={() => { setShowRtDiagnostic(false); setRtStatus(null); setRtDiagnosticError(null); setDebugRtResult(null); setAiTestResult(null); setAiInlineTestResult(null); }}>
           <div className="modal-card preferences-modal" style={{ maxWidth: "420px" }} onClick={(e) => e.stopPropagation()}>
-            <h3 className="modal-title">接続診断（RT）</h3>
-            {rtDiagnosticError && (
-              <p style={{ color: "var(--error)", marginBottom: "0.5rem" }}>{rtDiagnosticError}</p>
-            )}
-            {rtStatus && (
-              <div style={{ fontFamily: "monospace", fontSize: "0.9rem", marginBottom: "0.75rem" }}>
-                <p><strong>registry_root:</strong> {rtStatus.registry_root}</p>
-                <p><strong>rt_port ファイル:</strong> {rtStatus.rt_port_file_exists ? "あり" : "なし"}</p>
-                <p><strong>rt_port:</strong> {rtStatus.rt_port ?? "—"}</p>
-                {!rtStatus.rt_port_file_exists && (
-                  <p style={{ marginTop: "0.5rem", color: "var(--text-muted)", fontSize: "0.85rem" }}>
-                    Relay に <code>_registry/{currentWatcher?.id}.rt_port</code> がありません。Watcher と Relay の config.ini の base_path を一致させ、Watcher 側で rsync を実行してください。
-                  </p>
-                )}
-                {rtStatus.rt_port_file_exists && rtStatus.rt_port != null && (
-                  <p style={{ marginTop: "0.5rem", color: "var(--text-muted)", fontSize: "0.85rem" }}>
-                    rt_port はあります。コマンドが届かない場合は「RT 接続テスト」で Relay→Watcher の HTTP を確認してください。
-                  </p>
-                )}
-              </div>
-            )}
-            {currentWatcher && currentSession && rtStatus?.rt_port != null && (
-              <div style={{ marginBottom: "0.75rem" }}>
-                <button
-                  type="button"
-                  className="icon-button"
-                  style={{ width: "auto", padding: "0 0.6rem" }}
-                  onClick={handleDebugRt}
-                  title="Relay から Watcher へ HTTP で echo コマンドを送り、応答を確認"
-                >
-                  RT 接続テスト
+            <h3 className="modal-title">診断（RT・AI・キャッシュ）</h3>
+
+            <section style={{ marginBottom: "1rem" }}>
+              <h4 style={{ fontSize: "0.95rem", marginBottom: "0.5rem" }}>RT 接続</h4>
+              {rtDiagnosticError && (
+                <p style={{ color: "var(--error)", marginBottom: "0.5rem" }}>{rtDiagnosticError}</p>
+              )}
+              {rtStatus && (
+                <div style={{ fontFamily: "monospace", fontSize: "0.9rem", marginBottom: "0.5rem" }}>
+                  <p><strong>registry_root:</strong> {rtStatus.registry_root}</p>
+                  <p><strong>rt_port ファイル:</strong> {rtStatus.rt_port_file_exists ? "あり" : "なし"}</p>
+                  <p><strong>rt_port:</strong> {rtStatus.rt_port ?? "—"}</p>
+                  {!rtStatus.rt_port_file_exists && (
+                    <p style={{ marginTop: "0.5rem", color: "var(--text-muted)", fontSize: "0.85rem" }}>
+                      Relay に <code>_registry/{currentWatcher?.id}.rt_port</code> がありません。Watcher と Relay の config.ini の base_path を一致させ、Watcher 側で rsync を実行してください。
+                    </p>
+                  )}
+                  {rtStatus.rt_port_file_exists && rtStatus.rt_port != null && (
+                    <p style={{ marginTop: "0.5rem", color: "var(--text-muted)", fontSize: "0.85rem" }}>
+                      rt_port はあります。コマンドが届かない場合は「RT 接続テスト」で Relay→Watcher の HTTP を確認してください。
+                    </p>
+                  )}
+                </div>
+              )}
+              {currentWatcher && (
+                <button type="button" className="icon-button" style={{ width: "auto", padding: "0 0.6rem", marginRight: "0.35rem" }} onClick={handleRtDiagnostic} title="RT 状態を取得">
+                  {rtStatus ? "再取得" : "取得"}
                 </button>
-                {debugRtResult && (
-                  <div style={{ marginTop: "0.5rem", fontSize: "0.9rem" }}>
-                    {debugRtResult.ok ? (
-                      <p style={{ color: "var(--success, green)" }}>接続成功（Watcher が応答しました）</p>
-                    ) : (
-                      <p style={{ color: "var(--error)" }}>失敗: {debugRtResult.error}</p>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
+              )}
+              {currentWatcher && currentSession && rtStatus?.rt_port != null && (
+                <>
+                  <button type="button" className="icon-button" style={{ width: "auto", padding: "0 0.6rem" }} onClick={handleDebugRt} title="Relay から Watcher へ HTTP で echo コマンドを送り、応答を確認">
+                    RT 接続テスト
+                  </button>
+                  {debugRtResult && (
+                    <div style={{ marginTop: "0.5rem", fontSize: "0.9rem" }}>
+                      {debugRtResult.ok ? (
+                        <p style={{ color: "var(--success, green)" }}>接続成功（Watcher が応答しました）</p>
+                      ) : (
+                        <p style={{ color: "var(--error)" }}>失敗: {debugRtResult.error}</p>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+            </section>
+
+            <section style={{ marginBottom: "1rem" }}>
+              <h4 style={{ fontSize: "0.95rem", marginBottom: "0.5rem" }}>AI 動作確認</h4>
+              {currentWatcher && currentSession ? (
+                <>
+                  <button type="button" className="primary-button" disabled={aiTestLoading} onClick={handleAiAssistTest} style={{ marginRight: "0.35rem" }}>
+                    {aiTestLoading ? "送信中…" : "AI アシスト接続テスト"}
+                  </button>
+                  <button type="button" className="primary-button" disabled={aiInlineTestLoading} onClick={handleAiInlineTest}>
+                    {aiInlineTestLoading ? "取得中…" : "インライン補完 API テスト"}
+                  </button>
+                  {aiTestResult && (
+                    <div className={`ai-chat-test-result ${aiTestResult.ok ? "ok" : "ng"}`} style={{ marginTop: "0.5rem" }}>
+                      {aiTestResult.ok ? "OK" : "エラー"}: {aiTestResult.message}
+                    </div>
+                  )}
+                  {aiInlineTestResult && (
+                    <div className={`ai-chat-test-result ${aiInlineTestResult.ok ? "ok" : "ng"}`} style={{ marginTop: "0.25rem" }}>
+                      {aiInlineTestResult.ok ? "API応答" : "エラー"}: {aiInlineTestResult.raw.slice(0, 200)}{aiInlineTestResult.raw.length > 200 ? "…" : ""}
+                    </div>
+                  )}
+                  <p style={{ marginTop: "0.5rem", color: "var(--text-muted)", fontSize: "0.8rem" }}>
+                    インライン補完: ファイルを開き 2 文字以上入力後、Tab で確定。動かない場合は上で API テストを実行してください。
+                  </p>
+                </>
+              ) : (
+                <p style={{ color: "var(--text-muted)", fontSize: "0.85rem" }}>Watcher と Session を選択してください。</p>
+              )}
+            </section>
+
+            <section style={{ marginBottom: "1rem" }}>
+              <h4 style={{ fontSize: "0.95rem", marginBottom: "0.5rem" }}>キャッシュ・commands 削除</h4>
+              {currentWatcher && currentSession ? (
+                <button type="button" className="icon-button" style={{ width: "auto", padding: "0 0.6rem" }} onClick={handleCleanupStaged} title="Staged キャッシュと commands を一括削除">
+                  キャッシュ・commands 削除
+                </button>
+              ) : (
+                <p style={{ color: "var(--text-muted)", fontSize: "0.85rem" }}>Watcher と Session を選択してください。</p>
+              )}
+            </section>
+
             <div className="modal-actions">
-              <button className="primary-button" onClick={() => { setShowRtDiagnostic(false); setRtStatus(null); setRtDiagnosticError(null); setDebugRtResult(null); }}>
+              <button className="primary-button" onClick={() => { setShowRtDiagnostic(false); setRtStatus(null); setRtDiagnosticError(null); setDebugRtResult(null); setAiTestResult(null); setAiInlineTestResult(null); }}>
                 閉じる
               </button>
             </div>
@@ -358,14 +446,6 @@ export const SessionBar: React.FC = () => {
                   onChange={(e) => updatePreferences({ editorMinimap: e.target.checked })}
                 />
                 Show editor minimap
-              </label>
-              <label className="modal-label modal-checkbox">
-                <input
-                  type="checkbox"
-                  checked={preferences.showAiAssistPanel}
-                  onChange={(e) => updatePreferences({ showAiAssistPanel: e.target.checked })}
-                />
-                Show AI assist panel
               </label>
               <label className="modal-label">
                 Terminal Font Size

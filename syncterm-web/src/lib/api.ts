@@ -89,15 +89,37 @@ export interface SyncApi {
     path: string,
     signal?: AbortSignal
   ): Promise<Blob>;
+  getAiModels(watcherId: string, session: string): Promise<{ installed: string[]; suggested: string[]; provider?: string }>;
+  ensureAiModel(watcherId: string, session: string, model: string): Promise<{ ok: boolean }>;
+  /** モデル pull の進捗をストリーム。onProgress に { status, percent?, error? } が渡る。*/
+  ensureAiModelStream(
+    watcherId: string,
+    session: string,
+    model: string,
+    onProgress: (ev: { status?: string; percent?: number; error?: string }) => void
+  ): Promise<{ ok: boolean }>;
   runAiAssist(
     watcherId: string,
     session: string,
-    payload: { path: string; action: string; prompt: string; selectedText?: string; fileContent: string }
-  ): Promise<{ result: string }>;
+    payload: {
+      path: string;
+      action: string;
+      prompt: string;
+      selectedText?: string;
+      fileContent: string;
+      history?: { role: string; content: string }[];
+      model?: string;
+      mode?: string;
+      editorPath?: string;
+      editorSelectedText?: string;
+      editorContent?: string;
+      thinking?: string;
+    }
+  ): Promise<{ result: string; command?: string; needsApproval?: boolean }>;
   getAiInlineCompletion(
     watcherId: string,
     session: string,
-    payload: { path: string; prefix: string; suffix: string; language?: string }
+    payload: { path: string; prefix: string; suffix: string; language?: string; model?: string }
   ): Promise<{ completion: string }>;
 
   getRunnerConfig(watcherId: string, session: string): Promise<RunnerConfig | null>;
@@ -146,7 +168,6 @@ export interface SyncApi {
 // --------------------------------------------------------------------------------
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL ?? "http://localhost:8000";
-const AI_PROXY_URL = import.meta.env.VITE_AI_PROXY_URL ?? "http://127.0.0.1:8011";
 
 async function http<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BACKEND_URL}${path}`, {
@@ -458,21 +479,103 @@ class HttpSyncApi implements SyncApi {
     }
   }
 
+  async getAiModels(
+    watcherId: string,
+    session: string
+  ): Promise<{ installed: string[]; suggested: string[]; provider?: string }> {
+    return http<{ installed: string[]; suggested: string[]; provider?: string }>(
+      `/watchers/${encodeURIComponent(watcherId)}/sessions/${encodeURIComponent(session)}/ai-models`
+    );
+  }
+
+  async ensureAiModel(watcherId: string, session: string, model: string): Promise<{ ok: boolean }> {
+    return http<{ ok: boolean }>(
+      `/watchers/${encodeURIComponent(watcherId)}/sessions/${encodeURIComponent(session)}/ai-ensure-model`,
+      { method: "POST", body: JSON.stringify({ model }) }
+    );
+  }
+
+  async ensureAiModelStream(
+    watcherId: string,
+    session: string,
+    model: string,
+    onProgress: (ev: { status?: string; percent?: number; error?: string }) => void
+  ): Promise<{ ok: boolean }> {
+    const path = `/watchers/${encodeURIComponent(watcherId)}/sessions/${encodeURIComponent(session)}/ai-ensure-model-stream`;
+    const res = await fetch(`${BACKEND_URL}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model })
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`HTTP ${res.status}: ${text}`);
+    }
+    const reader = res.body?.getReader();
+    if (!reader) throw new Error("No body");
+    const dec = new TextDecoder();
+    let buf = "";
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const lines = buf.split("\n\n");
+        buf = lines.pop() ?? "";
+        for (const line of lines) {
+          const m = line.match(/^data:\s*(.+)$/s);
+          if (!m) continue;
+          try {
+            const ev = JSON.parse(m[1].trim()) as { status?: string; percent?: number; error?: string };
+            onProgress(ev);
+            if (ev.status === "error") throw new Error(ev.error ?? "Pull failed");
+            if (ev.status === "success") return { ok: true };
+          } catch (e) {
+            if (e instanceof SyntaxError) continue;
+            throw e;
+          }
+        }
+      }
+      if (buf.trim()) {
+        const m = buf.match(/^data:\s*(.+)$/s);
+        if (m) {
+          try {
+            const ev = JSON.parse(m[1].trim()) as { status?: string; percent?: number; error?: string };
+            onProgress(ev);
+            if (ev.status === "success") return { ok: true };
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+      return { ok: true };
+    } finally {
+      reader.releaseLock();
+    }
+  }
+
   async runAiAssist(
     watcherId: string,
     session: string,
-    payload: { path: string; action: string; prompt: string; selectedText?: string; fileContent: string }
-  ): Promise<{ result: string }> {
-    return httpBase<{ result: string }>(
-      AI_PROXY_URL,
-      `/ai-assist`,
+    payload: {
+      path: string;
+      action: string;
+      prompt: string;
+      selectedText?: string;
+      fileContent: string;
+      history?: { role: string; content: string }[];
+      model?: string;
+      mode?: string;
+      editorPath?: string;
+      editorSelectedText?: string;
+      editorContent?: string;
+    }
+  ): Promise<{ result: string; command?: string; needsApproval?: boolean }> {
+    return http<{ result: string; command?: string; needsApproval?: boolean }>(
+      `/watchers/${encodeURIComponent(watcherId)}/sessions/${encodeURIComponent(session)}/ai-assist`,
       {
         method: "POST",
-        body: JSON.stringify({
-          ...payload,
-          watcherId,
-          session
-        })
+        body: JSON.stringify(payload)
       }
     );
   }
@@ -480,18 +583,13 @@ class HttpSyncApi implements SyncApi {
   async getAiInlineCompletion(
     watcherId: string,
     session: string,
-    payload: { path: string; prefix: string; suffix: string; language?: string }
+    payload: { path: string; prefix: string; suffix: string; language?: string; model?: string }
   ): Promise<{ completion: string }> {
-    return httpBase<{ completion: string }>(
-      AI_PROXY_URL,
-      `/ai-inline`,
+    return http<{ completion: string }>(
+      `/watchers/${encodeURIComponent(watcherId)}/sessions/${encodeURIComponent(session)}/ai-inline`,
       {
         method: "POST",
-        body: JSON.stringify({
-          ...payload,
-          watcherId,
-          session
-        })
+        body: JSON.stringify(payload)
       }
     );
   }

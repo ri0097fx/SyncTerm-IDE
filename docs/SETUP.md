@@ -48,7 +48,7 @@
 サーバー、PC A（GUI）、PC B（Watcher）それぞれでリポジトリを取得します。
 
 ```bash
-git clone https://github.com/ri0097fx/SyncTerm-IDE.git
+git clone <GitHubリポジトリURL>
 cd SyncTerm-IDE
 ```
 

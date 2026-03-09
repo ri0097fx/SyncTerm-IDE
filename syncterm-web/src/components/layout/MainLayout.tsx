@@ -5,6 +5,8 @@ import { EditorPanel } from "../../features/editor/EditorPanel";
 import { ImagePreviewPanel } from "../../features/editor/ImagePreviewPanel";
 import { TerminalPanel } from "../../features/terminal/TerminalPanel";
 import { GpuStatusPanel } from "../../features/terminal/GpuStatusPanel";
+import { AiChatPanel } from "../../features/editor/AiChatPanel";
+import { ActiveEditorProvider } from "../../features/editor/ActiveEditorContext";
 import { isImagePath } from "../../lib/fileType";
 import { usePreferences } from "../../features/preferences/PreferencesContext";
 
@@ -16,12 +18,14 @@ export const MainLayout: React.FC = () => {
   const [openImagePaths, setOpenImagePaths] = useState<string[]>([]);
   const [leftPaneWidth, setLeftPaneWidth] = useState(320);
   const [bottomPaneHeight, setBottomPaneHeight] = useState(230);
-  const dragModeRef = useRef<"vertical" | "horizontal" | null>(null);
+  const [previewPaneWidth, setPreviewPaneWidth] = useState(360);
+  const dragModeRef = useRef<"vertical" | "horizontal" | "preview" | null>(null);
   const mainRef = useRef<HTMLDivElement | null>(null);
   const showImagePreviewPane = openImagePaths.length > 0;
   const showGpuPanel = preferences.showGpuPanel;
-  const showPreviewPane = showImagePreviewPane || showGpuPanel;
-  const [previewTab, setPreviewTab] = useState<"image" | "gpu">("image");
+  const showAiChatPanel = preferences.showAiChatPanel;
+  const showPreviewPane = showImagePreviewPane || showGpuPanel || showAiChatPanel;
+  const [previewTab, setPreviewTab] = useState<"image" | "gpu" | "ai">("image");
 
   const handleOpenFile = (path: string) => {
     if (isImagePath(path)) {
@@ -74,6 +78,11 @@ export const MainLayout: React.FC = () => {
         const next = e.clientX - rect.left;
         const clamped = Math.max(220, Math.min(rect.width - 320, next));
         setLeftPaneWidth(clamped);
+      } else if (dragModeRef.current === "preview") {
+        const rightEdge = rect.right;
+        const next = rightEdge - e.clientX;
+        const clamped = Math.max(260, Math.min(Math.floor(rect.width * 0.7), next));
+        setPreviewPaneWidth(clamped);
       } else {
         const nextBottom = rect.bottom - e.clientY;
         const clamped = Math.max(160, Math.min(rect.height - 200, nextBottom));
@@ -97,6 +106,7 @@ export const MainLayout: React.FC = () => {
     <div className="app-shell">
       <SessionBar />
       <div className="app-main" ref={mainRef}>
+        <ActiveEditorProvider>
         <div className="app-main-top">
           <div className="app-left-pane" style={{ width: leftPaneWidth }}>
             <FileTreePanel onOpenFile={handleOpenFile} />
@@ -119,35 +129,59 @@ export const MainLayout: React.FC = () => {
                 />
               </div>
               {showPreviewPane && (
-                <div className="image-preview-pane preview-pane-slot">
-                  {showImagePreviewPane && showGpuPanel ? (
+                <>
+                  <div
+                    className="splitter splitter-vertical splitter-preview"
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      dragModeRef.current = "preview";
+                    }}
+                  />
+                  <div
+                    className="image-preview-pane preview-pane-slot"
+                    style={{ width: previewPaneWidth, minWidth: previewPaneWidth, flex: "0 0 auto" }}
+                  >
+                  {[showImagePreviewPane, showGpuPanel, showAiChatPanel].filter(Boolean).length >= 2 ? (
                     <>
                       <div className="editor-tabs image-preview-tabs">
-                        <button
-                          type="button"
-                          className={`editor-tab${previewTab === "image" ? " active" : ""}`}
-                          onClick={() => setPreviewTab("image")}
-                        >
-                          <span className="editor-tab-label">Image Preview</span>
-                        </button>
-                        <button
-                          type="button"
-                          className={`editor-tab${previewTab === "gpu" ? " active" : ""}`}
-                          onClick={() => setPreviewTab("gpu")}
-                        >
-                          <span className="editor-tab-label">GPU</span>
-                        </button>
+                        {showImagePreviewPane && (
+                          <button
+                            type="button"
+                            className={`editor-tab${previewTab === "image" ? " active" : ""}`}
+                            onClick={() => setPreviewTab("image")}
+                          >
+                            <span className="editor-tab-label">Image</span>
+                          </button>
+                        )}
+                        {showGpuPanel && (
+                          <button
+                            type="button"
+                            className={`editor-tab${previewTab === "gpu" ? " active" : ""}`}
+                            onClick={() => setPreviewTab("gpu")}
+                          >
+                            <span className="editor-tab-label">GPU</span>
+                          </button>
+                        )}
+                        {showAiChatPanel && (
+                          <button
+                            type="button"
+                            className={`editor-tab${previewTab === "ai" ? " active" : ""}`}
+                            onClick={() => setPreviewTab("ai")}
+                          >
+                            <span className="editor-tab-label">AI</span>
+                          </button>
+                        )}
                       </div>
-                      {previewTab === "image" ? (
+                      {previewTab === "image" && showImagePreviewPane && (
                         <ImagePreviewPanel
                           filePath={activeImagePath}
                           openImagePaths={openImagePaths}
                           onSelectImage={handleSelectImageFile}
                           onCloseImage={handleCloseImageFile}
                         />
-                      ) : (
-                        <GpuStatusPanel />
                       )}
+                      {previewTab === "gpu" && showGpuPanel && <GpuStatusPanel />}
+                      {previewTab === "ai" && showAiChatPanel && <AiChatPanel />}
                     </>
                   ) : showImagePreviewPane ? (
                     <ImagePreviewPanel
@@ -156,10 +190,13 @@ export const MainLayout: React.FC = () => {
                       onSelectImage={handleSelectImageFile}
                       onCloseImage={handleCloseImageFile}
                     />
-                  ) : (
+                  ) : showGpuPanel ? (
                     <GpuStatusPanel />
+                  ) : (
+                    <AiChatPanel />
                   )}
-                </div>
+                  </div>
+                </>
               )}
             </div>
           </div>
@@ -174,6 +211,7 @@ export const MainLayout: React.FC = () => {
         <div className="app-bottom-pane" style={{ height: bottomPaneHeight }}>
           <TerminalPanel />
         </div>
+        </ActiveEditorProvider>
       </div>
     </div>
   );

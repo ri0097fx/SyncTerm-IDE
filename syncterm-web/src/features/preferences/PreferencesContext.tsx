@@ -15,8 +15,6 @@ export interface Preferences {
   editorWordWrap: "off" | "on";
   editorLineNumbers: boolean;
   editorMinimap: boolean;
-  /** AI アシストパネル（入力欄/結果表示）を表示する */
-  showAiAssistPanel: boolean;
   terminalFontSize: number;
   terminalFontFamily: string;
   terminalMaxLines: number;
@@ -26,6 +24,8 @@ export interface Preferences {
   showCommandTrace: boolean;
   /** GPU 状態ペイン（nvidia-smi 逐次表示）を表示する */
   showGpuPanel: boolean;
+  /** AI チャットペイン（Preview/GPU と同じ欄）を表示する */
+  showAiChatPanel: boolean;
 }
 
 const DEFAULT_PREFERENCES: Preferences = {
@@ -38,14 +38,14 @@ const DEFAULT_PREFERENCES: Preferences = {
   editorWordWrap: "off",
   editorLineNumbers: true,
   editorMinimap: false,
-  showAiAssistPanel: false,
   terminalFontSize: 13,
   terminalFontFamily: "Consolas, 'JetBrains Mono', Menlo, Monaco, 'Courier New', monospace",
   terminalMaxLines: 5000,
   terminalPollMs: 1000,
   showImagePreviewPane: true,
   showCommandTrace: false,
-  showGpuPanel: false
+  showGpuPanel: false,
+  showAiChatPanel: false
 };
 
 interface PreferencesContextValue {
