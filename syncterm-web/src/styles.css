@@ -210,6 +210,97 @@ body {
   opacity: 0.8;
 }
 
+.gpu-status-empty {
+  font-size: 0.8rem;
+  opacity: 0.7;
+}
+
+.gpu-status-output.gpu-status-raw {
+  font-size: 0.7rem;
+  max-height: 100%;
+  overflow: auto;
+}
+
+/* nvtop 風コンパクト GPU カード */
+.gpu-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-content: flex-start;
+}
+
+.gpu-card {
+  min-width: 0;
+  flex: 1 1 120px;
+  max-width: 160px;
+  font-size: 0.7rem;
+  padding: 0.35rem 0.5rem;
+  border-radius: 0.4rem;
+  border: 1px solid var(--color-pane-border);
+  background: color-mix(in srgb, var(--color-pane-bg) 95%, var(--color-bg));
+}
+
+.gpu-card-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  margin-bottom: 0.25rem;
+  padding-bottom: 0.2rem;
+  border-bottom: 1px solid var(--color-pane-border);
+}
+
+.gpu-card-index {
+  font-weight: 600;
+  opacity: 0.95;
+}
+
+.gpu-card-name {
+  font-size: 0.65rem;
+  opacity: 0.85;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gpu-card-row {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-top: 0.15rem;
+}
+
+.gpu-label {
+  flex: 0 0 2rem;
+  opacity: 0.8;
+}
+
+.gpu-bar-wrap {
+  flex: 1;
+  min-width: 0;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--color-bg);
+  overflow: hidden;
+}
+
+.gpu-bar {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.2s ease;
+}
+
+.gpu-bar.gpu-mem-low { background: #22c55e; }
+.gpu-bar.gpu-mem-mid { background: #eab308; }
+.gpu-bar.gpu-mem-high { background: #ef4444; }
+
+.gpu-value.gpu-util-low { color: #22c55e; }
+.gpu-value.gpu-util-mid { color: #eab308; }
+.gpu-value.gpu-util-high { color: #ef4444; }
+
+.gpu-value.gpu-temp-low { color: #22c55e; }
+.gpu-value.gpu-temp-mid { color: #eab308; }
+.gpu-value.gpu-temp-high { color: #ef4444; }
+
 .editor-preview-layout {
   display: flex;
   height: 100%;

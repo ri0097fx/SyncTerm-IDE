@@ -657,14 +657,18 @@ class RTRequestHandler(BaseHTTPRequestHandler):
 
         ctx = get_session(base_dir, watcher_id=watcher_id, session_name=session)
         ctx.streamed = False
+        # 実行中は watcher_id/session_name を外し、_append_output が post_log_to_relay を呼ばないようにする
+        saved_wid, saved_sess = ctx.watcher_id, ctx.session_name
+        ctx.watcher_id, ctx.session_name = None, None
         try:
             output, exit_code, extra = ctx.execute(command)
         except Exception as e:
             output = str(e)
             exit_code = 1
             extra = {}
+        finally:
+            ctx.watcher_id, ctx.session_name = saved_wid, saved_sess
 
-        # 意図的に post_log_to_relay は呼ばない（ターミナルに反映しない）
         resp = {"ok": True, "output": output, "exitCode": exit_code, **extra}
         self._send_json(200, resp)
 

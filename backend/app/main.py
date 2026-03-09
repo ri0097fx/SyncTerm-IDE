@@ -856,7 +856,12 @@ def _post_gpu_status_via_rt(wid: str, sess: str) -> tuple[Optional[dict], str]:
   if port is None:
     return None, "rt_port_not_found"
   url = f"http://127.0.0.1:{port}/gpu-status"
-  body = json.dumps({"watcherId": wid, "session": sess, "command": "nvidia-smi"}, ensure_ascii=False).encode("utf-8")
+  # コンパクトな CSV（index,name,memory.used,memory.total,utilization.gpu,temperature.gpu）で必要な情報のみ
+  gpu_cmd = (
+    "nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu,temperature.gpu "
+    "--format=csv,noheader,nounits"
+  )
+  body = json.dumps({"watcherId": wid, "session": sess, "command": gpu_cmd}, ensure_ascii=False).encode("utf-8")
   try:
     req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(req, timeout=15) as resp:
