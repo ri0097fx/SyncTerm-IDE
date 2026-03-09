@@ -626,7 +626,8 @@ class RTRequestHandler(BaseHTTPRequestHandler):
             self.send_error(404)
 
     def _handle_gpu_status(self):
-        """nvidia-smi 等を実行し結果を返す。ログは relay に送らない（ターミナルに表示しない）。"""
+        """nvidia-smi 等を実行し結果を返す。SessionContext は使わず subprocess のみで実行するため、
+        ログが relay に送られずターミナルに一切表示されない。"""
         try:
             content_len = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_len).decode("utf-8", errors="replace")
@@ -635,7 +636,6 @@ class RTRequestHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": str(e)})
             return
 
-        watcher_id = data.get("watcherId", WATCHER_ID)
         session = data.get("session", "")
         command = data.get("command", "nvidia-smi")
 
@@ -655,21 +655,30 @@ class RTRequestHandler(BaseHTTPRequestHandler):
             self._send_json(500, {"error": f"session path is not a directory: {session}"})
             return
 
-        ctx = get_session(base_dir, watcher_id=watcher_id, session_name=session)
-        ctx.streamed = False
-        # 実行中は watcher_id/session_name を外し、_append_output が post_log_to_relay を呼ばないようにする
-        saved_wid, saved_sess = ctx.watcher_id, ctx.session_name
-        ctx.watcher_id, ctx.session_name = None, None
+        # SessionContext.execute() は使わない。subprocess のみで実行し post_log_to_relay の経路を完全に通さない
         try:
-            output, exit_code, extra = ctx.execute(command)
+            proc = subprocess.run(
+                command,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=15,
+                cwd=base_dir,
+                encoding="utf-8",
+                errors="replace",
+                env=os.environ.copy(),
+            )
+            output = (proc.stdout or "").strip()
+            exit_code = proc.returncode if proc.returncode is not None else -1
+        except subprocess.TimeoutExpired:
+            output = ""
+            exit_code = -1
         except Exception as e:
             output = str(e)
             exit_code = 1
-            extra = {}
-        finally:
-            ctx.watcher_id, ctx.session_name = saved_wid, saved_sess
 
-        resp = {"ok": True, "output": output, "exitCode": exit_code, **extra}
+        resp = {"ok": exit_code == 0, "output": output, "exitCode": exit_code}
         self._send_json(200, resp)
 
     def _handle_command(self):

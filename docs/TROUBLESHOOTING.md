@@ -192,6 +192,24 @@ exit
 
 ---
 
+## 4.5 GPU 状態がターミナルに表示されてしまう
+
+**症状**
+
+* 「GPU」ボタンで GPU ペインを開くと、nvidia-smi の出力がターミナルにも出てしまう。
+
+**原因**
+
+* **Watcher** の `/gpu-status` が、従来は `SessionContext.execute()` でコマンドを実行していたため、出力が `post_log_to_relay` 経由で relay の `commands.log` に追記され、ターミナルに表示されていた。
+* 修正版では `/gpu-status` は **SessionContext を使わず subprocess のみ**で nvidia-smi を実行するため、ログ経路に一切載らない。
+
+**対処**
+
+1. **Watcher を最新の `command_watcher_rt.py` に更新し、必ず再起動する。**
+2. Relay 側のバックエンド（uvicorn）は、既に `/gpu-status` を呼ぶ実装になっていれば再起動不要。以前のコードのままなら、バックエンドも再起動する。
+
+---
+
 ## 5. SSH 認証エラー（`Permission denied (publickey)` など）
 
 **確認ポイント**
