@@ -768,8 +768,9 @@ class RTRequestHandler(BaseHTTPRequestHandler):
             if getattr(ctx, "_staged_content", None) is not None:
                 delattr(ctx, "_staged_content")
 
-        # 逐次送信が一度も行われなかった場合のみ、ここでまとめて送る
-        if RELAY_LOG_URL and not ctx.streamed:
+        # 逐次送信が一度も行われなかった場合のみ、ここでまとめて送る。
+        # Agent など silent 実行モードのときは、ターミナルには一切流さない。
+        if RELAY_LOG_URL and not ctx.streamed and not getattr(ctx, "silent", False):
             log_text = output
             if not log_text.endswith("\n"):
                 log_text += "\n"

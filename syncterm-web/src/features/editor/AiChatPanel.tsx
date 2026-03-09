@@ -304,6 +304,10 @@ export const AiChatPanel: React.FC = () => {
   }, [currentWatcher?.id, currentSession?.name]);
 
   const handleChatInputKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // 日本語入力など IME 変換中の Enter では送信しない
+    if ((e.nativeEvent as any).isComposing || e.key === "Process") {
+      return;
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       if (!noSession && !loading && input.trim()) {
