@@ -127,6 +127,16 @@ export const MainLayout: React.FC = () => {
                   onSelectFile={handleSelectEditorFile}
                   onCloseFile={handleCloseEditorFile}
                 />
+                <div
+                  className="splitter splitter-horizontal"
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    dragModeRef.current = "horizontal";
+                  }}
+                />
+                <div className="app-bottom-pane" style={{ height: bottomPaneHeight }}>
+                  <TerminalPanel />
+                </div>
               </div>
               {showPreviewPane && (
                 <>
@@ -141,75 +151,96 @@ export const MainLayout: React.FC = () => {
                     className="image-preview-pane preview-pane-slot"
                     style={{ width: previewPaneWidth, minWidth: previewPaneWidth, flex: "0 0 auto" }}
                   >
-                  {[showImagePreviewPane, showGpuPanel, showAiChatPanel].filter(Boolean).length >= 2 ? (
-                    <>
-                      <div className="editor-tabs image-preview-tabs">
+                    {[showImagePreviewPane, showGpuPanel, showAiChatPanel].filter(Boolean).length >= 2 ? (
+                      <>
+                        <div className="editor-tabs image-preview-tabs">
+                          {showImagePreviewPane && (
+                            <button
+                              type="button"
+                              className={`editor-tab${previewTab === "image" ? " active" : ""}`}
+                              onClick={() => setPreviewTab("image")}
+                            >
+                              <span className="editor-tab-label">Image</span>
+                            </button>
+                          )}
+                          {showGpuPanel && (
+                            <button
+                              type="button"
+                              className={`editor-tab${previewTab === "gpu" ? " active" : ""}`}
+                              onClick={() => setPreviewTab("gpu")}
+                            >
+                              <span className="editor-tab-label">GPU</span>
+                            </button>
+                          )}
+                          {showAiChatPanel && (
+                            <button
+                              type="button"
+                              className={`editor-tab${previewTab === "ai" ? " active" : ""}`}
+                              onClick={() => setPreviewTab("ai")}
+                            >
+                              <span className="editor-tab-label">AI</span>
+                            </button>
+                          )}
+                        </div>
                         {showImagePreviewPane && (
-                          <button
-                            type="button"
-                            className={`editor-tab${previewTab === "image" ? " active" : ""}`}
-                            onClick={() => setPreviewTab("image")}
+                          <div
+                            style={{
+                              display: previewTab === "image" ? "flex" : "none",
+                              flex: 1,
+                              minHeight: 0,
+                              flexDirection: "column"
+                            }}
                           >
-                            <span className="editor-tab-label">Image</span>
-                          </button>
+                            <ImagePreviewPanel
+                              filePath={activeImagePath}
+                              openImagePaths={openImagePaths}
+                              onSelectImage={handleSelectImageFile}
+                              onCloseImage={handleCloseImageFile}
+                            />
+                          </div>
                         )}
                         {showGpuPanel && (
-                          <button
-                            type="button"
-                            className={`editor-tab${previewTab === "gpu" ? " active" : ""}`}
-                            onClick={() => setPreviewTab("gpu")}
+                          <div
+                            style={{
+                              display: previewTab === "gpu" ? "flex" : "none",
+                              flex: 1,
+                              minHeight: 0,
+                              flexDirection: "column"
+                            }}
                           >
-                            <span className="editor-tab-label">GPU</span>
-                          </button>
+                            <GpuStatusPanel />
+                          </div>
                         )}
                         {showAiChatPanel && (
-                          <button
-                            type="button"
-                            className={`editor-tab${previewTab === "ai" ? " active" : ""}`}
-                            onClick={() => setPreviewTab("ai")}
+                          <div
+                            style={{
+                              display: previewTab === "ai" ? "flex" : "none",
+                              flex: 1,
+                              minHeight: 0,
+                              flexDirection: "column"
+                            }}
                           >
-                            <span className="editor-tab-label">AI</span>
-                          </button>
+                            <AiChatPanel />
+                          </div>
                         )}
-                      </div>
-                      {previewTab === "image" && showImagePreviewPane && (
-                        <ImagePreviewPanel
-                          filePath={activeImagePath}
-                          openImagePaths={openImagePaths}
-                          onSelectImage={handleSelectImageFile}
-                          onCloseImage={handleCloseImageFile}
-                        />
-                      )}
-                      {previewTab === "gpu" && showGpuPanel && <GpuStatusPanel />}
-                      {previewTab === "ai" && showAiChatPanel && <AiChatPanel />}
-                    </>
-                  ) : showImagePreviewPane ? (
-                    <ImagePreviewPanel
-                      filePath={activeImagePath}
-                      openImagePaths={openImagePaths}
-                      onSelectImage={handleSelectImageFile}
-                      onCloseImage={handleCloseImageFile}
-                    />
-                  ) : showGpuPanel ? (
-                    <GpuStatusPanel />
-                  ) : (
-                    <AiChatPanel />
-                  )}
+                      </>
+                    ) : showImagePreviewPane ? (
+                      <ImagePreviewPanel
+                        filePath={activeImagePath}
+                        openImagePaths={openImagePaths}
+                        onSelectImage={handleSelectImageFile}
+                        onCloseImage={handleCloseImageFile}
+                      />
+                    ) : showGpuPanel ? (
+                      <GpuStatusPanel />
+                    ) : (
+                      <AiChatPanel />
+                    )}
                   </div>
                 </>
               )}
             </div>
           </div>
-        </div>
-        <div
-          className="splitter splitter-horizontal"
-          onMouseDown={(e) => {
-            e.preventDefault();
-            dragModeRef.current = "horizontal";
-          }}
-        />
-        <div className="app-bottom-pane" style={{ height: bottomPaneHeight }}>
-          <TerminalPanel />
         </div>
         </ActiveEditorProvider>
       </div>

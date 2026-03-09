@@ -14,12 +14,12 @@ import urllib.request
 import uuid
 from pathlib import PurePosixPath
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
@@ -216,6 +216,8 @@ class AiAssistPayload(BaseModel):
   editorContent: Optional[str] = None
   # 思考レベル: quick | balanced | deep
   thinking: Optional[str] = None
+  # ユーザー定義ペルソナ／追加指示（システムプロンプト先頭に付与）
+  persona: Optional[str] = None
 
 
 class AiInlinePayload(BaseModel):
@@ -1422,8 +1424,38 @@ def build_ai_prompt(payload: AiAssistPayload) -> str:
   )
 
 
-def _call_ollama(messages: list, max_tokens: int = 512, temperature: float = 0.2, model: Optional[str] = None) -> str:
-  """Ollama を呼ぶ（API キー不要。Relay 上で ollama serve を起動しておく）。"""
+def _cleanup_llm_output(text: str, max_repeats: int = 2) -> str:
+  """LLM 出力の単純な後処理。
+
+  - 全く同じ行が max_repeats 回を超えて現れる場合、以降を削除して重複を抑制する。
+  - 空行はそのまま維持する。
+  """
+  lines = text.splitlines()
+  seen: dict[str, int] = {}
+  out: list[str] = []
+  for line in lines:
+    key = line.strip()
+    if key == "":
+      out.append(line)
+      continue
+    count = seen.get(key, 0)
+    if count < max_repeats:
+      out.append(line)
+      seen[key] = count + 1
+    # それ以上はスキップ
+  return "\n".join(out)
+
+
+def _call_ollama_with_meta(
+  messages: list,
+  max_tokens: int = 512,
+  temperature: float = 0.2,
+  model: Optional[str] = None,
+) -> Tuple[str, bool]:
+  """Ollama を呼ぶ（API キー不要。Relay 上で ollama serve を起動しておく）。
+
+  戻り値は (content, truncated)。truncated は done_reason が length のとき True。
+  """
   base = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
   model = model or os.environ.get("OLLAMA_MODEL", "qwen2.5-coder:7b")
   body = json.dumps(
@@ -1457,12 +1489,32 @@ def _call_ollama(messages: list, max_tokens: int = 512, temperature: float = 0.2
   except Exception as e:
     raise HTTPException(status_code=502, detail=f"Ollama request failed: {e}")
   try:
-    return str(data.get("message", {}).get("content", "")).strip()
+    content = str(data.get("message", {}).get("content", "")).strip()
+    content = _cleanup_llm_output(content)
+    done_reason = str(data.get("done_reason") or "").lower()
+    truncated = done_reason == "length"
+    return content, truncated
   except Exception:
     raise HTTPException(status_code=500, detail="invalid Ollama response format")
 
 
-def _call_openai(messages: list, max_tokens: int = 512, temperature: float = 0.2) -> str:
+def _call_ollama(
+  messages: list,
+  max_tokens: int = 512,
+  temperature: float = 0.2,
+  model: Optional[str] = None,
+) -> str:
+  """_call_ollama_with_meta の後方互換ラッパー（content のみ返す）。"""
+  content, _truncated = _call_ollama_with_meta(messages, max_tokens=max_tokens, temperature=temperature, model=model)
+  return content
+
+
+def _call_openai_with_meta(
+  messages: list,
+  max_tokens: int = 512,
+  temperature: float = 0.2,
+) -> Tuple[str, bool]:
+  """OpenAI Chat Completions API を呼び、(content, truncated) を返す。"""
   api_key = os.environ.get("OPENAI_API_KEY")
   if not api_key:
     raise HTTPException(status_code=503, detail="OPENAI_API_KEY is not set")
@@ -1493,9 +1545,21 @@ def _call_openai(messages: list, max_tokens: int = 512, temperature: float = 0.2
   except Exception as e:
     raise HTTPException(status_code=502, detail=f"OpenAI request failed: {e}")
   try:
-    return str(data["choices"][0]["message"]["content"]).strip()
+    choices = data.get("choices") or []
+    choice = choices[0]
+    content = str(choice.get("message", {}).get("content", "")).strip()
+    content = _cleanup_llm_output(content)
+    finish_reason = str(choice.get("finish_reason") or "").lower()
+    truncated = finish_reason == "length"
+    return content, truncated
   except Exception:
     raise HTTPException(status_code=500, detail="invalid OpenAI response format")
+
+
+def _call_openai(messages: list, max_tokens: int = 512, temperature: float = 0.2) -> str:
+  """_call_openai_with_meta の後方互換ラッパー（content のみ返す）。"""
+  content, _truncated = _call_openai_with_meta(messages, max_tokens=max_tokens, temperature=temperature)
+  return content
 
 
 def _call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 512, temperature: float = 0.2, model: Optional[str] = None) -> str:
@@ -1516,18 +1580,37 @@ def _call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 512, tempe
   raise HTTPException(status_code=400, detail=f"unsupported AI_PROVIDER: {provider}")
 
 
-def _call_llm_messages(messages: List[dict], max_tokens: int = 900, temperature: float = 0.2, model: Optional[str] = None) -> str:
-  """複数メッセージ（会話履歴含む）で LLM を呼ぶ。"""
+def _call_llm_messages_with_meta(
+  messages: List[dict],
+  max_tokens: int = 900,
+  temperature: float = 0.2,
+  model: Optional[str] = None,
+) -> Tuple[str, bool]:
+  """複数メッセージ（会話履歴含む）で LLM を呼ぶ。
+
+  戻り値は (content, truncated)。
+  """
   provider = (os.environ.get("AI_PROVIDER") or "").strip().lower()
   if not provider and os.environ.get("OPENAI_API_KEY"):
     provider = "openai"
   if not provider:
     provider = "ollama"
   if provider == "ollama":
-    return _call_ollama(messages, max_tokens=max_tokens, temperature=temperature, model=model)
+    return _call_ollama_with_meta(messages, max_tokens=max_tokens, temperature=temperature, model=model)
   if provider == "openai":
-    return _call_openai(messages, max_tokens=max_tokens, temperature=temperature)
+    return _call_openai_with_meta(messages, max_tokens=max_tokens, temperature=temperature)
   raise HTTPException(status_code=400, detail=f"unsupported AI_PROVIDER: {provider}")
+
+
+def _call_llm_messages(
+  messages: List[dict],
+  max_tokens: int = 900,
+  temperature: float = 0.2,
+  model: Optional[str] = None,
+) -> str:
+  """従来どおり content のみを返すラッパー。"""
+  content, _truncated = _call_llm_messages_with_meta(messages, max_tokens=max_tokens, temperature=temperature, model=model)
+  return content
 
 
 def call_openai_chat(system_prompt: str, user_prompt: str, model: Optional[str] = None) -> str:
@@ -1668,19 +1751,34 @@ def _ollama_suggested_models() -> List[str]:
   except Exception:
     pass
   # デフォルトの候補（すべて無料のオープンモデル）
-  # - qwen2.5-coder 系: コード特化で高性能（サイズ違い）
-  # - deepseek-coder 系: 強力なコード向けモデル
-  # - llama3.2 / mistral: 汎用タスク向け
+  # - qwen2.5-coder 系: コード特化で高性能（1.5B〜32B）
+  # - deepseek-coder 系: 強力なコード向けモデル（6.7B / 33B）
+  # - deepseek-coder-v2 系: MoE ベースの新世代コードモデル（16B / 236B）
+  # - llama3 系: 一般用途向け（8B / 70B）
+  # - mistral 系: 高性能な一般・コード向けモデル（7B / large）
   return [
+    # Qwen2.5 Coder ファミリ
     "qwen2.5-coder:1.5b",
     "qwen2.5-coder:3b",
     "qwen2.5-coder:7b",
     "qwen2.5-coder:14b",
     "qwen2.5-coder:32b",
+    # より大きな汎用 Qwen モデル（推論用）
+    "qwen2.5:72b-instruct-q3_K_M",
+    # DeepSeek Coder
+    "deepseek-coder:1.3b",
     "deepseek-coder:6.7b",
     "deepseek-coder:33b",
-    "llama3.2",
-    "mistral",
+    # DeepSeek Coder V2（MoE）
+    "deepseek-coder-v2:16b",
+    "deepseek-coder-v2:236b",
+    # Llama 3 系
+    "llama3.2",           # 小さめ汎用
+    "llama3:8b",
+    "llama3:70b",
+    # Mistral 系
+    "mistral",            # 7B
+    "mistral-large",      # 123B クラス
   ]
 
 
@@ -1885,35 +1983,79 @@ def _run_agent_loop(
   """Agent モード: 安全な <command> を自動実行し、出力を受け取って推論を続ける。
   危険そうなコマンドは実行せず、ユーザー承認用に返す。
   """
+  logs: List[AgentCommandLog] = []
+  # 途中ステップでの打ち切りは許容し、最終ステップのみ自動継続を試みる
   for _ in range(max_iterations):
     response = _call_llm_messages(messages, max_tokens=max_tokens, temperature=temperature, model=model)
     cmd = _extract_command_from_response(response)
     if not cmd:
-      return AiAssistResponse(result=response)
+      return AiAssistResponse(result=response, logs=logs)
     if _is_potentially_destructive_command(cmd):
       cleaned = _strip_command_tags(response)
       if not cleaned:
         cleaned = f"危険な可能性があるコマンドのため自動実行できません。\n\n提案コマンド:\n{cmd}"
-      return AiAssistResponse(result=cleaned, command=cmd, needsApproval=True)
-    rt_resp, rt_error = _post_command_via_rt_with_response(wid, sess, cmd, timeout=120)
+      return AiAssistResponse(result=cleaned, command=cmd, needsApproval=True, logs=logs)
+    # Agent 実行ログは通常ターミナルには出さず、AI ペインの「Logs」タブ専用にするため、
+    # Watcher 側で silent 実行用プレフィックスを付けて送る
+    send_cmd = f"_agent_silent::{cmd}"
+    rt_resp, rt_error = _post_command_via_rt_with_response(wid, sess, send_cmd, timeout=120)
     if rt_resp is not None:
       out = rt_resp.get("output", "")
       exit_code = rt_resp.get("exitCode", 0)
       if len(out) > 8000:
         out = "... (truncated) ...\n" + out[-8000:]
+      logs.append(AgentCommandLog(command=cmd, exitCode=exit_code, output=out))
       feedback = f"[Command executed]\n$ {cmd}\n\nExit code: {exit_code}\n\nOutput:\n{out}"
     else:
+      logs.append(AgentCommandLog(command=cmd, exitCode=None, output="", error=rt_error))
       feedback = f"[Command failed - terminal unavailable]\n$ {cmd}\n\nError: {rt_error}\n\nContinue without running more commands; provide your answer based on what you know."
     messages.append({"role": "assistant", "content": response})
     messages.append({"role": "user", "content": feedback})
-  final = _call_llm_messages(messages, max_tokens=max_tokens, temperature=temperature, model=model)
-  return AiAssistResponse(result=final)
+  # 最終回答はトークン上限で切れていれば自動で続きを最大 2 回まで取得して連結する
+  final, truncated = _call_llm_messages_with_meta(messages, max_tokens=max_tokens, temperature=temperature, model=model)
+  auto_continued = False
+  for _ in range(2):
+    if not truncated:
+      break
+    messages.append({"role": "assistant", "content": final})
+    messages.append(
+      {
+        "role": "user",
+        "content": "Continue the previous answer from where you stopped, keeping the same style and level of detail.",
+      }
+    )
+    extra, truncated2 = _call_llm_messages_with_meta(
+      messages,
+      max_tokens=max_tokens,
+      temperature=temperature,
+      model=model,
+    )
+    if not extra:
+      truncated = truncated2
+      break
+    final = final + ("\n\n" if not final.endswith("\n") and extra else "") + extra
+    auto_continued = True
+    truncated = truncated2
+  return AiAssistResponse(result=final, truncated=truncated, autoContinued=auto_continued, logs=logs)
+
+
+class AgentCommandLog(BaseModel):
+  command: str
+  exitCode: Optional[int] = None
+  output: str = ""
+  error: Optional[str] = None
 
 
 class AiAssistResponse(BaseModel):
   result: str
   command: Optional[str] = None
   needsApproval: bool = False
+  # モデルがトークン上限で打ち切られたかどうか（OpenAI / Ollama の finish_reason / done_reason ベース）
+  truncated: bool = False
+  # 自動で "Continue." を送って続きを連結した場合に True
+  autoContinued: bool = False
+  # Agent モードで実行したコマンドと出力のログ（デバッグタブ用）
+  logs: List[AgentCommandLog] = Field(default_factory=list)
 
 
 @app.post("/watchers/{wid}/sessions/{sess}/ai-assist")
@@ -1942,15 +2084,16 @@ def ai_assist(wid: str, sess: str, payload: AiAssistPayload):
   action = (payload.action or "").strip().lower()
   if action == "chat":
     mode = (payload.mode or "ask").strip().lower()
+    # 現在のエディタ内容を全チャットモードで共有できるようにコンテキストブロックを組み立てる
+    context_parts: List[str] = []
+    if payload.editorPath:
+      context_parts.append(f"Current file: {payload.editorPath}")
+    if payload.editorSelectedText:
+      context_parts.append(f"Selected text in editor:\n```\n{payload.editorSelectedText[:4000]}\n```")
+    if payload.editorContent and not payload.editorSelectedText:
+      context_parts.append(f"Current file content (for reference):\n```\n{payload.editorContent[:6000]}\n```")
+    context_block = "\n\n".join(context_parts) if context_parts else ""
     if mode == "agent":
-      context_parts = []
-      if payload.editorPath:
-        context_parts.append(f"Current file: {payload.editorPath}")
-      if payload.editorSelectedText:
-        context_parts.append(f"Selected text in editor:\n```\n{payload.editorSelectedText[:4000]}\n```")
-      if payload.editorContent and not payload.editorSelectedText:
-        context_parts.append(f"Current file content (for reference):\n```\n{payload.editorContent[:6000]}\n```")
-      context_block = "\n\n".join(context_parts) if context_parts else ""
       system_prompt = (
         "You are an autonomous AI agent. Take a deep breath and think step by step before answering.\n"
         "You HAVE direct access to the user's terminal in this session. "
@@ -1964,7 +2107,14 @@ def ai_assist(wid: str, sess: str, payload: AiAssistPayload):
         "Run multiple commands if needed. When you have enough information, give your final answer without any <command> tag. "
         "Do NOT run destructive commands (rm -rf, mkfs, etc.) without explicit user request. Prefer read-only or safe commands. "
         "If the user asks to change or fix code, you may output the modified code in a markdown code block (```language\\n...\\n```) so they can apply it in the editor. "
-        "Reply in the same language as the user."
+        "Reply in the same language as the user.\n"
+        "\n"
+        "When the user asks about how a function/class/model is used across the project or where it is imported from, you MUST actively explore beyond the current file:\n"
+        "- First, use ripgrep or grep to search the entire repository for the symbol (e.g. <command>rg -n \"MyModel\" .</command> or <command>grep -R \"MyModel\" .</command>).\n"
+        "- Open the defining file and any files that import it (e.g. via <command>sed -n '1,160p path/to/file.py'</command>).\n"
+        "- Follow import chains across files (e.g. modules imported with 'from X import Y' or 'import X') up to at least 2–3 levels deep before concluding.\n"
+        "- Base your explanation on ALL relevant files you found, not just the snippet the user pasted.\n"
+        "Never answer that you cannot know how a symbol is used without first searching the codebase and inspecting the matching files."
       )
       if context_block:
         system_prompt += "\n\n--- Editor context (use for code changes when relevant) ---\n" + context_block
@@ -1988,14 +2138,20 @@ def ai_assist(wid: str, sess: str, payload: AiAssistPayload):
         "- Call out risks and alternatives when important\n"
         "Use headings and numbered lists, but keep the final answer concise."
       )
+      if context_block:
+        system_prompt += "\n\n--- Editor context (for planning around current code) ---\n" + context_block
     elif mode == "debug":
       system_prompt = (
         "You are a debugging assistant. Think deeply about possible root causes before proposing fixes.\n"
         "Analyze errors, propose hypotheses, and then suggest concrete fixes. "
         "Explain root causes in plain text; include code snippets only when relevant."
       )
+      if context_block:
+        system_prompt += "\n\n--- Editor context (use this code when debugging) ---\n" + context_block
     else:
       system_prompt = "You are a helpful assistant. Reply concisely. Use plain text, no code fences unless the user asks for code."
+      if context_block:
+        system_prompt += "\n\n--- Editor context (for reference) ---\n" + context_block
     if mode != "agent":
       if thinking == "deep":
         system_prompt += (
@@ -2009,6 +2165,14 @@ def ai_assist(wid: str, sess: str, payload: AiAssistPayload):
           "\n\n[Quick mode]\n"
           "Answer in a single short paragraph or list when possible. Focus on the most important points only."
         )
+    # 共通の出力品質ルール（同じ文の繰り返しを避けるなど）
+    system_prompt += (
+      "\n\n[Output quality rules]\n"
+      "- Do not repeat the same sentence or disclaimer multiple times.\n"
+      "- If the answer cannot be determined from the provided information, say this once, then briefly suggest what additional information would be needed.\n"
+    )
+    if payload.persona and payload.persona.strip():
+      system_prompt = "User-defined persona / instructions:\n" + payload.persona.strip() + "\n\n" + system_prompt
     history = payload.history or []
     history = history[-max_history:]
     messages = [{"role": "system", "content": system_prompt}]
@@ -2032,7 +2196,36 @@ def ai_assist(wid: str, sess: str, payload: AiAssistPayload):
       )
       return agent_res
     else:
-      result = _call_llm_messages(messages, max_tokens=chat_max_tokens, temperature=0.2, model=payload.model)
+      # 通常チャットモードでは、トークン上限で途中終了した場合に最大 2 回まで自動で続きを取得して連結する
+      result, truncated = _call_llm_messages_with_meta(
+        messages,
+        max_tokens=chat_max_tokens,
+        temperature=0.2,
+        model=payload.model,
+      )
+      auto_continued = False
+      for _ in range(2):
+        if not truncated:
+          break
+        messages.append({"role": "assistant", "content": result})
+        messages.append(
+          {
+            "role": "user",
+            "content": "Continue the previous answer from where you stopped, keeping the same level of detail.",
+          }
+        )
+        extra, truncated2 = _call_llm_messages_with_meta(
+          messages,
+          max_tokens=chat_max_tokens,
+          temperature=0.2,
+          model=payload.model,
+        )
+        if not extra:
+          truncated = truncated2
+          break
+        result = result + ("\n\n" if not result.endswith("\n") and extra else "") + extra
+        auto_continued = True
+        truncated = truncated2
   else:
     mode = (payload.mode or "ask").strip().lower()
     if mode == "agent":
@@ -2057,9 +2250,14 @@ def ai_assist(wid: str, sess: str, payload: AiAssistPayload):
         "You are an expert software engineer. Keep responses concise and return only code text "
         "that can directly replace the target scope."
       )
+    if payload.persona and payload.persona.strip():
+      system_prompt = "User-defined persona / instructions:\n" + payload.persona.strip() + "\n\n" + system_prompt
     user_prompt = build_ai_prompt(payload)
     result = _call_llm(system_prompt, user_prompt, max_tokens=code_max_tokens, temperature=0.2, model=payload.model)
-  return AiAssistResponse(result=result)
+    # コード生成モードでは安全のため自動継続は行わない
+    truncated = False
+    auto_continued = False
+  return AiAssistResponse(result=result, truncated=truncated, autoContinued=auto_continued)
 
 
 @app.post("/watchers/{wid}/sessions/{sess}/ai-inline")

@@ -114,7 +114,9 @@ export interface SyncApi {
       editorSelectedText?: string;
       editorContent?: string;
       thinking?: string;
-    }
+      persona?: string;
+    },
+    options?: { signal?: AbortSignal }
   ): Promise<{ result: string; command?: string; needsApproval?: boolean }>;
   getAiInlineCompletion(
     watcherId: string,
@@ -569,13 +571,17 @@ class HttpSyncApi implements SyncApi {
       editorPath?: string;
       editorSelectedText?: string;
       editorContent?: string;
-    }
-  ): Promise<{ result: string; command?: string; needsApproval?: boolean }> {
-    return http<{ result: string; command?: string; needsApproval?: boolean }>(
+      thinking?: string;
+      persona?: string;
+    },
+    options?: { signal?: AbortSignal }
+  ): Promise<{ result: string; command?: string; needsApproval?: boolean; logs?: { command: string; exitCode?: number; output?: string; error?: string }[] }> {
+    return http<{ result: string; command?: string; needsApproval?: boolean; logs?: { command: string; exitCode?: number; output?: string; error?: string }[] }>(
       `/watchers/${encodeURIComponent(watcherId)}/sessions/${encodeURIComponent(session)}/ai-assist`,
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
+        signal: options?.signal
       }
     );
   }

@@ -19,6 +19,16 @@ export interface Preferences {
   terminalFontFamily: string;
   terminalMaxLines: number;
   terminalPollMs: number;
+   /** AI チャット／AIアシスト用のフォントサイズ（px） */
+  aiFontSize: number;
+  /** AI へのペルソナ／追加指示（システムプロンプトに付与） */
+  aiPersona: string;
+  /** AI 応答の口調 */
+  aiTone: "neutral" | "friendly" | "strict";
+  /** 応答のボリューム感 */
+  aiResponseLength: "short" | "normal" | "detailed";
+  /** 応答に使う言語の優先度 */
+  aiLanguage: "auto" | "ja" | "en";
   showImagePreviewPane: boolean;
   /** コマンド送信後の実行経路表示（[RT] 実行済み 等）を表示する */
   showCommandTrace: boolean;
@@ -42,6 +52,11 @@ const DEFAULT_PREFERENCES: Preferences = {
   terminalFontFamily: "Consolas, 'JetBrains Mono', Menlo, Monaco, 'Courier New', monospace",
   terminalMaxLines: 5000,
   terminalPollMs: 1000,
+  aiFontSize: 13,
+  aiPersona: "",
+  aiTone: "neutral",
+  aiResponseLength: "normal",
+  aiLanguage: "auto",
   showImagePreviewPane: true,
   showCommandTrace: false,
   showGpuPanel: false,
@@ -65,8 +80,24 @@ function sanitizePreferences(raw: Partial<Preferences>): Preferences {
   return {
     ...DEFAULT_PREFERENCES,
     ...raw,
+    aiPersona: typeof raw.aiPersona === "string" ? raw.aiPersona : DEFAULT_PREFERENCES.aiPersona,
+    aiTone:
+      raw.aiTone === "friendly" || raw.aiTone === "strict" || raw.aiTone === "neutral"
+        ? raw.aiTone
+        : DEFAULT_PREFERENCES.aiTone,
+    aiResponseLength:
+      raw.aiResponseLength === "short" ||
+      raw.aiResponseLength === "detailed" ||
+      raw.aiResponseLength === "normal"
+        ? raw.aiResponseLength
+        : DEFAULT_PREFERENCES.aiResponseLength,
+    aiLanguage:
+      raw.aiLanguage === "ja" || raw.aiLanguage === "en" || raw.aiLanguage === "auto"
+        ? raw.aiLanguage
+        : DEFAULT_PREFERENCES.aiLanguage,
     editorFontSize: clamp(Number(raw.editorFontSize ?? DEFAULT_PREFERENCES.editorFontSize), 10, 24),
     terminalFontSize: clamp(Number(raw.terminalFontSize ?? DEFAULT_PREFERENCES.terminalFontSize), 10, 24),
+    aiFontSize: clamp(Number(raw.aiFontSize ?? DEFAULT_PREFERENCES.aiFontSize), 10, 24),
     terminalMaxLines: clamp(Number(raw.terminalMaxLines ?? DEFAULT_PREFERENCES.terminalMaxLines), 500, 30000),
     terminalPollMs: clamp(Number(raw.terminalPollMs ?? DEFAULT_PREFERENCES.terminalPollMs), 200, 5000)
   };
@@ -96,6 +127,7 @@ export const PreferencesProvider: React.FC<{ children: React.ReactNode }> = ({ c
     root.style.setProperty("--editor-font-size", `${preferences.editorFontSize}px`);
     root.style.setProperty("--terminal-font-family", preferences.terminalFontFamily);
     root.style.setProperty("--terminal-font-size", `${preferences.terminalFontSize}px`);
+    root.style.setProperty("--ai-font-size", `${preferences.aiFontSize}px`);
   }, [preferences]);
 
   const value = useMemo<PreferencesContextValue>(

@@ -76,6 +76,8 @@ class SessionContext:
         self.watcher_id: Optional[str] = None
         self.session_name: Optional[str] = None
         self.streamed: bool = False
+        # Agent など「ターミナルには出さずに結果だけ欲しい」実行用フラグ
+        self.silent: bool = False
         self.conda_env: Optional[str] = "base" if HAS_CONDA else None
         # .runner_config.json で conda_env が指定されていれば採用
         cfg = self._get_runner_config()
@@ -166,7 +168,7 @@ class SessionContext:
             t = t[:MAX_OUTPUT_CHARS] + "\n...[truncated]"
         output_lines.append(t)
         # RT モードでは可能な限り逐次ログ送信して、長時間タスクの進捗を即時反映させる
-        if RELAY_LOG_URL and self.watcher_id and self.session_name and t:
+        if RELAY_LOG_URL and self.watcher_id and self.session_name and t and not getattr(self, "silent", False):
             try:
                 post_log_to_relay(self.watcher_id, self.session_name, t if t.endswith("\n") else t + "\n")
                 self.streamed = True
@@ -540,38 +542,51 @@ class SessionContext:
         """コマンドを実行し (output_text, exit_code, extra) を返す"""
         output_lines: List[str] = []
         cmd = cmd.strip()
-        if not cmd or cmd.startswith("#"):
-            return "\n".join(output_lines), 0, {}
 
-        if cmd.startswith("cd "):
-            self.handle_cd(cmd, output_lines)
-            return "\n".join(output_lines), 0, {}
+        # Agent からの「ターミナル非表示」専用コマンドプレフィックス
+        silent = False
+        if cmd.startswith("_agent_silent::"):
+            silent = True
+            cmd = cmd.split("::", 1)[1]
 
-        extra = self.handle_internal(cmd, output_lines)
-        if extra is not None:
-            return "\n".join(output_lines), 0, extra
+        prev_silent = self.silent
+        self.silent = silent
+        try:
+            if not cmd or cmd.startswith("#"):
+                return "\n".join(output_lines), 0, {}
 
-        if cmd.strip().startswith("conda activate"):
-            parts = cmd.strip().split(maxsplit=2)
-            rest = (parts[2].strip() if len(parts) > 2 else "") or ""
-            env_name = rest.split()[0] if rest else ""
-            if env_name:
-                self.conda_env = env_name
+            if cmd.startswith("cd "):
+                self.handle_cd(cmd, output_lines)
+                return "\n".join(output_lines), 0, {}
+
+            extra = self.handle_internal(cmd, output_lines)
+            if extra is not None:
+                return "\n".join(output_lines), 0, extra
+
+            if cmd.strip().startswith("conda activate"):
+                parts = cmd.strip().split(maxsplit=2)
+                rest = (parts[2].strip() if len(parts) > 2 else "") or ""
+                env_name = rest.split()[0] if rest else ""
+                if env_name:
+                    self.conda_env = env_name
+                    self._write_status()
+                else:
+                    output_lines.append("conda activate: 環境名を指定してください")
+                    output_lines.append(f"{EOC_MARKER_PREFIX}1")
+                    return "\n".join(output_lines), 1, {}
+                output_lines.append(f"{EOC_MARKER_PREFIX}0")
+                return "\n".join(output_lines), 0, {}
+            if cmd.strip() == "conda deactivate":
+                self.conda_env = "base" if HAS_CONDA else None
                 self._write_status()
-            else:
-                output_lines.append("conda activate: 環境名を指定してください")
-                output_lines.append(f"{EOC_MARKER_PREFIX}1")
-                return "\n".join(output_lines), 1, {}
-            output_lines.append(f"{EOC_MARKER_PREFIX}0")
-            return "\n".join(output_lines), 0, {}
-        if cmd.strip() == "conda deactivate":
-            self.conda_env = "base" if HAS_CONDA else None
-            self._write_status()
-            output_lines.append(f"{EOC_MARKER_PREFIX}0")
-            return "\n".join(output_lines), 0, {}
+                output_lines.append(f"{EOC_MARKER_PREFIX}0")
+                return "\n".join(output_lines), 0, {}
 
-        exit_code = self.run_command(cmd, output_lines)
-        return "\n".join(output_lines), exit_code, {}
+            exit_code = self.run_command(cmd, output_lines)
+            return "\n".join(output_lines), exit_code, {}
+        finally:
+            # 他の通常コマンドに影響しないよう毎回元に戻す
+            self.silent = prev_silent
 
 
 # セッションコンテキストのキャッシュ

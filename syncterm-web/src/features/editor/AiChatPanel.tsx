@@ -1,4 +1,16 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { marked } from "marked";
+import Prism from "prismjs";
+// Prism 言語定義は依存関係のあるものを先にロードする必要がある
+import "prismjs/components/prism-javascript";
+import "prismjs/components/prism-jsx";        // ★ jsx を先にロード
+import "prismjs/components/prism-typescript";
+import "prismjs/components/prism-tsx";        // jsx に依存
+import "prismjs/components/prism-python";
+import "prismjs/components/prism-json";
+import "prismjs/components/prism-bash";
+import "prismjs/components/prism-markdown";
+import "prismjs/themes/prism-tomorrow.css";
 import { useSession } from "../session/SessionContext";
 import { usePreferences } from "../preferences/PreferencesContext";
 import { useActiveEditor } from "./ActiveEditorContext";
@@ -6,6 +18,7 @@ import { api } from "../../lib/api";
 
 type Message = { role: "user" | "assistant"; text: string };
 type PendingCommand = { command: string };
+const AUTO_MODEL = "__auto__";
 
 const CHAT_STORAGE_KEY = "syncterm-ai-chat";
 
@@ -31,10 +44,17 @@ export type ThinkingMode = "quick" | "balanced" | "deep";
 type ChatState = {
   chatIds: string[];
   activeChatId: string;
-  chats: Record<string, { name?: string; messages: Message[] }>;
+  chats: Record<string, { name?: string; messages: Message[]; logs?: AgentLogEntry[] }>;
   selectedModel?: string;
   chatMode?: ChatMode;
   thinkingMode?: ThinkingMode;
+};
+
+type AgentLogEntry = {
+  command: string;
+  exitCode?: number;
+  output?: string;
+  error?: string;
 };
 
 function loadChatState(watcherId: string, sessionName: string): ChatState {
@@ -54,11 +74,15 @@ function loadChatState(watcherId: string, sessionName: string): ChatState {
     if (parsed && typeof parsed.chatIds === "object" && Array.isArray(parsed.chatIds) && typeof parsed.chats === "object") {
       const ids = parsed.chatIds as string[];
       const activeChatId = (parsed.activeChatId && ids.includes(parsed.activeChatId)) ? parsed.activeChatId : ids[0];
-      const rawChats = (parsed.chats ?? {}) as Record<string, { name?: string; messages?: unknown }>;
-      const chats: Record<string, { name?: string; messages: Message[] }> = {};
+      const rawChats = (parsed.chats ?? {}) as Record<string, { name?: string; messages?: unknown; logs?: AgentLogEntry[] }>;
+      const chats: Record<string, { name?: string; messages: Message[]; logs?: AgentLogEntry[] }> = {};
       for (const id of ids) {
         const c = rawChats[id];
-        chats[id] = { name: c?.name, messages: Array.isArray(c?.messages) ? c.messages : [] };
+        chats[id] = {
+          name: c?.name,
+          messages: Array.isArray(c?.messages) ? (c.messages as Message[]) : [],
+          logs: Array.isArray(c?.logs) ? c.logs : [],
+        };
       }
       return {
         chatIds: ids,
@@ -100,6 +124,80 @@ type MsgSegment =
   | { kind: "text"; text: string }
   | { kind: "code"; language: string | null; code: string };
 
+function normalizePrismLanguage(language: string | null): string {
+  if (!language) return "plaintext";
+  const l = language.toLowerCase();
+  if (l === "js" || l === "jsx") return "javascript";
+  if (l === "ts" || l === "tsx") return "tsx";
+  if (l === "py" || l === "python") return "python";
+  if (l === "sh" || l === "bash" || l === "shell") return "bash";
+  if (l === "json") return "json";
+  if (l === "md" || l === "markdown") return "markdown";
+  return l;
+}
+
+function pickAutoModel(
+  aiModels: { installed: string[]; suggested: string[] },
+  chatMode: ChatMode,
+  thinkingMode: ThinkingMode
+): string | undefined {
+  const installed = new Set(aiModels.installed);
+
+  // veryBig は 70B 級以上など、かなり重いモデル
+  const veryBigModels = [
+    "llama3:70b",
+    "qwen2.5:72b-instruct-q3_K_M",
+    "deepseek-coder-v2:236b"
+  ];
+  // big は実用的な大型モデル（32B〜33B や large 系）
+  const bigModels = [
+    "qwen2.5-coder:32b",
+    "deepseek-coder:33b",
+    "deepseek-coder-v2:16b",
+    "mistral-large"
+  ];
+  const midModels = [
+    "deepseek-coder-v2:16b",
+    "qwen2.5-coder:14b",
+    "qwen2.5-coder:7b",
+    "llama3:8b",
+    "mistral",
+    "deepseek-coder:6.7b"
+  ];
+  const smallModels = [
+    "qwen2.5-coder:3b",
+    "qwen2.5-coder:1.5b",
+    "llama3.2",
+    "deepseek-coder:1.3b"
+  ];
+
+  // Auto では「ダウンロード済み（installed）」の中からのみ選ぶ
+  const has = (name: string) => installed.has(name);
+  const pickFrom = (list: string[]) => list.find(has);
+
+  // まだ何もインストールされていない場合は undefined（→ バックエンドのデフォルトにフォールバック）
+  if (aiModels.installed.length === 0) return undefined;
+
+  if (thinkingMode === "quick" && chatMode !== "agent") {
+    // Quick では中〜小さめを優先し、veryBig は最後の手段にする
+    return (
+      pickFrom(midModels) ||
+      pickFrom(smallModels) ||
+      pickFrom(bigModels) ||
+      pickFrom(veryBigModels) ||
+      aiModels.installed[0]
+    );
+  }
+  // deep / agent などは大きめ優先
+  return (
+    pickFrom(bigModels) ||
+    pickFrom(midModels) ||
+    pickFrom(smallModels) ||
+    pickFrom(veryBigModels) ||
+    aiModels.installed[0]
+  );
+}
+
 function splitMarkdownCodeFences(text: string): MsgSegment[] {
   const re = /```([\w-]+)?\n([\s\S]*?)```/g;
   const out: MsgSegment[] = [];
@@ -118,9 +216,9 @@ function splitMarkdownCodeFences(text: string): MsgSegment[] {
 
 export const AiChatPanel: React.FC = () => {
   const { currentWatcher, currentSession } = useSession();
-  const { updatePreferences } = usePreferences();
+  const { preferences, updatePreferences } = usePreferences();
   const { activeEditor, applyToSelection, appendAtCursor } = useActiveEditor();
-  const [tab, setTab] = useState<"chat" | "assist">("chat");
+  const [tab, setTab] = useState<"chat" | "assist" | "settings">("chat");
   const [chatIds, setChatIds] = useState<string[]>([]);
   const [activeChatId, setActiveChatId] = useState<string>("");
   const [chats, setChats] = useState<Record<string, { name?: string; messages: Message[] }>>({});
@@ -139,16 +237,53 @@ export const AiChatPanel: React.FC = () => {
   const [ensuringModel, setEnsuringModel] = useState<string | null>(null);
   const [installProgress, setInstallProgress] = useState<{ model: string; status: string; percent?: number } | null>(null);
   const [pendingCommand, setPendingCommand] = useState<PendingCommand | null>(null);
+  const [chatView, setChatView] = useState<"messages" | "logs">("messages");
+  const [modeMenuOpen, setModeMenuOpen] = useState(false);
+  const [thinkingMenuOpen, setThinkingMenuOpen] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const modelDropdownRef = useRef<HTMLDivElement>(null);
   const chatsRef = useRef(chats);
   const activeChatIdRef = useRef(activeChatId);
+  const aiAbortRef = useRef<AbortController | null>(null);
+  const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
+
+  const buildPersonaInstructions = () => {
+    const parts: string[] = [];
+    const base = preferences.aiPersona?.trim();
+    if (base) parts.push(base);
+    if (preferences.aiTone === "friendly") {
+      parts.push("Use a friendly, encouraging tone.");
+    } else if (preferences.aiTone === "strict") {
+      parts.push("Use a concise, direct tone and focus strictly on correctness.");
+    }
+    if (preferences.aiResponseLength === "short") {
+      parts.push("Keep answers short and to the point.");
+    } else if (preferences.aiResponseLength === "detailed") {
+      parts.push("Provide detailed, step-by-step explanations when helpful.");
+    }
+    if (preferences.aiLanguage === "ja") {
+      parts.push("Respond in Japanese.");
+    } else if (preferences.aiLanguage === "en") {
+      parts.push("Respond in English.");
+    }
+    const text = parts.join("\n");
+    return text || undefined;
+  };
 
   const currentMessages = Array.isArray(chats[activeChatId]?.messages) ? chats[activeChatId].messages : [];
   const scrollToBottom = () => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
 
   useEffect(() => { chatsRef.current = chats; }, [chats]);
   useEffect(() => { activeChatIdRef.current = activeChatId; }, [activeChatId]);
+
+  useEffect(() => {
+    const el = chatInputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    const maxHeight = 320; // px, 行数に応じて最大約 12 行程度まで表示
+    const next = Math.min(el.scrollHeight, maxHeight);
+    el.style.height = `${next}px`;
+  }, [input]);
 
   useEffect(() => {
     if (currentWatcher?.id && currentSession?.name) {
@@ -167,6 +302,15 @@ export const AiChatPanel: React.FC = () => {
       setSelectedModel(null);
     }
   }, [currentWatcher?.id, currentSession?.name]);
+
+  const handleChatInputKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      if (!noSession && !loading && input.trim()) {
+        void send(input);
+      }
+    }
+  };
 
   useEffect(() => {
     if (currentWatcher?.id && currentSession?.name) {
@@ -191,6 +335,13 @@ export const AiChatPanel: React.FC = () => {
     });
     return () => { cancelled = true; };
   }, [currentWatcher?.id, currentSession?.name]);
+
+  // モデル一覧取得後、まだ選択されていない場合は最初の候補をデフォルト選択にする
+  useEffect(() => {
+    if (selectedModel) return;
+    const fallback = aiModels.suggested[0] ?? aiModels.installed[0] ?? null;
+    if (fallback) setSelectedModel(fallback);
+  }, [selectedModel, aiModels.suggested, aiModels.installed]);
 
   useEffect(() => {
     if (!modelDropdownOpen) return;
@@ -226,11 +377,19 @@ export const AiChatPanel: React.FC = () => {
     }
   }, [currentWatcher?.id, currentSession?.name, aiModels.installed]);
 
-  const selectModel = useCallback(async (model: string) => {
-    const ok = await ensureModel(model);
-    if (ok) setSelectedModel(model);
-    setModelDropdownOpen(false);
-  }, [ensureModel]);
+  const selectModel = useCallback(
+    async (model: string) => {
+      if (model === AUTO_MODEL) {
+        setSelectedModel(AUTO_MODEL);
+        setModelDropdownOpen(false);
+        return;
+      }
+      const ok = await ensureModel(model);
+      if (ok) setSelectedModel(model);
+      setModelDropdownOpen(false);
+    },
+    [ensureModel]
+  );
 
   const send = useCallback(
     async (text: string) => {
@@ -244,6 +403,9 @@ export const AiChatPanel: React.FC = () => {
       setInput("");
       setLoading(true);
       try {
+        const controller = new AbortController();
+        if (aiAbortRef.current) aiAbortRef.current.abort();
+        aiAbortRef.current = controller;
         const history = (chats[mid]?.messages ?? []).map((m) => ({ role: m.role, content: m.text }));
         const res = await api.runAiAssist(currentWatcher.id, currentSession.name, {
           path: "",
@@ -251,16 +413,30 @@ export const AiChatPanel: React.FC = () => {
           prompt: userMessage,
           fileContent: "",
           history,
-          model: selectedModel ?? undefined,
+          model: selectedModel === AUTO_MODEL ? autoResolved ?? undefined : selectedModel ?? undefined,
           mode: chatMode,
-          ...(chatMode === "agent" && {
-            editorPath: activeEditor.path ?? undefined,
-            editorSelectedText: activeEditor.selectedText ?? undefined,
-            editorContent: activeEditor.content ?? undefined
-          }),
-          thinking: thinkingMode
-        });
-        const reply = (res.result ?? "").trim() || "(no response)";
+          editorPath: activeEditor.path ?? undefined,
+          editorSelectedText: activeEditor.selectedText ?? undefined,
+          editorContent: activeEditor.content ?? undefined,
+          thinking: thinkingMode,
+          persona: buildPersonaInstructions()
+        }, { signal: controller.signal });
+        const reply = (res as any).result ? String((res as any).result).trim() : "";
+        const logs = (res as any).logs as AgentLogEntry[] | undefined;
+        if (logs && logs.length) {
+          setChats((prev) => {
+            const original = prev[mid];
+            const anyOriginal = original as any;
+            const curLogs = Array.isArray(anyOriginal?.logs) ? (anyOriginal.logs as AgentLogEntry[]) : [];
+            return {
+              ...prev,
+              [mid]: {
+                ...(original ?? { name: undefined, messages: [] as Message[] }),
+                logs: [...curLogs, ...logs],
+              },
+            };
+          });
+        }
         if (res.needsApproval && res.command) {
           setPendingCommand({ command: res.command });
         } else {
@@ -298,13 +474,21 @@ export const AiChatPanel: React.FC = () => {
           }
         }, speed);
       } catch (e) {
-        const errMsg = e instanceof Error ? e.message : "Request failed";
-        setChats((prev) => ({
-          ...prev,
-          [mid]: { ...prev[mid], messages: [...(prev[mid]?.messages ?? []), { role: "assistant", text: `Error: ${errMsg}` }] }
-        }));
-        setTimeout(scrollToBottom, 50);
+        if ((e as any)?.name === "AbortError") {
+          // ユーザーが停止した場合はエラーメッセージを出さない
+        } else {
+          const errMsg = e instanceof Error ? e.message : "Request failed";
+          setChats((prev) => ({
+            ...prev,
+            [mid]: {
+              ...prev[mid],
+              messages: [...(prev[mid]?.messages ?? []), { role: "assistant", text: `Error: ${errMsg}` }]
+            }
+          }));
+          setTimeout(scrollToBottom, 50);
+        }
       } finally {
+        if (aiAbortRef.current) aiAbortRef.current = null;
         setLoading(false);
       }
     },
@@ -335,14 +519,15 @@ export const AiChatPanel: React.FC = () => {
         prompt: "Continue.",
         fileContent: "",
         history,
-        model: selectedModel ?? undefined,
+        model: selectedModel === AUTO_MODEL ? autoResolved ?? undefined : selectedModel ?? undefined,
         mode: chatMode,
         ...(chatMode === "agent" && {
           editorPath: activeEditor.path ?? undefined,
           editorSelectedText: activeEditor.selectedText ?? undefined,
           editorContent: activeEditor.content ?? undefined
         }),
-        thinking: thinkingMode
+        thinking: thinkingMode,
+        persona: buildPersonaInstructions()
       });
       const reply = (res.result ?? "").trim();
       if (res.needsApproval && res.command) setPendingCommand({ command: res.command });
@@ -386,9 +571,10 @@ export const AiChatPanel: React.FC = () => {
         prompt: "Continue.",
         fileContent: "",
         history,
-        model: selectedModel ?? undefined,
+        model: selectedModel === AUTO_MODEL ? autoResolved ?? undefined : selectedModel ?? undefined,
         mode: chatMode,
-        thinking: thinkingMode
+        thinking: thinkingMode,
+        persona: buildPersonaInstructions()
       });
       const reply = (res.result ?? "").trim();
       setChats((prev) => ({
@@ -448,11 +634,14 @@ export const AiChatPanel: React.FC = () => {
     { id: "ask", label: "Ask", title: "シンプルな質問応答" }
   ];
 
-  const thinkingOptions: { id: ThinkingMode; title: string }[] = [
-    { id: "quick", title: "Quick（速く・浅く）" },
-    { id: "balanced", title: "Balanced（標準）" },
-    { id: "deep", title: "Deep（じっくり推論）" }
+  const thinkingOptions: { id: ThinkingMode; label: string; title: string }[] = [
+    { id: "quick", label: "Quick", title: "Quick（速く・浅く）" },
+    { id: "balanced", label: "Balanced", title: "Balanced（標準）" },
+    { id: "deep", label: "Deep", title: "Deep（じっくり推論）" }
   ];
+
+  const currentChatModeMeta = chatModeOptions.find((o) => o.id === chatMode);
+  const currentThinkingMeta = thinkingOptions.find((o) => o.id === thinkingMode);
 
   const handleAiAssist = useCallback(async () => {
     if (!currentWatcher || !currentSession) return;
@@ -465,9 +654,10 @@ export const AiChatPanel: React.FC = () => {
         prompt: aiPrompt.trim() || "Improve this code",
         selectedText: activeEditor.selectedText,
         fileContent: activeEditor.content,
-        model: selectedModel ?? undefined,
+        model: selectedModel === AUTO_MODEL ? autoResolved ?? undefined : selectedModel ?? undefined,
         mode: chatMode,
-        thinking: thinkingMode
+        thinking: thinkingMode,
+        persona: buildPersonaInstructions()
       });
       setAiResult(res.result || "");
     } catch (e) {
@@ -480,10 +670,26 @@ export const AiChatPanel: React.FC = () => {
   const close = () => updatePreferences({ showAiChatPanel: false });
 
   const noSession = !currentWatcher || !currentSession;
-  const displayModel = selectedModel ?? aiModels.suggested[0] ?? "";
+  const autoResolved = pickAutoModel(aiModels, chatMode, thinkingMode);
+  const effectiveModel = selectedModel === AUTO_MODEL ? autoResolved : selectedModel ?? aiModels.suggested[0] ?? "";
+  const displayModel =
+    selectedModel === AUTO_MODEL ? (autoResolved ? `Auto (${autoResolved})` : "Auto") : effectiveModel ?? "";
+  const modelLabelShort =
+    selectedModel === AUTO_MODEL
+      ? "Auto"
+      : effectiveModel
+      ? effectiveModel.length > 22
+        ? `${effectiveModel.slice(0, 20)}…`
+        : effectiveModel
+      : "Model";
   const modelOptions = [
-    ...(selectedModel && !aiModels.suggested.includes(selectedModel) ? [selectedModel] : []),
-    ...aiModels.suggested
+    ...(selectedModel &&
+    selectedModel !== AUTO_MODEL &&
+    !aiModels.suggested.includes(selectedModel) &&
+    !aiModels.installed.includes(selectedModel)
+      ? [selectedModel]
+      : []),
+    ...Array.from(new Set([...aiModels.suggested, ...aiModels.installed]))
   ];
 
   return (
@@ -506,13 +712,95 @@ export const AiChatPanel: React.FC = () => {
             >
               アシスト
             </button>
+            <button
+              type="button"
+              className={`editor-tab${tab === "settings" ? " active" : ""}`}
+              onClick={() => setTab("settings")}
+            >
+              設定
+            </button>
           </div>
         </div>
         <button type="button" className="icon-button" onClick={close} title="閉じる">
           ×
         </button>
       </div>
-      <div className="ai-chat-body">
+        <div className="ai-chat-body">
+        {/* Assist タブ用のグローバル thinking 表示（チャットタブではバブル内に表示する） */}
+        {tab === "assist" && (loading || aiLoading) && (
+          <div className="ai-thinking-indicator" aria-live="polite">
+            <div className="ai-thinking-spinner" aria-hidden />
+            <div className="ai-thinking-text">
+              <span>thinking</span>
+              <span className="ai-thinking-dots">
+                <span>.</span>
+                <span>.</span>
+                <span>.</span>
+              </span>
+              <span className="ai-thinking-detail">
+                {thinkingMode === "deep"
+                  ? "performing a deeper multi-step analysis…"
+                  : "generating a code edit suggestion…"}
+              </span>
+            </div>
+          </div>
+        )}
+        {tab === "settings" && (
+          <div className="ai-settings-tab">
+            <div className="ai-settings-section">
+              <label className="ai-settings-label">ペルソナ / 追加指示</label>
+              <p className="ai-settings-hint">
+                AI の振る舞いを変えるための指示を書けます。チャット・アシスト両方のシステムプロンプトの先頭に付与されます。
+              </p>
+              <textarea
+                className="ai-settings-persona"
+                value={preferences.aiPersona ?? ""}
+                onChange={(e) => updatePreferences({ aiPersona: e.target.value })}
+                placeholder="例: あなたは簡潔で実用的なアドバイスをするアシスタントです。"
+                rows={6}
+              />
+            </div>
+            <div className="ai-settings-section">
+              <label className="ai-settings-label">口調</label>
+              <p className="ai-settings-hint">フレンドリー / 厳密 など、応答の雰囲気を指定します。</p>
+              <select
+                className="ai-settings-select"
+                value={preferences.aiTone}
+                onChange={(e) => updatePreferences({ aiTone: e.target.value as any })}
+              >
+                <option value="neutral">標準</option>
+                <option value="friendly">フレンドリー</option>
+                <option value="strict">厳密・そっけない</option>
+              </select>
+            </div>
+            <div className="ai-settings-section">
+              <label className="ai-settings-label">回答の長さ</label>
+              <p className="ai-settings-hint">どの程度詳しく答えるかの目安を指定します。</p>
+              <select
+                className="ai-settings-select"
+                value={preferences.aiResponseLength}
+                onChange={(e) => updatePreferences({ aiResponseLength: e.target.value as any })}
+              >
+                <option value="short">短く要点のみ</option>
+                <option value="normal">通常</option>
+                <option value="detailed">できるだけ詳しく</option>
+              </select>
+            </div>
+            <div className="ai-settings-section">
+              <label className="ai-settings-label">優先する言語</label>
+              <p className="ai-settings-hint">日本語 / 英語 のどちらで主に応答するかを指定します。</p>
+              <select
+                className="ai-settings-select"
+                value={preferences.aiLanguage}
+                onChange={(e) => updatePreferences({ aiLanguage: e.target.value as any })}
+              >
+                <option value="auto">自動（入力に追従）</option>
+                <option value="ja">主に日本語</option>
+                <option value="en">主に英語</option>
+              </select>
+            </div>
+          </div>
+        )}
         {tab === "chat" && (
         <>
         <div className="ai-chat-tab-row">
@@ -541,8 +829,24 @@ export const AiChatPanel: React.FC = () => {
             + New
           </button>
         </div>
+        <div className="ai-chat-subtabs">
+          <button
+            type="button"
+            className={`ai-chat-subtab${chatView === "messages" ? " active" : ""}`}
+            onClick={() => setChatView("messages")}
+          >
+            Chat
+          </button>
+          <button
+            type="button"
+            className={`ai-chat-subtab${chatView === "logs" ? " active" : ""}`}
+            onClick={() => setChatView("logs")}
+          >
+            Logs
+          </button>
+        </div>
         <div className="ai-chat-messages">
-          {pendingCommand && (
+          {chatView === "messages" && pendingCommand && (
             <div className="ai-chat-msg ai-chat-msg-assistant">
               <span className="ai-chat-msg-role">AI</span>
               <div className="ai-chat-command-card">
@@ -559,7 +863,8 @@ export const AiChatPanel: React.FC = () => {
               </div>
             </div>
           )}
-          {currentMessages.map((m, i) => {
+          {chatView === "messages" &&
+            currentMessages.map((m, i) => {
             const segs = splitMarkdownCodeFences(m.text);
             return (
               <div key={i} className={`ai-chat-msg ai-chat-msg-${m.role}`}>
@@ -568,13 +873,26 @@ export const AiChatPanel: React.FC = () => {
                   if (s.kind === "text") {
                     const t = s.text.trimEnd();
                     if (!t) return null;
+                    const html = marked.parse(t, { breaks: true }) as string;
                     return (
-                      <pre key={idx} className="ai-chat-msg-text">{t}</pre>
+                      <div
+                        key={idx}
+                        className="ai-chat-msg-text"
+                        dangerouslySetInnerHTML={{ __html: html }}
+                      />
                     );
                   }
+                  const lang = normalizePrismLanguage(s.language);
+                  const grammar = Prism.languages[lang] || Prism.languages.plaintext || Prism.languages.markup;
+                  const highlighted = Prism.highlight(s.code, grammar, lang);
                   if (m.role !== "assistant") {
                     return (
-                      <pre key={idx} className="ai-chat-code">{s.code}</pre>
+                      <pre key={idx} className="ai-chat-code">
+                        <code
+                          className={`language-${lang}`}
+                          dangerouslySetInnerHTML={{ __html: highlighted }}
+                        />
+                      </pre>
                     );
                   }
                   return (
@@ -615,147 +933,315 @@ export const AiChatPanel: React.FC = () => {
                           </svg>
                         </button>
                       </div>
-                      <pre className="ai-chat-code">{s.code}</pre>
+                      <pre className="ai-chat-code">
+                        <code
+                          className={`language-${lang}`}
+                          dangerouslySetInnerHTML={{ __html: highlighted }}
+                        />
+                      </pre>
                     </div>
                   );
                 })}
               </div>
             );
-          })}
-          {loading && (
+            })}
+          {chatView === "logs" && (
+            <div className="ai-chat-logs">
+              {Array.isArray((chats[activeChatId] as any)?.logs) && (chats[activeChatId] as any).logs.length === 0 && (
+                <div className="ai-chat-inline-note">No agent commands have been executed yet.</div>
+              )}
+              {Array.isArray((chats[activeChatId] as any)?.logs) &&
+                ((chats[activeChatId] as any).logs as AgentLogEntry[]).map((log, idx) => (
+                <div key={idx} className="ai-chat-log-entry">
+                  <div className="ai-chat-log-header">
+                    <span className="ai-chat-log-label">Command</span>
+                    {typeof log.exitCode === "number" && (
+                      <span className={`ai-chat-log-exit${log.exitCode === 0 ? " ok" : " ng"}`}>
+                        exit {log.exitCode}
+                      </span>
+                    )}
+                  </div>
+                  <pre className="ai-chat-command">
+                    <code>$ {log.command}</code>
+                  </pre>
+                  {log.error && (
+                    <div className="ai-chat-log-error">
+                      {log.error}
+                    </div>
+                  )}
+                  {log.output && (
+                    <pre className="ai-chat-log-output">
+                      {log.output}
+                    </pre>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          {loading && tab === "chat" && (
             <div className="ai-chat-msg ai-chat-msg-assistant">
               <span className="ai-chat-msg-role">AI</span>
-              <span className="ai-chat-msg-text">...</span>
+              <div className="ai-chat-msg-text">
+                <div className="ai-thinking-indicator" aria-live="polite">
+                  <div className="ai-thinking-spinner" aria-hidden />
+                  <div className="ai-thinking-text">
+                    <span>thinking</span>
+                    <span className="ai-thinking-dots">
+                      <span>.</span>
+                      <span>.</span>
+                      <span>.</span>
+                    </span>
+                    {chatMode === "agent" && (
+                      <span className="ai-thinking-detail">
+                        {pendingCommand
+                          ? "waiting for command approval…"
+                          : "analyzing context and may run safe commands on the remote session…"}
+                      </span>
+                    )}
+                    {chatMode !== "agent" && (
+                      <span className="ai-thinking-detail">
+                        {thinkingMode === "deep"
+                          ? "performing a deeper multi-step analysis…"
+                          : "generating a response…"}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
             </div>
           )}
           <div ref={messagesEndRef} />
         </div>
-        <div className="ai-chat-mode-row">
-          {chatModeOptions.map((opt) => (
-            <button
-              key={opt.id}
-              type="button"
-              className={`ai-chat-mode-btn${chatMode === opt.id ? " active" : ""}`}
-              onClick={() => setChatMode(opt.id)}
-              title={opt.title}
-            >
-              <span className="ai-chat-mode-icon" aria-hidden>
-                {opt.id === "agent" && (
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <circle cx="12" cy="6" r="2.5" /><circle cx="7" cy="16" r="2.5" /><circle cx="17" cy="16" r="2.5" />
-                    <path d="M12 8.5v2M9.2 14.2l2.1-2.2M14.8 14.2l-2.1-2.2" />
-                  </svg>
-                )}
-                {opt.id === "plan" && (
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01" />
-                  </svg>
-                )}
-                {opt.id === "debug" && (
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M12 5l-1.5 2M12 5l1.5 2" />
-                    <path d="M8 8c0-2 1.5-3 4-3s4 1 4 3v6c0 2-1.5 3-4 3s-4-1-4-3V8z" />
-                    <path d="M7 14l-2 2M17 14l2 2M10 19l1 2M14 19l-1 2" />
-                  </svg>
-                )}
-                {opt.id === "ask" && (
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
-                  </svg>
-                )}
-              </span>
-              <span className="ai-chat-mode-label">{opt.label}</span>
-            </button>
-          ))}
-        </div>
-        <div className="ai-chat-mode-row" style={{ marginTop: "0.2rem" }}>
-          {thinkingOptions.map((opt) => (
-            <button
-              key={opt.id}
-              type="button"
-              className={`ai-chat-mode-btn${thinkingMode === opt.id ? " active" : ""}`}
-              onClick={() => setThinkingMode(opt.id)}
-              title={opt.title}
-              aria-label={opt.title}
-            >
-              <span className="ai-thinking-icon" aria-hidden>
-                {opt.id === "quick" && (
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M6 12h12" />
-                  </svg>
-                )}
-                {opt.id === "balanced" && (
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M5 12h14" />
-                    <circle cx="12" cy="12" r="3" />
-                  </svg>
-                )}
-                {opt.id === "deep" && (
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M4 12h16" />
-                    <path d="M8 8c2-3 6-3 8 0" />
-                    <path d="M8 16c2 3 6 3 8 0" />
-                  </svg>
-                )}
-              </span>
-              <span className="sr-only">{opt.title}</span>
-            </button>
-          ))}
-        </div>
         <form className="ai-chat-form" onSubmit={handleSubmit}>
-          <div className="ai-chat-form-row">
-            <div className="ai-chat-form-left" ref={modelDropdownRef}>
-              <div className="ai-chat-model-dropdown">
-                <button
-                  type="button"
-                  className="icon-button ai-model-btn"
-                  onClick={() => setModelDropdownOpen((o) => !o)}
-                  title={displayModel || "モデルを選択"}
-                  disabled={noSession}
-                >
-                  <span className="ai-model-icon" aria-hidden>
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M12 2L9 8H3l5 4-2 6 6-4 6 4-2-6 5-4H15L12 2z" />
-                    </svg>
-                  </span>
-                </button>
-                {modelDropdownOpen && (
-                  <div className="ai-chat-model-menu">
-                    {installProgress && (
-                      <div className="ai-chat-model-ensuring">
-                        {installProgress.model} … {installProgress.percent != null ? `${installProgress.percent}%` : installProgress.status}
-                      </div>
-                    )}
-                    {modelOptions.map((m) => (
-                      <button
-                        key={m}
-                        type="button"
-                        className={`ai-chat-model-option${selectedModel === m ? " active" : ""}`}
-                        onClick={() => void selectModel(m)}
-                        disabled={ensuringModel !== null}
-                        title={m}
-                      >
-                        <span className="ai-chat-model-option-label">{m} {aiModels.installed.includes(m) ? "" : " (未インストール)"}</span>
-                      </button>
-                    ))}
-                    {modelOptions.length === 0 && !ensuringModel && (
-                      <div className="ai-chat-model-option muted">利用可能なモデルがありません</div>
-                    )}
-                  </div>
-                )}
-              </div>
-            </div>
-            <input
-              type="text"
+          <div className="ai-chat-composer">
+            <textarea
+              ref={chatInputRef}
               className="ai-chat-input"
               placeholder={noSession ? "Watcher / Session を選択してください" : "メッセージを入力"}
               value={input}
               onChange={(e) => setInput(e.target.value)}
+              onKeyDown={handleChatInputKeyDown}
               disabled={noSession || loading}
             />
-            <button type="submit" className="primary-button ai-chat-send-btn" disabled={noSession || loading || !input.trim()}>
-              送信
-            </button>
+            <div className="ai-chat-composer-footer">
+              <div className="ai-chat-composer-left">
+                <div className="ai-chat-mode-dropdown">
+                  <button
+                    type="button"
+                    className="ai-mode-chip"
+                    onClick={() => setModeMenuOpen((o) => !o)}
+                    title={currentChatModeMeta?.title}
+                    aria-label={currentChatModeMeta?.label}
+                  >
+                    <span aria-hidden>
+                      {chatMode === "agent" && (
+                        <svg viewBox="0 0 24 24">
+                          <circle cx="12" cy="6" r="3" />
+                          <circle cx="6" cy="16" r="3" />
+                          <circle cx="18" cy="16" r="3" />
+                          <path d="M10 8.5 8 13.5M14 8.5l2 5M9 16h6" />
+                        </svg>
+                      )}
+                      {chatMode === "plan" && (
+                        <svg viewBox="0 0 24 24">
+                          <path d="M6 6h12M6 12h12M6 18h12" />
+                          <circle cx="6" cy="6" r="1.2" />
+                          <circle cx="6" cy="12" r="1.2" />
+                          <circle cx="6" cy="18" r="1.2" />
+                        </svg>
+                      )}
+                      {chatMode === "debug" && (
+                        <svg viewBox="0 0 24 24">
+                          <path d="M9 5h6" />
+                          <rect x="7" y="7" width="10" height="10" rx="3" />
+                          <path d="M7 9 4 7M17 9l3-2M7 15 4 17M17 15l3 2" />
+                        </svg>
+                      )}
+                      {chatMode === "ask" && (
+                        <svg viewBox="0 0 24 24">
+                          <path d="M5 5h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H9l-4 4v-4H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z" />
+                        </svg>
+                      )}
+                    </span>
+                  </button>
+                  {modeMenuOpen && (
+                    <div className="ai-chat-mode-menu">
+                      {chatModeOptions.map((opt) => (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          className={`ai-chat-mode-menu-item${chatMode === opt.id ? " active" : ""}`}
+                          onClick={() => {
+                            setChatMode(opt.id);
+                            setModeMenuOpen(false);
+                          }}
+                        >
+                          <span>{opt.label}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <div className="ai-chat-mode-dropdown">
+                  <button
+                    type="button"
+                    className="ai-thinking-chip"
+                    onClick={() => setThinkingMenuOpen((o) => !o)}
+                    title={currentThinkingMeta?.title}
+                    aria-label={currentThinkingMeta?.label}
+                  >
+                    <span aria-hidden>
+                      {thinkingMode === "quick" && (
+                        <svg viewBox="0 0 24 24">
+                          <path d="M4 12h10" />
+                          <path d="M4 8h6" />
+                        </svg>
+                      )}
+                      {thinkingMode === "balanced" && (
+                        <svg viewBox="0 0 24 24">
+                          <path d="M4 12h16" />
+                          <circle cx="12" cy="12" r="2.3" />
+                        </svg>
+                      )}
+                      {thinkingMode === "deep" && (
+                        <svg viewBox="0 0 24 24">
+                          <path d="M4 10c2-3 6-3 8 0s6 3 8 0" />
+                          <path d="M4 15c2-3 6-3 8 0s6 3 8 0" />
+                        </svg>
+                      )}
+                    </span>
+                  </button>
+                  {thinkingMenuOpen && (
+                    <div className="ai-chat-mode-menu">
+                      {thinkingOptions.map((opt) => (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          className={`ai-chat-mode-menu-item${thinkingMode === opt.id ? " active" : ""}`}
+                          onClick={() => {
+                            setThinkingMode(opt.id);
+                            setThinkingMenuOpen(false);
+                          }}
+                        >
+                          <span>{opt.label}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <div className="ai-chat-form-left" ref={modelDropdownRef}>
+                  <div className="ai-chat-model-dropdown">
+                    <button
+                      type="button"
+                      className="icon-button ai-model-btn"
+                      onClick={() => setModelDropdownOpen((o) => !o)}
+                      title={displayModel || "モデルを選択"}
+                      aria-label={displayModel || "モデルを選択"}
+                      disabled={noSession}
+                    >
+                      <span className="ai-model-icon" aria-hidden>
+                        <svg
+                          width="18"
+                          height="18"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="1.7"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <path d="M7 7h10a2 2 0 0 1 2 2v0.5a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2Z" />
+                          <path d="M7 15h6a2 2 0 0 0 2-2v0a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v0a2 2 0 0 0 2 2Z" />
+                          <path d="M9 9.5h2.5M9 15h2" />
+                        </svg>
+                      </span>
+                      <span className="sr-only">
+                        {displayModel || "Model"}
+                      </span>
+                    </button>
+                    <span className="ai-chat-model-text">
+                      {modelLabelShort}
+                    </span>
+                    {modelDropdownOpen && (
+                      <div className="ai-chat-model-menu">
+                        {installProgress && (
+                          <div className="ai-chat-model-ensuring">
+                            {installProgress.model} … {installProgress.percent != null ? `${installProgress.percent}%` : installProgress.status}
+                          </div>
+                        )}
+                        {/* Auto モデル（ダウンロード済みの中から自動選択） */}
+                        <button
+                          key={AUTO_MODEL}
+                          type="button"
+                          className={`ai-chat-model-option${selectedModel === AUTO_MODEL ? " active" : ""}`}
+                          onClick={() => void selectModel(AUTO_MODEL)}
+                          disabled={ensuringModel !== null}
+                          title={autoResolved ? `Auto (${autoResolved})` : "Auto"}
+                        >
+                          <span className="ai-chat-model-option-check" aria-hidden>
+                            {selectedModel === AUTO_MODEL ? "✓" : ""}
+                          </span>
+                          <span className="ai-chat-model-option-label">
+                            {autoResolved ? `Auto (${autoResolved})` : "Auto"}
+                          </span>
+                        </button>
+                        {modelOptions.map((m) => (
+                          <button
+                            key={m}
+                            type="button"
+                            className={`ai-chat-model-option${selectedModel === m ? " active" : ""}`}
+                            onClick={() => void selectModel(m)}
+                            disabled={ensuringModel !== null}
+                            title={m}
+                          >
+                            <span className="ai-chat-model-option-check" aria-hidden>
+                              {selectedModel === m ? "✓" : ""}
+                            </span>
+                            <span className="ai-chat-model-option-label">
+                              {m}
+                              {aiModels.installed.includes(m) ? "" : " (未インストール)"}
+                            </span>
+                          </button>
+                        ))}
+                        {modelOptions.length === 0 && !ensuringModel && (
+                          <div className="ai-chat-model-option muted">利用可能なモデルがありません</div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+              <div className="ai-chat-composer-right">
+                <button
+                  type="button"
+                  className="ai-chat-send-btn"
+                  onClick={() => {
+                    if (loading) {
+                      if (aiAbortRef.current) {
+                        aiAbortRef.current.abort();
+                        aiAbortRef.current = null;
+                      }
+                      setLoading(false);
+                    } else if (!noSession && input.trim()) {
+                      void send(input);
+                    }
+                  }}
+                  disabled={noSession || (!loading && !input.trim())}
+                  title={loading ? "停止" : "送信"}
+                  aria-label={loading ? "停止" : "送信"}
+                >
+                  {loading ? (
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <rect x="5" y="5" width="14" height="14" fill="#ffffff" rx="3" ry="3" />
+                    </svg>
+                  ) : (
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M5 18L12 5l7 13z" fill="#ffffff" />
+                    </svg>
+                  )}
+                </button>
+              </div>
+            </div>
           </div>
         </form>
         </>
@@ -775,77 +1261,95 @@ export const AiChatPanel: React.FC = () => {
                 </div>
               )}
             </div>
-            <div className="ai-chat-mode-row" style={{ marginBottom: "0.25rem" }}>
-              {chatModeOptions.map((opt) => (
-                <button
-                  key={opt.id}
-                  type="button"
-                  className={`ai-chat-mode-btn${chatMode === opt.id ? " active" : ""}`}
-                  onClick={() => setChatMode(opt.id)}
-                  title={opt.title}
-                >
-                  <span className="ai-chat-mode-icon" aria-hidden>
+            <div className="ai-chat-mode-row ai-chat-mode-row--icons" style={{ marginBottom: "0.5rem" }}>
+              <div className="ai-chat-mode-group" aria-label="モード" role="radiogroup">
+                {chatModeOptions.map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    className={`ai-mode-chip${chatMode === opt.id ? " active" : ""}`}
+                    onClick={() => setChatMode(opt.id)}
+                    title={opt.title}
+                    aria-pressed={chatMode === opt.id}
+                  >
                     {opt.id === "agent" && (
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <circle cx="12" cy="6" r="2.5" /><circle cx="7" cy="16" r="2.5" /><circle cx="17" cy="16" r="2.5" />
-                        <path d="M12 8.5v2M9.2 14.2l2.1-2.2M14.8 14.2l-2.1-2.2" />
-                      </svg>
+                      <span aria-hidden>
+                        <svg viewBox="0 0 24 24">
+                          <circle cx="12" cy="6" r="3" />
+                          <circle cx="6" cy="16" r="3" />
+                          <circle cx="18" cy="16" r="3" />
+                          <path d="M10 8.5 8 13.5M14 8.5l2 5M9 16h6" />
+                        </svg>
+                      </span>
                     )}
                     {opt.id === "plan" && (
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01" />
-                      </svg>
+                      <span aria-hidden>
+                        <svg viewBox="0 0 24 24">
+                          <path d="M6 6h12M6 12h12M6 18h12" />
+                          <circle cx="6" cy="6" r="1.2" />
+                          <circle cx="6" cy="12" r="1.2" />
+                          <circle cx="6" cy="18" r="1.2" />
+                        </svg>
+                      </span>
                     )}
                     {opt.id === "debug" && (
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M12 5l-1.5 2M12 5l1.5 2" />
-                        <path d="M8 8c0-2 1.5-3 4-3s4 1 4 3v6c0 2-1.5 3-4 3s-4-1-4-3V8z" />
-                        <path d="M7 14l-2 2M17 14l2 2M10 19l1 2M14 19l-1 2" />
-                      </svg>
+                      <span aria-hidden>
+                        <svg viewBox="0 0 24 24">
+                          <path d="M9 5h6" />
+                          <rect x="7" y="7" width="10" height="10" rx="3" />
+                          <path d="M7 9 4 7M17 9l3-2M7 15 4 17M17 15l3 2" />
+                        </svg>
+                      </span>
                     )}
                     {opt.id === "ask" && (
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
-                      </svg>
+                      <span aria-hidden>
+                        <svg viewBox="0 0 24 24">
+                          <path d="M5 5h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H9l-4 4v-4H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z" />
+                        </svg>
+                      </span>
                     )}
-                  </span>
-                  <span className="ai-chat-mode-label">{opt.label}</span>
-                </button>
-              ))}
-            </div>
-            <div className="ai-chat-mode-row" style={{ marginBottom: "0.5rem" }}>
-              {thinkingOptions.map((opt) => (
-                <button
-                  key={opt.id}
-                  type="button"
-                  className={`ai-chat-mode-btn${thinkingMode === opt.id ? " active" : ""}`}
-                  onClick={() => setThinkingMode(opt.id)}
-                  title={opt.title}
-                  aria-label={opt.title}
-                >
-                  <span className="ai-thinking-icon" aria-hidden>
+                    <span className="sr-only">{opt.label}</span>
+                  </button>
+                ))}
+              </div>
+              <div className="ai-chat-mode-group" aria-label="思考レベル" role="radiogroup">
+                {thinkingOptions.map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    className={`ai-thinking-chip${thinkingMode === opt.id ? " active" : ""}`}
+                    onClick={() => setThinkingMode(opt.id)}
+                    title={opt.title}
+                    aria-pressed={thinkingMode === opt.id}
+                  >
                     {opt.id === "quick" && (
-                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M6 12h12" />
-                      </svg>
+                      <span aria-hidden>
+                        <svg viewBox="0 0 24 24">
+                          <path d="M4 12h10" />
+                          <path d="M4 8h6" />
+                        </svg>
+                      </span>
                     )}
                     {opt.id === "balanced" && (
-                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M5 12h14" />
-                        <circle cx="12" cy="12" r="3" />
-                      </svg>
+                      <span aria-hidden>
+                        <svg viewBox="0 0 24 24">
+                          <path d="M4 12h16" />
+                          <circle cx="12" cy="12" r="2.3" />
+                        </svg>
+                      </span>
                     )}
                     {opt.id === "deep" && (
-                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M4 12h16" />
-                        <path d="M8 8c2-3 6-3 8 0" />
-                        <path d="M8 16c2 3 6 3 8 0" />
-                      </svg>
+                      <span aria-hidden>
+                        <svg viewBox="0 0 24 24">
+                          <path d="M4 10c2-3 6-3 8 0s6 3 8 0" />
+                          <path d="M4 15c2-3 6-3 8 0s6 3 8 0" />
+                        </svg>
+                      </span>
                     )}
-                  </span>
-                  <span className="sr-only">{opt.title}</span>
-                </button>
-              ))}
+                    <span className="sr-only">{opt.label}</span>
+                  </button>
+                ))}
+              </div>
             </div>
             <div className="ai-assist-controls">
               <div className="ai-assist-row">
