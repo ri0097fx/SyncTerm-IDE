@@ -851,21 +851,17 @@ def _post_command_via_rt_with_response(wid: str, sess: str, command: str, timeou
 
 
 def _post_gpu_status_via_rt(wid: str, sess: str) -> tuple[Optional[dict], str]:
-  """Watcher の /gpu-status を呼ぶ。ログに流さず結果だけ返す。"""
+  """Watcher の /gpu-status を呼ぶ。command は空で送り、Watcher 側で nvitop 優先→nvidia-smi フォールバック。"""
   port = _get_rt_port(wid)
   if port is None:
     return None, "rt_port_not_found"
   url = f"http://127.0.0.1:{port}/gpu-status"
-  # コンパクトな CSV（index,name,memory.used,memory.total,utilization.gpu,temperature.gpu）で必要な情報のみ
-  gpu_cmd = (
-    "nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu,temperature.gpu "
-    "--format=csv,noheader,nounits"
-  )
-  body = json.dumps({"watcherId": wid, "session": sess, "command": gpu_cmd}, ensure_ascii=False).encode("utf-8")
+  body = json.dumps({"watcherId": wid, "session": sess, "command": ""}, ensure_ascii=False).encode("utf-8")
   try:
     req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
-    with urllib.request.urlopen(req, timeout=15) as resp:
-      return json.loads(resp.read().decode("utf-8", errors="replace")), ""
+    with urllib.request.urlopen(req, timeout=20) as resp:
+      data = json.loads(resp.read().decode("utf-8", errors="replace"))
+      return data, ""
   except urllib.error.HTTPError as e:
     if e.code == 404:
       return None, "session_not_found"
@@ -905,15 +901,24 @@ def get_rt_status(wid: str):
 
 @app.get("/watchers/{wid}/sessions/{sess}/gpu-status")
 def get_gpu_status(wid: str, sess: str):
-  """Watcher の /gpu-status で nvidia-smi を実行。ターミナルログには流さない。"""
+  """Watcher の /gpu-status。nvitop 優先、失敗時は nvidia-smi（GPU+プロセス）。ターミナルには流さない。"""
   data, reason = _post_gpu_status_via_rt(wid, sess)
   if data is None:
-    return {"output": "", "error": reason, "ok": False}
-  return {
-    "output": data.get("output", ""),
+    return {"output": "", "error": reason, "ok": False, "source": "nvidia-smi"}
+  output = data.get("output", "")
+  source = data.get("source", "nvidia-smi")
+  result = {
+    "output": output,
     "exitCode": data.get("exitCode"),
     "ok": data.get("ok", False),
+    "source": source,
   }
+  if source == "nvitop" and output.strip().startswith("{"):
+    try:
+      result["data"] = json.loads(output)
+    except Exception:
+      pass
+  return result
 
 
 @app.post("/watchers/{wid}/sessions/{sess}/commands")

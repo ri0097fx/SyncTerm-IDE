@@ -221,23 +221,99 @@ body {
   overflow: auto;
 }
 
-/* nvtop 風コンパクト GPU カード */
+/* ペイン幅に応じてカード幅を可変 */
+.gpu-status-body-responsive {
+  container-type: inline-size;
+  container-name: gpu-pane;
+}
+
+@container gpu-pane (min-width: 200px) {
+  .gpu-cards {
+    --gpu-card-min: 100px;
+    --gpu-card-max: 999px;
+  }
+}
+
 .gpu-cards {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.5rem;
+  gap: 0.4rem;
   align-content: flex-start;
 }
 
 .gpu-card {
-  min-width: 0;
-  flex: 1 1 120px;
-  max-width: 160px;
+  min-width: min(var(--gpu-card-min, 90px), 100%);
+  flex: 1 1 var(--gpu-card-min, 90px);
+  max-width: var(--gpu-card-max, 200px);
   font-size: 0.7rem;
   padding: 0.35rem 0.5rem;
   border-radius: 0.4rem;
   border: 1px solid var(--color-pane-border);
   background: color-mix(in srgb, var(--color-pane-bg) 95%, var(--color-bg));
+}
+
+@container gpu-pane (min-width: 280px) {
+  .gpu-card { max-width: 160px; }
+}
+
+@container gpu-pane (min-width: 400px) {
+  .gpu-card { max-width: 180px; }
+}
+
+.gpu-host-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.35rem;
+  font-size: 0.75rem;
+}
+
+.gpu-processes {
+  margin-top: 0.5rem;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.gpu-processes-title {
+  font-size: 0.7rem;
+  font-weight: 600;
+  opacity: 0.9;
+  margin-bottom: 0.25rem;
+}
+
+.gpu-processes-list {
+  overflow: auto;
+  font-size: 0.68rem;
+}
+
+.gpu-process-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.15rem 0;
+  border-bottom: 1px solid var(--color-pane-border);
+  min-width: 0;
+}
+
+.gpu-process-pid {
+  flex: 0 0 2.5rem;
+  opacity: 0.9;
+}
+
+.gpu-process-mem {
+  flex: 0 0 4rem;
+  color: var(--color-text);
+}
+
+.gpu-process-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.95;
 }
 
 .gpu-card-header {

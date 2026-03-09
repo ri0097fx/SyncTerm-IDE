@@ -637,7 +637,8 @@ class RTRequestHandler(BaseHTTPRequestHandler):
             return
 
         session = data.get("session", "")
-        command = data.get("command", "nvidia-smi")
+        # command が空の場合は nvitop 優先でフォールバック付きコマンドをデフォルトとする
+        command = data.get("command", "").strip()
 
         if not session:
             self._send_json(400, {"error": "session required"})
@@ -655,30 +656,54 @@ class RTRequestHandler(BaseHTTPRequestHandler):
             self._send_json(500, {"error": f"session path is not a directory: {session}"})
             return
 
-        # SessionContext.execute() は使わない。subprocess のみで実行し post_log_to_relay の経路を完全に通さない
-        try:
-            proc = subprocess.run(
-                command,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                timeout=15,
-                cwd=base_dir,
-                encoding="utf-8",
-                errors="replace",
-                env=os.environ.copy(),
-            )
-            output = (proc.stdout or "").strip()
-            exit_code = proc.returncode if proc.returncode is not None else -1
-        except subprocess.TimeoutExpired:
-            output = ""
-            exit_code = -1
-        except Exception as e:
-            output = str(e)
-            exit_code = 1
+        def run_cmd(cmd: str, timeout_sec: int = 15) -> tuple[str, int]:
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    shell=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    timeout=timeout_sec,
+                    cwd=base_dir,
+                    encoding="utf-8",
+                    errors="replace",
+                    env=os.environ.copy(),
+                )
+                out = (proc.stdout or "").strip()
+                code = proc.returncode if proc.returncode is not None else -1
+                return out, code
+            except subprocess.TimeoutExpired:
+                return "", -1
+            except Exception as e:
+                return str(e), 1
 
-        resp = {"ok": exit_code == 0, "output": output, "exitCode": exit_code}
+        output = ""
+        exit_code = 0
+        source = "nvidia-smi"
+
+        if command:
+            output, exit_code = run_cmd(command)
+        else:
+            # nvitop を先に試し、失敗時は nvidia-smi（GPU + プロセス）
+            output, exit_code = run_cmd("nvitop --snapshot 2>/dev/null", timeout_sec=8)
+            if exit_code == 0 and output.startswith("{"):
+                source = "nvitop"
+            else:
+                gpu_cmd = (
+                    "nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu,temperature.gpu "
+                    "--format=csv,noheader,nounits"
+                )
+                proc_cmd = (
+                    "nvidia-smi --query-compute-apps=pid,process_name,used_memory "
+                    "--format=csv,noheader,nounits"
+                )
+                gpu_out, _ = run_cmd(gpu_cmd)
+                proc_out, _ = run_cmd(proc_cmd)
+                output = gpu_out + "\n___PROC___\n" + (proc_out or "").strip()
+                exit_code = 0
+
+        resp = {"ok": exit_code == 0, "output": output, "exitCode": exit_code, "source": source}
         self._send_json(200, resp)
 
     def _handle_command(self):
