@@ -238,6 +238,8 @@ export const AiChatPanel: React.FC = () => {
   const [installProgress, setInstallProgress] = useState<{ model: string; status: string; percent?: number } | null>(null);
   const [pendingCommand, setPendingCommand] = useState<PendingCommand | null>(null);
   const [chatView, setChatView] = useState<"messages" | "logs">("messages");
+  const [editingMessageIndex, setEditingMessageIndex] = useState<number | null>(null);
+  const [editingMessageText, setEditingMessageText] = useState("");
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
   const [thinkingMenuOpen, setThinkingMenuOpen] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -396,21 +398,33 @@ export const AiChatPanel: React.FC = () => {
   );
 
   const send = useCallback(
-    async (text: string) => {
+    async (text: string, options?: { historyBeforeIndex?: number }) => {
       if (!currentWatcher || !currentSession || !text.trim()) return;
       const userMessage = text.trim();
       const mid = activeChatId;
-      setChats((prev) => ({
-        ...prev,
-        [mid]: { ...prev[mid], messages: [...(prev[mid]?.messages ?? []), { role: "user", text: userMessage }] }
-      }));
+      const prevMessages = chats[mid]?.messages ?? [];
+      const historyForApi =
+        options?.historyBeforeIndex != null
+          ? prevMessages.slice(0, options.historyBeforeIndex)
+          : prevMessages;
+      if (options?.historyBeforeIndex != null) {
+        setChats((prev) => ({
+          ...prev,
+          [mid]: { ...prev[mid], messages: [...prevMessages.slice(0, options.historyBeforeIndex!), { role: "user", text: userMessage }] }
+        }));
+      } else {
+        setChats((prev) => ({
+          ...prev,
+          [mid]: { ...prev[mid], messages: [...(prev[mid]?.messages ?? []), { role: "user", text: userMessage }] }
+        }));
+      }
       setInput("");
       setLoading(true);
       try {
         const controller = new AbortController();
         if (aiAbortRef.current) aiAbortRef.current.abort();
         aiAbortRef.current = controller;
-        const history = (chats[mid]?.messages ?? []).map((m) => ({ role: m.role, content: m.text }));
+        const history = historyForApi.map((m) => ({ role: m.role, content: m.text }));
         const res = await api.runAiAssist(currentWatcher.id, currentSession.name, {
           path: "",
           action: "chat",
@@ -869,10 +883,66 @@ export const AiChatPanel: React.FC = () => {
           )}
           {chatView === "messages" &&
             currentMessages.map((m, i) => {
+            const isEditingUser = m.role === "user" && editingMessageIndex === i;
+            if (isEditingUser) {
+              return (
+                <div key={i} className="ai-chat-msg ai-chat-msg-user">
+                  <span className="ai-chat-msg-role">You</span>
+                  <div className="ai-chat-edit-message">
+                    <textarea
+                      className="ai-chat-edit-textarea"
+                      value={editingMessageText}
+                      onChange={(e) => setEditingMessageText(e.target.value)}
+                      rows={4}
+                    />
+                    <div className="ai-chat-edit-actions">
+                      <button
+                        type="button"
+                        className="primary-button"
+                        onClick={() => {
+                          if (!editingMessageText.trim()) return;
+                          void send(editingMessageText.trim(), { historyBeforeIndex: i });
+                          setEditingMessageIndex(null);
+                          setEditingMessageText("");
+                        }}
+                        disabled={loading}
+                      >
+                        送信
+                      </button>
+                      <button
+                        type="button"
+                        className="icon-button"
+                        style={{ padding: "0 0.6rem" }}
+                        onClick={() => {
+                          setEditingMessageIndex(null);
+                          setEditingMessageText("");
+                        }}
+                      >
+                        キャンセル
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );
+            }
             const segs = splitMarkdownCodeFences(m.text);
             return (
               <div key={i} className={`ai-chat-msg ai-chat-msg-${m.role}`}>
                 <span className="ai-chat-msg-role">{m.role === "user" ? "You" : "AI"}</span>
+                {m.role === "user" && (
+                  <button
+                    type="button"
+                    className="ai-chat-msg-edit-btn"
+                    onClick={() => {
+                      setEditingMessageIndex(i);
+                      setEditingMessageText(m.text);
+                    }}
+                    title="編集して再送信（それ以降の会話はリセット）"
+                    aria-label="編集"
+                  >
+                    編集
+                  </button>
+                )}
                 {segs.map((s, idx) => {
                   if (s.kind === "text") {
                     const t = s.text.trimEnd();

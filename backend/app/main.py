@@ -1971,6 +1971,10 @@ def _is_potentially_destructive_command(cmd: str) -> bool:
   return any(d in c for d in dangerous)
 
 
+# トークン上限で途切れた場合に「続き」を取得する最大回数（任意長対応）
+MAX_CONTINUATION_ROUNDS = 50
+
+
 def _run_agent_loop(
   wid: str,
   sess: str,
@@ -2011,10 +2015,10 @@ def _run_agent_loop(
       feedback = f"[Command failed - terminal unavailable]\n$ {cmd}\n\nError: {rt_error}\n\nContinue without running more commands; provide your answer based on what you know."
     messages.append({"role": "assistant", "content": response})
     messages.append({"role": "user", "content": feedback})
-  # 最終回答はトークン上限で切れていれば自動で続きを最大 2 回まで取得して連結する
+  # 最終回答はトークン上限で切れる限り「続き」を取得して連結する（最大 MAX_CONTINUATION_ROUNDS 回）
   final, truncated = _call_llm_messages_with_meta(messages, max_tokens=max_tokens, temperature=temperature, model=model)
   auto_continued = False
-  for _ in range(2):
+  for _ in range(MAX_CONTINUATION_ROUNDS):
     if not truncated:
       break
     messages.append({"role": "assistant", "content": final})
@@ -2066,18 +2070,19 @@ def ai_assist(wid: str, sess: str, payload: AiAssistPayload):
 
   thinking = (payload.thinking or "balanced").strip().lower()
   if thinking == "quick":
-    chat_max_tokens = 400
-    code_max_tokens = 400
+    chat_max_tokens = 1024
+    code_max_tokens = 1024
     max_history = 6
     agent_iterations = 4
   elif thinking == "deep":
-    chat_max_tokens = 1400
-    code_max_tokens = 1400
+    # 深い思考モードは長文になりやすいので 1 回あたり多めに確保
+    chat_max_tokens = 4096
+    code_max_tokens = 4096
     max_history = 20
     agent_iterations = 16
   else:
-    chat_max_tokens = 900
-    code_max_tokens = 900
+    chat_max_tokens = 2048
+    code_max_tokens = 2048
     max_history = 12
     agent_iterations = 10
 
@@ -2196,7 +2201,7 @@ def ai_assist(wid: str, sess: str, payload: AiAssistPayload):
       )
       return agent_res
     else:
-      # 通常チャットモードでは、トークン上限で途中終了した場合に最大 2 回まで自動で続きを取得して連結する
+      # 通常チャットモードでは、トークン上限で切れる限り「続き」を取得して連結する（最大 MAX_CONTINUATION_ROUNDS 回）
       result, truncated = _call_llm_messages_with_meta(
         messages,
         max_tokens=chat_max_tokens,
@@ -2204,7 +2209,7 @@ def ai_assist(wid: str, sess: str, payload: AiAssistPayload):
         model=payload.model,
       )
       auto_continued = False
-      for _ in range(2):
+      for _ in range(MAX_CONTINUATION_ROUNDS):
         if not truncated:
           break
         messages.append({"role": "assistant", "content": result})

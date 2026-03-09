@@ -456,6 +456,7 @@ body {
 }
 
 .ai-chat-msg {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 0.25rem;
@@ -651,6 +652,47 @@ body {
 
 .ai-chat-msg-user .ai-chat-msg-text {
   color: var(--color-text, #e5e7eb);
+}
+
+.ai-chat-msg-edit-btn {
+  position: absolute;
+  top: 0.2rem;
+  right: 0.2rem;
+  padding: 0.12rem 0.4rem;
+  font-size: 0.7rem;
+  color: var(--color-text-muted, #9ca3af);
+  background: transparent;
+  border: 1px solid var(--color-pane-border, #374151);
+  border-radius: 0.3rem;
+  cursor: pointer;
+}
+.ai-chat-msg-edit-btn:hover {
+  color: var(--color-text, #e5e7eb);
+  border-color: var(--color-text-muted, #6b7280);
+}
+
+.ai-chat-edit-message {
+  margin-top: 0.2rem;
+  width: 100%;
+  min-width: 0;
+}
+.ai-chat-edit-textarea {
+  width: 100%;
+  min-height: 4rem;
+  padding: 0.4rem 0.5rem;
+  font-size: 0.85rem;
+  line-height: 1.45;
+  border-radius: 0.4rem;
+  border: 1px solid var(--color-pane-border, #374151);
+  background: var(--color-pane-bg, #1f2937);
+  color: var(--color-text, #e5e7eb);
+  resize: vertical;
+  box-sizing: border-box;
+}
+.ai-chat-edit-actions {
+  display: flex;
+  gap: 0.4rem;
+  margin-top: 0.35rem;
 }
 
 .ai-chat-msg-assistant .ai-chat-msg-text {
