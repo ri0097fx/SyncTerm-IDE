@@ -78,6 +78,8 @@ class SessionContext:
         self.streamed: bool = False
         # Agent など「ターミナルには出さずに結果だけ欲しい」実行用フラグ
         self.silent: bool = False
+        # 直近の execute 呼び出しが silent だったかどうか（_handle_command 側で最終ログ送信を抑制するために使用）
+        self.last_silent: bool = False
         self.conda_env: Optional[str] = "base" if HAS_CONDA else None
         # .runner_config.json で conda_env が指定されていれば採用
         cfg = self._get_runner_config()
@@ -549,6 +551,9 @@ class SessionContext:
             silent = True
             cmd = cmd.split("::", 1)[1]
 
+        # このコマンドが silent かどうかを覚えておく（最後に _handle_command 側で参照）
+        self.last_silent = silent
+
         prev_silent = self.silent
         self.silent = silent
         try:
@@ -770,7 +775,7 @@ class RTRequestHandler(BaseHTTPRequestHandler):
 
         # 逐次送信が一度も行われなかった場合のみ、ここでまとめて送る。
         # Agent など silent 実行モードのときは、ターミナルには一切流さない。
-        if RELAY_LOG_URL and not ctx.streamed and not getattr(ctx, "silent", False):
+        if RELAY_LOG_URL and not ctx.streamed and not getattr(ctx, "last_silent", False):
             log_text = output
             if not log_text.endswith("\n"):
                 log_text += "\n"
