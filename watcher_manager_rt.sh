@@ -184,7 +184,9 @@ mkdir -p "$LOCAL_WATCHER_DIR" "$LOCAL_REGISTRY_DIR" "$PID_DIR"
 if [ -z "$(find "$LOCAL_WATCHER_DIR" -maxdepth 1 -type d ! -path "$LOCAL_WATCHER_DIR" 2>/dev/null | head -1)" ]; then
   mkdir -p "${LOCAL_WATCHER_DIR}/default"
 fi
-run_nofail ssh $SSH_OPTS "$SERVER" "mkdir -p '$REMOTE_WATCHER_DIR' '$REMOTE_REGISTRY_DIR'"
+# リレー側では base_path（例: ~/SyncTerm-IDE）をシェルで展開してからディレクトリ作成する。
+# これにより、'~/SyncTerm-IDE' という文字通りのパスが作られてしまう問題を防ぐ。
+run_nofail ssh $SSH_OPTS "$SERVER" "BASE_REMOTE_ROOT='$(printf '%s' "$BASE_REMOTE_ROOT" | sed \"s/'/'\\\\''/g\")'; SESSIONS_DIR_NAME='$SESSIONS_DIR_NAME'; REGISTRY_DIR_NAME='$REGISTRY_DIR_NAME'; WATCHER_ID='$WATCHER_ID'; bash -lc 'BR=\$(eval echo \"\$BASE_REMOTE_ROOT\"); mkdir -p \"\$BR/\$SESSIONS_DIR_NAME/\$WATCHER_ID\" \"\$BR/\$REGISTRY_DIR_NAME\"'"
 
 # RT ポートをレジストリに登録（backend が HTTP でコマンド送信するため）
 echo "$RT_PORT" > "$LOCAL_REGISTRY_DIR/${WATCHER_ID}.rt_port"
