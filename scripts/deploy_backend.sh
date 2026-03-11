@@ -6,22 +6,32 @@ set -euo pipefail
 # Usage:
 #   ./scripts/deploy_backend.sh user@relay.example.com
 #   ./scripts/deploy_backend.sh user@relay.example.com /path/on/relay 8000
-#   ./scripts/deploy_backend.sh user@relay.example.com --setup-ollama   # デプロイ後に Relay 上で Ollama をインストール・起動・モデル pull
+#   ./scripts/deploy_backend.sh user@relay.example.com --setup-ollama    # デプロイ後に Relay 上で Ollama をインストール・起動・モデル pull
+#   ./scripts/deploy_backend.sh user@relay.example.com --setup-train     # Relay 上に Buddy 学習用 .venv-train を構築
+#   ./scripts/deploy_backend.sh user@relay.example.com --setup-browser   # Relay 上にブラウザ調査用 .venv-browser を構築
 #
 # Args:
 #   1) SSH target (required): user@host
 #   2) Remote app dir (optional). 省略時: config.ini の deploy_dir → リレー上で backend_port を監視しているプロセスの cwd → ~/SyncTerm-IDE
 #   3) Backend port (optional, default: 8000)
-#   --setup-ollama  Relay 上で Ollama のインストール・ollama serve 起動・config.ini の ollama_model を pull（任意）
+#   --setup-ollama   Relay 上で Ollama のインストール・ollama serve 起動・config.ini の ollama_model を pull（任意）
+#   --setup-train    Relay 上で Buddy 学習用の Python 環境 (.venv-train) を構築（任意）
+#   --setup-browser  Relay 上でブラウザ調査用の Python 環境 (.venv-browser + Playwright) を構築（任意）
 #
 # AI (Ollama): リモートの config.ini に [ai] を追加すると、Ollama の URL/モデル等を指定可能。
 # 例: ollama_base_url = http://127.0.0.1:11434, ollama_model = qwen2.5-coder:7b
 
 SETUP_OLLAMA="${SETUP_OLLAMA:-0}"
+SETUP_TRAIN="${SETUP_TRAIN:-0}"
+SETUP_BROWSER="${SETUP_BROWSER:-0}"
 ARGS=()
 for a in "$@"; do
   if [[ "$a" == "--setup-ollama" ]]; then
     SETUP_OLLAMA=1
+  elif [[ "$a" == "--setup-train" ]]; then
+    SETUP_TRAIN=1
+  elif [[ "$a" == "--setup-browser" ]]; then
+    SETUP_BROWSER=1
   else
     ARGS+=("$a")
   fi
@@ -67,9 +77,11 @@ if c.has_section('remote') and c.has_option('remote', 'deploy_dir'):
 fi
 
 if [[ -z "$TARGET" ]]; then
-  echo "Usage: $0 <user@host> [remote_dir] [backend_port] [--setup-ollama]"
+  echo "Usage: $0 <user@host> [remote_dir] [backend_port] [--setup-ollama] [--setup-train] [--setup-browser]"
   echo "  remote_dir: optional; default from config.ini [remote] deploy_dir, else ~/SyncTerm-IDE"
   echo "  --setup-ollama: optional; on Relay install Ollama, start ollama serve, pull config.ini [ai] ollama_model"
+  echo "  --setup-train: optional; on Relay create .venv-train and install backend/training/requirements.txt"
+  echo "  --setup-browser: optional; on Relay create .venv-browser and install Playwright + Chromium"
   exit 1
 fi
 
@@ -114,6 +126,16 @@ ssh "$TARGET" "bash -lc 'cd $(rempath_quoted "$REMOTE_DIR_ABS") && python3 scrip
 if [[ "$SETUP_OLLAMA" -eq 1 ]]; then
   echo "[2c/5] Setup Ollama on Relay (install / ollama serve / model pull)"
   ssh "$TARGET" "bash -lc 'cd $(rempath_quoted "$REMOTE_DIR_ABS") && chmod +x scripts/relay_setup_ollama.sh && bash scripts/relay_setup_ollama.sh .'"
+fi
+
+if [[ "$SETUP_TRAIN" -eq 1 ]]; then
+  echo "[2d/5] Setup Buddy training environment (.venv-train) on Relay"
+  ssh "$TARGET" "bash -lc 'cd $(rempath_quoted "$REMOTE_DIR_ABS") && chmod +x scripts/setup_training_env.sh && bash scripts/setup_training_env.sh .'"
+fi
+
+if [[ "$SETUP_BROWSER" -eq 1 ]]; then
+  echo "[2e/5] Setup browser research environment (.venv-browser) on Relay"
+  ssh "$TARGET" "bash -lc 'cd $(rempath_quoted "$REMOTE_DIR_ABS") && chmod +x scripts/setup_browser_env.sh && bash scripts/setup_browser_env.sh .'"
 fi
 
 echo "[3/5] Create venv and install dependencies (may take 1–2 min, please wait)..."

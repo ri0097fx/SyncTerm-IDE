@@ -225,6 +225,20 @@ class SessionContext:
                 time.sleep(0.1)
             return proc.returncode if proc.returncode is not None else -1
 
+        # ===== Safety guard: block obviously dangerous commands =====
+        dangerous_patterns = [
+            r"rm\s+-rf\s+/\b",
+            r"rm\s+-rf\s+~\b",
+            r":\s*\(\)\s*{\s*:\s*\|\s*:\s*;\s*}\s*;\s*:",
+            r"\bmkfs\.",
+            r"\bshutdown\b",
+            r"\breboot\b",
+        ]
+        for pat in dangerous_patterns:
+            if re.search(pat, stripped):
+                append("[Watcher] ERROR: command blocked by safety policy (too dangerous).")
+                return 1
+
         final_cmd, info = self._wrap_command(cmdline)
         if info:
             append(f"\n{info}")

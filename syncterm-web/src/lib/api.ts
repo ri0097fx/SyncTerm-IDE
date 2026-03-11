@@ -7,6 +7,29 @@ import type {
   WatcherStatus
 } from "../types/domain";
 
+export interface BuddyState {
+  stats: {
+    total_feedback: number;
+    per_task: {
+      [task: string]: {
+        total: number;
+        good: number;
+        bad: number;
+        best_mode?: string;
+        best_thinking?: string;
+      };
+    };
+  };
+  routing: {
+    [task: string]: {
+      [mode: string]: {
+        [thinking: string]: { good: number; bad: number };
+      };
+    };
+  };
+  hints: { id: string; text: string }[];
+}
+
 export interface SyncApi {
   listWatchers(): Promise<WatcherInfo[]>;
   listSessions(watcherId: string): Promise<SessionInfo[]>;
@@ -118,6 +141,20 @@ export interface SyncApi {
     },
     options?: { signal?: AbortSignal }
   ): Promise<{ result: string; command?: string; needsApproval?: boolean }>;
+  sendAiBuddyFeedback(
+    payload: {
+      message: string;
+      role: string;
+      rating: "good" | "bad";
+      taskType?: string;
+      mode?: string;
+      thinking?: string;
+      model?: string;
+      watcherId?: string;
+      session?: string;
+    }
+  ): Promise<{ ok: boolean }>;
+  getAiBuddyState(): Promise<BuddyState>;
   getAiInlineCompletion(
     watcherId: string,
     session: string,
@@ -584,6 +621,29 @@ class HttpSyncApi implements SyncApi {
         signal: options?.signal
       }
     );
+  }
+
+  async sendAiBuddyFeedback(
+    payload: {
+      message: string;
+      role: string;
+      rating: "good" | "bad";
+      taskType?: string;
+      mode?: string;
+      thinking?: string;
+      model?: string;
+      watcherId?: string;
+      session?: string;
+    }
+  ): Promise<{ ok: boolean }> {
+    return http<{ ok: boolean }>("/ai/buddy/feedback", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async getAiBuddyState(): Promise<BuddyState> {
+    return http<BuddyState>("/ai/buddy/state");
   }
 
   async getAiInlineCompletion(

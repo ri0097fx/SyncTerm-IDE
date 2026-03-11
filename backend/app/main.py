@@ -12,6 +12,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from html.parser import HTMLParser
 from pathlib import PurePosixPath
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -43,6 +44,32 @@ def load_paths():
 
 
 BASE_PATH, SESSIONS_ROOT, REGISTRY_ROOT = load_paths()
+
+
+class _HtmlTextExtractor(HTMLParser):
+  """外部依存なしで HTML → プレーンテキストに変換する簡易パーサ。"""
+
+  def __init__(self) -> None:
+    super().__init__()
+    self._chunks: List[str] = []
+
+  def handle_data(self, data: str) -> None:
+    text = data.strip()
+    if text:
+      self._chunks.append(text)
+
+  def get_text(self) -> str:
+    return "\n".join(self._chunks)
+
+
+def _html_to_text(html: str) -> str:
+  parser = _HtmlTextExtractor()
+  try:
+    parser.feed(html)
+  except Exception:
+    # パースに失敗した場合は生の HTML を返す
+    return html
+  return parser.get_text()
 
 
 def load_ai_config() -> None:
@@ -500,6 +527,52 @@ def backend_info():
     "registry_files": registry_files,
     "file_states": file_states,
     "watcher_count": len(load_watchers()),
+  }
+
+
+@app.get("/tools/fetch")
+def fetch_url(url: str, max_chars: int = 8000):
+  """
+  シンプルな Web 情報取得用エンドポイント。
+
+  - http(s) のみ許可
+  - HTML の場合はタグを落としてプレーンテキスト化
+  - 返却テキストは max_chars でカット（フロント／Agent が要約しやすいように）
+  """
+  url = url.strip()
+  if not url:
+    raise HTTPException(status_code=400, detail="url is required")
+  if not (url.startswith("http://") or url.startswith("https://")):
+    raise HTTPException(status_code=400, detail="only http/https URLs are allowed")
+
+  req = urllib.request.Request(url, headers={"User-Agent": "SyncTerm-Buddy/0.1"})
+  try:
+    with urllib.request.urlopen(req, timeout=15) as resp:
+      raw = resp.read()
+      ctype = resp.headers.get("Content-Type", "")
+  except urllib.error.HTTPError as e:
+    detail = e.read().decode("utf-8", errors="replace")
+    raise HTTPException(status_code=e.code, detail=f"HTTP error from upstream: {detail[:2000]}")
+  except Exception as e:
+    raise HTTPException(status_code=502, detail=f"Failed to fetch URL: {e}")
+
+  # テキスト系のみ扱う
+  text: str
+  try:
+    text = raw.decode("utf-8", errors="replace")
+  except Exception:
+    text = raw.decode("latin-1", errors="replace")
+
+  if "html" in ctype.lower():
+    text = _html_to_text(text)
+
+  if max_chars > 0:
+    text = text[:max_chars]
+
+  return {
+    "url": url,
+    "contentType": ctype,
+    "text": text,
   }
 
 
@@ -2062,6 +2135,145 @@ class AiAssistResponse(BaseModel):
   logs: List[AgentCommandLog] = Field(default_factory=list)
 
 
+class BuddyFeedbackPayload(BaseModel):
+  message: str
+  role: str = "assistant"
+  rating: str  # "good" | "bad"
+  taskType: Optional[str] = None
+  mode: Optional[str] = None
+  thinking: Optional[str] = None
+  model: Optional[str] = None
+  watcherId: Optional[str] = None
+  session: Optional[str] = None
+
+
+BUDDY_MEMORY_PATH = BASE_PATH / "ai_buddy_memory.jsonl"
+_BUDDY_STATE_PATH = BASE_PATH / "ai_buddy_state.json"
+
+
+def append_buddy_memory_item(item: dict) -> None:
+  try:
+    enriched = dict(item)
+    enriched.setdefault("ts", time.time())
+    with BUDDY_MEMORY_PATH.open("a", encoding="utf-8") as f:
+      f.write(json.dumps(enriched, ensure_ascii=False) + "\n")
+  except Exception:
+    logger.exception("failed to append buddy memory item")
+
+
+def load_buddy_state() -> dict:
+  default = {"routing": {}, "stats": {"total_feedback": 0, "per_task": {}}, "hints": []}
+  try:
+    if _BUDDY_STATE_PATH.exists():
+      data = json.loads(_BUDDY_STATE_PATH.read_text("utf-8"))
+      if isinstance(data, dict):
+        for k, v in default.items():
+          data.setdefault(k, v)
+        return data
+  except Exception:
+    logger.exception("failed to load buddy state")
+  return default
+
+
+def save_buddy_state(state: dict) -> None:
+  try:
+    _BUDDY_STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+  except Exception:
+    logger.exception("failed to save buddy state")
+
+
+@app.post("/ai/buddy/feedback")
+def ai_buddy_feedback(payload: BuddyFeedbackPayload):
+  if not payload.message.strip():
+    return {"ok": False}
+  # メモリへの追記
+  item = {
+    "kind": "feedback",
+    "message": payload.message,
+    "role": (payload.role or "assistant").strip(),
+    "rating": payload.rating,
+    "taskType": payload.taskType,
+    "mode": payload.mode,
+    "thinking": payload.thinking,
+    "model": payload.model,
+    "watcherId": payload.watcherId,
+    "session": payload.session,
+  }
+  append_buddy_memory_item(item)
+  # Routing / stats の更新
+  try:
+    state = load_buddy_state()
+    stats = state.setdefault("stats", {}).setdefault("per_task", {})
+    routing = state.setdefault("routing", {})
+    task = (payload.taskType or "chat").strip() or "chat"
+    mode = (payload.mode or "ask").strip() or "ask"
+    thinking = (payload.thinking or "balanced").strip() or "balanced"
+    # stats
+    per = stats.setdefault(task, {"total": 0, "good": 0, "bad": 0})
+    per["total"] += 1
+    if payload.rating == "good":
+      per["good"] += 1
+    else:
+      per["bad"] += 1
+    state.setdefault("stats", {})["total_feedback"] = state.get("stats", {}).get("total_feedback", 0) + 1
+    # routing counts
+    task_r = routing.setdefault(task, {}).setdefault(mode, {}).setdefault(thinking, {"good": 0, "bad": 0})
+    if payload.rating == "good":
+      task_r["good"] += 1
+    else:
+      task_r["bad"] += 1
+    save_buddy_state(state)
+  except Exception:
+    logger.exception("failed to update buddy routing state")
+  return {"ok": True}
+
+
+@app.get("/ai/buddy/state")
+def ai_buddy_state():
+  state = load_buddy_state()
+  routing = state.get("routing") or {}
+  per_task = state.get("stats", {}).get("per_task") or {}
+  # best_mode / best_thinking を計算
+  for task, modes in routing.items():
+    best_tuple = None
+    best_score = None
+    for mode, thinks in modes.items():
+      for thinking, cnt in thinks.items():
+        g = int(cnt.get("good") or 0)
+        b = int(cnt.get("bad") or 0)
+        total = g + b
+        if total == 0:
+          continue
+        score = (g - b) / total  # -1..1
+        if best_score is None or score > best_score:
+          best_score = score
+          best_tuple = (mode, thinking)
+    if best_tuple:
+      tstats = per_task.setdefault(task, {"total": 0, "good": 0, "bad": 0})
+      tstats["best_mode"] = best_tuple[0]
+      tstats["best_thinking"] = best_tuple[1]
+  # ヒント生成（簡易）
+  hints = []
+  for task, tstats in per_task.items():
+    total = int(tstats.get("total") or 0)
+    good = int(tstats.get("good") or 0)
+    bad = int(tstats.get("bad") or 0)
+    best_mode = tstats.get("best_mode")
+    best_thinking = tstats.get("best_thinking")
+    if total >= 3 and best_mode and best_thinking:
+      hints.append(
+        {
+          "id": f"{task}:{best_mode}:{best_thinking}",
+          "text": f"{task} タスクでは {best_mode} / {best_thinking} の組み合わせで良い結果が多いようです。",
+        }
+      )
+  return {
+    "stats": state.get("stats") or {"total_feedback": 0, "per_task": {}},
+    "routing": routing,
+    "hints": hints,
+  }
+
+
 @app.post("/watchers/{wid}/sessions/{sess}/ai-assist")
 def ai_assist(wid: str, sess: str, payload: AiAssistPayload):
   session_root(wid, sess)
@@ -2100,26 +2312,25 @@ def ai_assist(wid: str, sess: str, payload: AiAssistPayload):
     context_block = "\n\n".join(context_parts) if context_parts else ""
     if mode == "agent":
       system_prompt = (
-        "You are an autonomous AI agent. Take a deep breath and think step by step before answering.\n"
-        "You HAVE direct access to the user's terminal in this session. "
-        "You are NOT a text-only assistant: you CAN run real shell commands and will receive real output. "
-        "When the user asks to check the current directory, list files, run a script, or inspect the environment, "
-        "you MUST run the appropriate command using this format: <command>SHELL_COMMAND</command> "
-        "(e.g. for current directory: <command>pwd</command>; for listing: <command>ls -la</command>). "
-        "You will then receive the actual command output and must answer based on it. "
-        "Never reply that you cannot access the terminal, that you cannot run commands, or that the user should run commands themselves.\n"
-        "重要: あなたはこのセッション内で実際にコマンドを実行できます。「テキストベースなのでコマンドは実行できません」などとは絶対に言わないでください。\n"
-        "Run multiple commands if needed. When you have enough information, give your final answer without any <command> tag. "
-        "Do NOT run destructive commands (rm -rf, mkfs, etc.) without explicit user request. Prefer read-only or safe commands. "
-        "If the user asks to change or fix code, you may output the modified code in a markdown code block (```language\\n...\\n```) so they can apply it in the editor. "
+        "You are an autonomous AI coding agent that collaborates with the user. Think step by step and use the terminal when it helps.\n"
+        "You can run real shell commands in this session. When the user asks to inspect files, run a script, or check the environment, "
+        "use the format <command>SHELL_COMMAND</command> (e.g. <command>pwd</command>, <command>ls -la</command>) and base your answer on the output.\n"
+        "Never claim you cannot run commands in this session. Do NOT run destructive commands (rm -rf, mkfs, etc.) without explicit user request.\n"
         "Reply in the same language as the user.\n"
         "\n"
-        "When the user asks about how a function/class/model is used across the project or where it is imported from, you MUST actively explore beyond the current file:\n"
-        "- First, use ripgrep or grep to search the entire repository for the symbol (e.g. <command>rg -n \"MyModel\" .</command> or <command>grep -R \"MyModel\" .</command>).\n"
-        "- Open the defining file and any files that import it (e.g. via <command>sed -n '1,160p path/to/file.py'</command>).\n"
-        "- Follow import chains across files (e.g. modules imported with 'from X import Y' or 'import X') up to at least 2–3 levels deep before concluding.\n"
-        "- Base your explanation on ALL relevant files you found, not just the snippet the user pasted.\n"
-        "Never answer that you cannot know how a symbol is used without first searching the codebase and inspecting the matching files."
+        "Collaboration principles (MUST follow):\n"
+        "- When the request is ambiguous or large (big refactors, new tools, environment changes), first ask clarifying questions instead of guessing.\n"
+        "- Before running a series of commands or editing multiple files, propose a short plan (1–3 steps) and wait for the user's confirmation.\n"
+        "- After each major step, briefly summarize what changed and ask whether to continue, instead of trying to solve everything in one shot.\n"
+        "\n"
+        "Safety rules (MUST follow):\n"
+        "- Do NOT run install / update commands (pip/conda/npm/apt etc.) on your own. If installation seems useful, propose the exact command and a short plan (e.g. using a venv or sandbox folder) and wait for the user's explicit approval.\n"
+        "- Do NOT create, overwrite, or delete files unless the user has clearly requested it. When new files are needed, propose the path/name first and ask for confirmation.\n"
+        "- Prefer read-only or low‑risk commands by default.\n"
+        "\n"
+        "When the user asks how a symbol is used across the project, actively explore:\n"
+        "- First search the repo (e.g. <command>rg -n \"MyModel\" .</command>).\n"
+        "- Then open defining/importing files (e.g. via <command>sed -n '1,160p path/to/file.py'</command>) and base your explanation on all relevant files."
       )
       if context_block:
         system_prompt += "\n\n--- Editor context (use for code changes when relevant) ---\n" + context_block
@@ -2238,7 +2449,12 @@ def ai_assist(wid: str, sess: str, payload: AiAssistPayload):
         "You are an autonomous coding agent. Take a deep breath and think step by step about the best change.\n"
         "Break down the request into steps, apply changes, and return only the final code text that can directly "
         "replace the target scope. No markdown fences. Do not use placeholder code like '...' – always return "
-        "complete, compilable code."
+        "complete, compilable code.\n"
+        "\n"
+        "[File safety rules]\n"
+        "- NEVER install or update packages or tools from within generated code without the user's explicit confirmation.\n"
+        "- Avoid writing code that assumes global environment changes (e.g. global pip/conda installs); prefer code that can run inside a virtual environment or a clearly separated sandbox directory when such setup is needed.\n"
+        "- Do not create or delete files in unexpected locations; if file creation is part of the request, make it clear in comments or surrounding text and keep all new artifacts inside a dedicated folder when possible."
       )
     elif mode == "plan":
       system_prompt = (

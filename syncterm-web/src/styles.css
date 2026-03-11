@@ -695,6 +695,165 @@ body {
   margin-top: 0.35rem;
 }
 
+.ai-chat-feedback-buttons {
+  display: flex;
+  gap: 0.2rem;
+  margin-top: 0.15rem;
+}
+
+.ai-chat-feedback-btn {
+  width: 28px;
+  height: 28px;
+  transition: background-color 0.15s ease, color 0.15s ease, opacity 0.15s ease;
+}
+
+.ai-chat-feedback-btn.is-active {
+  background-color: #f97316;
+  color: #ffffff;
+}
+
+.ai-chat-feedback-btn[disabled] {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.ai-chat-feedback-btn.is-active[disabled] {
+  opacity: 1;
+}
+
+.ai-buddy-monitor {
+  border-radius: 0.5rem;
+  border: 1px solid var(--color-pane-border, #374151);
+  background: rgba(15, 23, 42, 0.8);
+  padding: 0.4rem 0.5rem;
+  font-size: 0.78rem;
+}
+
+.ai-buddy-summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.3rem;
+  color: var(--color-text-muted, #9ca3af);
+}
+
+.ai-buddy-tasks {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.ai-buddy-task-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.14rem;
+}
+
+.ai-buddy-task-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.ai-buddy-task-name {
+  font-weight: 500;
+  color: var(--color-text, #e5e7eb);
+}
+
+.ai-buddy-task-count {
+  font-size: 0.72rem;
+  color: var(--color-text-muted, #9ca3af);
+}
+
+.ai-buddy-task-bar {
+  position: relative;
+  height: 0.35rem;
+  border-radius: 999px;
+  background: rgba(31, 41, 55, 0.9);
+  overflow: hidden;
+}
+
+.ai-buddy-task-bar-good {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #22c55e, #4ade80);
+}
+
+.ai-buddy-task-best {
+  font-size: 0.72rem;
+  color: var(--color-text-muted, #9ca3af);
+}
+
+.ai-buddy-tab {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.ai-buddy-presets {
+  display: flex;
+  gap: 0.25rem;
+  margin-top: 0.25rem;
+}
+
+.ai-buddy-training-tasks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin-top: 0.35rem;
+}
+
+.ai-buddy-error {
+  color: #dc2626;
+  font-size: 0.8rem;
+  margin-top: 0.25rem;
+}
+
+.ai-settings-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+  font-size: 0.85rem;
+  color: var(--color-text-muted, #9ca3af);
+}
+
+.ai-settings-toggle input[type="checkbox"] {
+  width: 1rem;
+  height: 1rem;
+}
+
+.ai-buddy-task-chip {
+  max-width: 100%;
+  padding: 0.15rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid var(--color-pane-border, #374151);
+  background: rgba(15, 23, 42, 0.85);
+  color: var(--color-text-muted, #cbd5e1);
+  font-size: 0.75rem;
+  cursor: pointer;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+
+.ai-buddy-task-chip:hover {
+  border-color: var(--color-accent, #6366f1);
+  color: var(--color-text, #e5e7eb);
+}
+
+.ai-buddy-messages {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 0.1rem;
+}
+
 .ai-chat-msg-assistant .ai-chat-msg-text {
   /* AI 出力はより白に近い色で表示 */
   color: #ffffff;

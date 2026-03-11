@@ -1,0 +1,8 @@
+transformers>=4.46.0
+datasets>=2.18.0
+peft>=0.13.0
+accelerate>=0.34.0
+sentencepiece>=0.2.0
+# PyTorch は環境依存のため、適切なバージョンを別途インストールしてください
+# 例: pip install --index-url https://download.pytorch.org/whl/cu121 torch torchvision
+

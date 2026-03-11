@@ -14,9 +14,9 @@ import "prismjs/themes/prism-tomorrow.css";
 import { useSession } from "../session/SessionContext";
 import { usePreferences } from "../preferences/PreferencesContext";
 import { useActiveEditor } from "./ActiveEditorContext";
-import { api } from "../../lib/api";
+import { api, type BuddyState } from "../../lib/api";
 
-type Message = { role: "user" | "assistant"; text: string };
+type Message = { role: "user" | "assistant"; text: string; feedback?: "good" | "bad" };
 type PendingCommand = { command: string };
 const AUTO_MODEL = "__auto__";
 
@@ -218,7 +218,7 @@ export const AiChatPanel: React.FC = () => {
   const { currentWatcher, currentSession } = useSession();
   const { preferences, updatePreferences } = usePreferences();
   const { activeEditor, applyToSelection, appendAtCursor } = useActiveEditor();
-  const [tab, setTab] = useState<"chat" | "assist" | "settings">("chat");
+  const [tab, setTab] = useState<"chat" | "assist" | "buddy" | "settings">("chat");
   const [chatIds, setChatIds] = useState<string[]>([]);
   const [activeChatId, setActiveChatId] = useState<string>("");
   const [chats, setChats] = useState<Record<string, { name?: string; messages: Message[] }>>({});
@@ -240,6 +240,14 @@ export const AiChatPanel: React.FC = () => {
   const [chatView, setChatView] = useState<"messages" | "logs">("messages");
   const [editingMessageIndex, setEditingMessageIndex] = useState<number | null>(null);
   const [editingMessageText, setEditingMessageText] = useState("");
+  const [buddyState, setBuddyState] = useState<BuddyState | null>(null);
+  const [buddyMessages, setBuddyMessages] = useState<Message[]>([]);
+  const [buddyInput, setBuddyInput] = useState("");
+  const [buddyLoading, setBuddyLoading] = useState(false);
+  const [buddySuggestedTasks, setBuddySuggestedTasks] = useState<string[]>([]);
+  const [buddyTasksError, setBuddyTasksError] = useState<string | null>(null);
+  const [buddyTasksLoading, setBuddyTasksLoading] = useState(false);
+  const [buddyAllowCommands, setBuddyAllowCommands] = useState(false);
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
   const [thinkingMenuOpen, setThinkingMenuOpen] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -267,6 +275,15 @@ export const AiChatPanel: React.FC = () => {
       parts.push("Respond in Japanese.");
     } else if (preferences.aiLanguage === "en") {
       parts.push("Respond in English.");
+    }
+    if (buddyState && buddyState.hints && buddyState.hints.length) {
+      const enabledHints = buddyState.hints;
+      if (enabledHints.length) {
+        parts.push(
+          "Learned preferences (from past feedback):\n" +
+            enabledHints.map((h) => `- ${h.text}`).join("\n")
+        );
+      }
     }
     const text = parts.join("\n");
     return text || undefined;
@@ -569,6 +586,28 @@ export const AiChatPanel: React.FC = () => {
     }
   }, [pendingCommand, currentWatcher?.id, currentSession?.name, selectedModel, chatMode, thinkingMode, activeEditor.path, activeEditor.selectedText, activeEditor.content]);
 
+  const sendFeedback = useCallback(
+    async (message: Message, rating: "good" | "bad") => {
+      if (!message.text.trim()) return;
+      try {
+        await api.sendAiBuddyFeedback({
+          message: message.text,
+          role: message.role,
+          rating,
+          taskType: tab === "assist" ? aiAction : tab === "buddy" ? "buddy_train" : "chat",
+          mode: chatMode,
+          thinking: thinkingMode,
+          model: selectedModel ?? undefined,
+          watcherId: currentWatcher?.id,
+          session: currentSession?.name
+        });
+      } catch {
+        // ignore feedback errors
+      }
+    },
+    [currentWatcher?.id, currentSession?.name, tab, aiAction, chatMode, thinkingMode, selectedModel]
+  );
+
   const skipPendingCommand = useCallback(async () => {
     if (!pendingCommand || !currentWatcher || !currentSession) return;
     const cmd = pendingCommand.command;
@@ -609,6 +648,116 @@ export const AiChatPanel: React.FC = () => {
       setLoading(false);
     }
   }, [pendingCommand, currentWatcher?.id, currentSession?.name, selectedModel, chatMode, thinkingMode]);
+
+  const sendBuddy = useCallback(
+    async (text: string) => {
+      if (!currentWatcher || !currentSession || !text.trim()) return;
+      const userMessage = text.trim();
+      const prev = buddyMessages;
+      const history = prev.map((m) => ({ role: m.role, content: m.text }));
+      setBuddyMessages((msgs) => [...msgs, { role: "user", text: userMessage }]);
+      setBuddyInput("");
+      setBuddyLoading(true);
+      try {
+        const modeForBuddy = buddyAllowCommands ? "agent" : "ask";
+        const res = await api.runAiAssist(currentWatcher.id, currentSession.name, {
+          path: activeEditor.path ?? "",
+          action: "chat",
+          prompt: userMessage,
+          fileContent: activeEditor.content ?? "",
+          history,
+          model: selectedModel ?? undefined,
+          mode: modeForBuddy,
+          ...(modeForBuddy === "agent" && {
+            editorPath: activeEditor.path ?? undefined,
+            editorSelectedText: activeEditor.selectedText ?? undefined,
+            editorContent: activeEditor.content ?? undefined
+          }),
+          thinking: thinkingMode,
+          persona: buildPersonaInstructions()
+        });
+        const reply = (res.result ?? "").trim() || "(no response)";
+        setBuddyMessages((msgs) => [...msgs, { role: "assistant", text: reply }]);
+      } catch (e) {
+        const errMsg = e instanceof Error ? e.message : "Request failed";
+        setBuddyMessages((msgs) => [...msgs, { role: "assistant", text: `Error: ${errMsg}` }]);
+      } finally {
+        setBuddyLoading(false);
+      }
+    },
+    [
+      currentWatcher?.id,
+      currentSession?.name,
+      buddyMessages,
+      selectedModel,
+      thinkingMode,
+      buddyAllowCommands,
+      activeEditor.path,
+      activeEditor.selectedText,
+      activeEditor.content
+    ]
+  );
+
+  const generateBuddyTasks = useCallback(
+    async () => {
+      if (!currentWatcher || !currentSession) {
+        setBuddyTasksError("Watcher / Session が未接続のため、練習タスクを生成できません。まず左上で接続してください。");
+        return;
+      }
+      setBuddyTasksLoading(true);
+      setBuddyTasksError(null);
+      try {
+        const prompt =
+          "あなたは Buddy AI のコーチです。まずは「初級レベル」の、非常に簡単な練習タスクだけを日本語で5個提案してください。" +
+          "・対象はこのプロジェクトのようなソフトウェア開発ですが、内容は『1つの関数を読む』『短いエラーメッセージを要約する』など、小さくてシンプルなものに限定してください。" +
+          "・各行に1タスクだけを書き、最大30文字程度に短くまとめてください。" +
+          "・出力は前置きや説明なしで、純粋にタスク文の行のみとします。";
+        const res = await api.runAiAssist(currentWatcher.id, currentSession.name, {
+          path: "",
+          action: "chat",
+          prompt,
+          fileContent: "",
+          history: [],
+          model: selectedModel ?? undefined,
+          mode: "ask",
+          thinking: thinkingMode,
+          persona: buildPersonaInstructions()
+        });
+        const raw = (res.result ?? "").trim();
+        const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+        const tasks = lines
+          .map((l) => l.replace(/^[-*\d．\.)\]]+\s*/, "").trim())
+          .filter(Boolean)
+          .slice(0, 8);
+        setBuddySuggestedTasks(tasks);
+        if (!tasks.length) {
+          setBuddyTasksError("練習タスクをうまく生成できませんでした。もう一度試すか、Buddy に直接簡単なタスクを書いてみてください。");
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : "unknown error";
+        setBuddyTasksError(`練習タスクの生成に失敗しました: ${msg}`);
+      } finally {
+        setBuddyTasksLoading(false);
+      }
+    },
+    [currentWatcher?.id, currentSession?.name, selectedModel, thinkingMode]
+  );
+
+  // Buddy AI の学習状態を取得
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const state = await api.getAiBuddyState();
+        if (!cancelled) setBuddyState(state);
+      } catch {
+        if (!cancelled) setBuddyState(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [currentWatcher?.id, currentSession?.name]);
 
   const handleNewChat = () => {
     const id = crypto.randomUUID();
@@ -732,6 +881,13 @@ export const AiChatPanel: React.FC = () => {
             </button>
             <button
               type="button"
+              className={`editor-tab${tab === "buddy" ? " active" : ""}`}
+              onClick={() => setTab("buddy")}
+            >
+              Buddy
+            </button>
+            <button
+              type="button"
               className={`editor-tab${tab === "settings" ? " active" : ""}`}
               onClick={() => setTab("settings")}
             >
@@ -817,6 +973,268 @@ export const AiChatPanel: React.FC = () => {
                 <option value="en">主に英語</option>
               </select>
             </div>
+            <div className="ai-settings-section">
+              <label className="ai-settings-label">Buddy Monitor</label>
+              <p className="ai-settings-hint">
+                Buddy AI がこれまでのフィードバックから学習した傾向を表示します（簡易統計）。
+              </p>
+              {!buddyState || !buddyState.stats || buddyState.stats.total_feedback === 0 ? (
+                <div className="ai-chat-inline-note">まだ十分なフィードバックがありません。</div>
+              ) : (
+                <div className="ai-buddy-monitor">
+                  <div className="ai-buddy-summary">
+                    <span>総フィードバック数: {buddyState.stats.total_feedback}</span>
+                  </div>
+                  <div className="ai-buddy-tasks">
+                    {Object.entries(buddyState.stats.per_task).map(([task, s]) => (
+                      <div key={task} className="ai-buddy-task-row">
+                        <div className="ai-buddy-task-header">
+                          <span className="ai-buddy-task-name">{task}</span>
+                          <span className="ai-buddy-task-count">
+                            {s.good}/{s.total} good
+                          </span>
+                        </div>
+                        <div className="ai-buddy-task-bar">
+                          <div
+                            className="ai-buddy-task-bar-good"
+                            style={{ width: s.total > 0 ? `${(s.good / s.total) * 100}%` : "0%" }}
+                          />
+                        </div>
+                        {s.best_mode && s.best_thinking && (
+                          <div className="ai-buddy-task-best">
+                            推奨: {s.best_mode} / {s.best_thinking}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+        {tab === "buddy" && (
+          <div className="ai-buddy-tab">
+            <div className="ai-settings-section">
+              <label className="ai-settings-label">Buddy Training</label>
+              <p className="ai-settings-hint">
+                Buddy に簡単なタスクを出して練習させるモードです。良い / 悪い回答にはフィードバックを付けてください。
+              </p>
+              <label className="ai-settings-toggle">
+                <input
+                  type="checkbox"
+                  checked={buddyAllowCommands}
+                  onChange={(e) => setBuddyAllowCommands(e.target.checked)}
+                />
+                <span>Buddy にコマンド実行を許可（Agent モード）</span>
+              </label>
+              <p className="ai-settings-hint">
+                有効にすると、この Buddy チャットでも Agent と同様にターミナルでコマンドを実行して調査します。
+              </p>
+              <div className="ai-buddy-presets">
+                <button
+                  type="button"
+                  className="icon-button ai-mini-icon-btn"
+                  onClick={() =>
+                    setBuddyInput(
+                      "次のエラーログを読み、原因の候補を2〜3個、箇条書きで挙げてください。さらに、次に確認すべきポイントも1つ提案してください。"
+                    )
+                  }
+                  title="ログ解析の練習"
+                >
+                  L
+                </button>
+                <button
+                  type="button"
+                  className="icon-button ai-mini-icon-btn"
+                  onClick={() =>
+                    setBuddyInput(
+                      "次の関数を読み、より読みやすくリファクタしてください。変更点の要約も短く添えてください。"
+                    )
+                  }
+                  title="リファクタの練習"
+                >
+                  R
+                </button>
+                <button
+                  type="button"
+                  className="icon-button ai-mini-icon-btn"
+                  onClick={() => void generateBuddyTasks()}
+                  disabled={buddyTasksLoading || !currentWatcher || !currentSession}
+                  title="Buddy 向け練習タスクを自動生成"
+                >
+                  ☆
+                </button>
+              </div>
+              {buddyTasksLoading && (
+                <p className="ai-settings-hint">練習タスクを生成中です...</p>
+              )}
+              {buddyTasksError && (
+                <p className="ai-settings-hint ai-buddy-error">{buddyTasksError}</p>
+              )}
+              {buddySuggestedTasks.length > 0 && (
+                <div className="ai-buddy-training-tasks">
+                  {buddySuggestedTasks.map((t, idx) => (
+                    <button
+                      key={idx}
+                      type="button"
+                      className="ai-buddy-task-chip"
+                      onClick={() => {
+                        setBuddyInput(t);
+                        if (!buddyLoading && currentWatcher && currentSession) {
+                          void sendBuddy(t);
+                        }
+                      }}
+                      title={t}
+                    >
+                      {t}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="ai-buddy-messages">
+              {buddyMessages.map((m, i) => {
+                const segs = splitMarkdownCodeFences(m.text);
+                return (
+                  <div key={i} className={`ai-chat-msg ai-chat-msg-${m.role}`}>
+                    <span className="ai-chat-msg-role">{m.role === "user" ? "You" : "Buddy"}</span>
+                    {m.role === "assistant" && (
+                      <div className="ai-chat-feedback-buttons">
+                        <button
+                          type="button"
+                          className={`icon-button ai-mini-icon-btn ai-chat-feedback-btn${
+                            m.feedback === "good" ? " is-active" : ""
+                          }`}
+                          disabled={!!m.feedback}
+                          onClick={() => {
+                            if (m.feedback) return;
+                            void (async () => {
+                              await sendFeedback(m, "good");
+                              setBuddyMessages((prev) => {
+                                const next = [...prev];
+                                if (!next[i]) return prev;
+                                if (next[i].feedback) return prev;
+                                next[i] = { ...next[i], feedback: "good" };
+                                return next;
+                              });
+                            })();
+                          }}
+                          title="この回答は役に立った"
+                          aria-label="この回答は役に立った"
+                        >
+                          <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+                            <circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" strokeWidth="2" />
+                            <path
+                              d="M9 12l2 2 4-4"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="2"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            />
+                          </svg>
+                        </button>
+                        <button
+                          type="button"
+                          className={`icon-button ai-mini-icon-btn ai-chat-feedback-btn${
+                            m.feedback === "bad" ? " is-active" : ""
+                          }`}
+                          disabled={!!m.feedback}
+                          onClick={() => {
+                            if (m.feedback) return;
+                            void (async () => {
+                              await sendFeedback(m, "bad");
+                              setBuddyMessages((prev) => {
+                                const next = [...prev];
+                                if (!next[i]) return prev;
+                                if (next[i].feedback) return prev;
+                                next[i] = { ...next[i], feedback: "bad" };
+                                return next;
+                              });
+                            })();
+                          }}
+                          title="この回答はいまいち"
+                          aria-label="この回答はいまいち"
+                        >
+                          <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+                            <path
+                              d="M9 9l6 6M15 9l-6 6"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="2"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            />
+                          </svg>
+                        </button>
+                      </div>
+                    )}
+                    {segs.map((s, idx) => {
+                      if (s.kind === "text") {
+                        const t = s.text.trimEnd();
+                        if (!t) return null;
+                        const html = marked.parse(t, { breaks: true }) as string;
+                        return (
+                          <div
+                            key={idx}
+                            className="ai-chat-msg-text"
+                            dangerouslySetInnerHTML={{ __html: html }}
+                          />
+                        );
+                      }
+                      const lang = normalizePrismLanguage(s.language);
+                      const grammar = Prism.languages[lang] || Prism.languages.plaintext || Prism.languages.markup;
+                      const highlighted = Prism.highlight(s.code, grammar, lang);
+                      return (
+                        <pre key={idx} className="ai-chat-code">
+                          <code
+                            className={`language-${lang}`}
+                            dangerouslySetInnerHTML={{ __html: highlighted }}
+                          />
+                        </pre>
+                      );
+                    })}
+                  </div>
+                );
+              })}
+            </div>
+            <form
+              className="ai-chat-form"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (buddyInput.trim() && !buddyLoading) void sendBuddy(buddyInput);
+              }}
+            >
+              <div className="ai-chat-composer">
+                <textarea
+                  className="ai-chat-input"
+                  placeholder="Buddy に練習タスクを出してみましょう"
+                  value={buddyInput}
+                  onChange={(e) => setBuddyInput(e.target.value)}
+                  disabled={buddyLoading || !currentWatcher || !currentSession}
+                />
+                <div className="ai-chat-composer-right">
+                  <button
+                    type="submit"
+                    className="ai-chat-send-btn"
+                    disabled={!currentWatcher || !currentSession || (!buddyLoading && !buddyInput.trim())}
+                    title={buddyLoading ? "停止" : "送信"}
+                    aria-label={buddyLoading ? "停止" : "送信"}
+                  >
+                    {buddyLoading ? (
+                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <rect x="5" y="5" width="14" height="14" fill="#ffffff" rx="3" ry="3" />
+                      </svg>
+                    ) : (
+                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M5 18L12 5l7 13z" fill="#ffffff" />
+                      </svg>
+                    )}
+                  </button>
+                </div>
+              </div>
+            </form>
           </div>
         )}
         {tab === "chat" && (
@@ -898,7 +1316,7 @@ export const AiChatPanel: React.FC = () => {
                     <div className="ai-chat-edit-actions">
                       <button
                         type="button"
-                        className="primary-button"
+                        className="icon-button ai-mini-icon-btn"
                         onClick={() => {
                           if (!editingMessageText.trim()) return;
                           void send(editingMessageText.trim(), { historyBeforeIndex: i });
@@ -906,19 +1324,26 @@ export const AiChatPanel: React.FC = () => {
                           setEditingMessageText("");
                         }}
                         disabled={loading}
+                        title="編集内容を送信"
+                        aria-label="編集内容を送信"
                       >
-                        送信
+                        <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+                          <path d="M5 18L12 5l7 13z" fill="currentColor" />
+                        </svg>
                       </button>
                       <button
                         type="button"
-                        className="icon-button"
-                        style={{ padding: "0 0.6rem" }}
+                        className="icon-button ai-mini-icon-btn"
                         onClick={() => {
                           setEditingMessageIndex(null);
                           setEditingMessageText("");
                         }}
+                        title="編集をキャンセル"
+                        aria-label="編集をキャンセル"
                       >
-                        キャンセル
+                        <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+                          <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                        </svg>
                       </button>
                     </div>
                   </div>
@@ -937,11 +1362,97 @@ export const AiChatPanel: React.FC = () => {
                       setEditingMessageIndex(i);
                       setEditingMessageText(m.text);
                     }}
-                    title="編集して再送信（それ以降の会話はリセット）"
-                    aria-label="編集"
+                    title="メッセージを編集して再送信（それ以降の会話はリセット）"
+                    aria-label="メッセージを編集"
                   >
-                    編集
+                    <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true">
+                      <path
+                        d="M4 20h4l10-10-4-4L4 16v4z"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
                   </button>
+                )}
+                {m.role === "assistant" && (
+                  <div className="ai-chat-feedback-buttons">
+                    <button
+                      type="button"
+                      className={`icon-button ai-mini-icon-btn ai-chat-feedback-btn${
+                        m.feedback === "good" ? " is-active" : ""
+                      }`}
+                      disabled={!!m.feedback}
+                      onClick={() => {
+                        if (m.feedback) return;
+                        void (async () => {
+                          await sendFeedback(m, "good");
+                          setChats((prev) => {
+                            const mid = activeChatId;
+                            const chat = prev[mid];
+                            if (!chat) return prev;
+                            const msgs = [...chat.messages];
+                            if (!msgs[i]) return prev;
+                            if (msgs[i].feedback) return prev;
+                            msgs[i] = { ...msgs[i], feedback: "good" };
+                            return { ...prev, [mid]: { ...chat, messages: msgs } };
+                          });
+                        })();
+                      }}
+                      title="この回答は役に立った"
+                      aria-label="この回答は役に立った"
+                    >
+                      <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+                        <circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" strokeWidth="2" />
+                        <path
+                          d="M9 12l2 2 4-4"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                    </button>
+                    <button
+                      type="button"
+                      className={`icon-button ai-mini-icon-btn ai-chat-feedback-btn${
+                        m.feedback === "bad" ? " is-active" : ""
+                      }`}
+                      disabled={!!m.feedback}
+                      onClick={() => {
+                        if (m.feedback) return;
+                        void (async () => {
+                          await sendFeedback(m, "bad");
+                          setChats((prev) => {
+                            const mid = activeChatId;
+                            const chat = prev[mid];
+                            if (!chat) return prev;
+                            const msgs = [...chat.messages];
+                            if (!msgs[i]) return prev;
+                            if (msgs[i].feedback) return prev;
+                            msgs[i] = { ...msgs[i], feedback: "bad" };
+                            return { ...prev, [mid]: { ...chat, messages: msgs } };
+                          });
+                        })();
+                      }}
+                      title="この回答はいまいち"
+                      aria-label="この回答はいまいち"
+                    >
+                      <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+                        <path
+                          d="M9 9l6 6M15 9l-6 6"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                    </button>
+                  </div>
                 )}
                 {segs.map((s, idx) => {
                   if (s.kind === "text") {
