@@ -29,6 +29,14 @@ export interface Preferences {
   aiResponseLength: "short" | "normal" | "detailed";
   /** 応答に使う言語の優先度 */
   aiLanguage: "auto" | "ja" | "en";
+  /** 実行スタイル（どれくらい慎重／積極的に動くか） */
+  aiExecutionStyle: "normal" | "careful" | "bold";
+  /** 質問スタイル（どれくらい積極的に確認質問するか） */
+  aiQuestioningStyle: "auto" | "proactive" | "minimal";
+  /** 説明スタイル（どの程度ステップバイステップで説明するか） */
+  aiExplainStyle: "auto" | "high_level" | "step_by_step";
+  /** モデルのハイブリッドルーティングを有効にするか（Auto 時） */
+  aiHybridRouting: boolean;
   showImagePreviewPane: boolean;
   /** コマンド送信後の実行経路表示（[RT] 実行済み 等）を表示する */
   showCommandTrace: boolean;
@@ -52,11 +60,15 @@ const DEFAULT_PREFERENCES: Preferences = {
   terminalFontFamily: "Consolas, 'JetBrains Mono', Menlo, Monaco, 'Courier New', monospace",
   terminalMaxLines: 5000,
   terminalPollMs: 1000,
-  aiFontSize: 13,
+  aiFontSize: 12,
   aiPersona: "",
   aiTone: "neutral",
   aiResponseLength: "normal",
   aiLanguage: "auto",
+  aiExecutionStyle: "normal",
+  aiQuestioningStyle: "auto",
+  aiExplainStyle: "auto",
+  aiHybridRouting: true,
   showImagePreviewPane: true,
   showCommandTrace: false,
   showGpuPanel: false,
@@ -95,6 +107,23 @@ function sanitizePreferences(raw: Partial<Preferences>): Preferences {
       raw.aiLanguage === "ja" || raw.aiLanguage === "en" || raw.aiLanguage === "auto"
         ? raw.aiLanguage
         : DEFAULT_PREFERENCES.aiLanguage,
+    aiExecutionStyle:
+      raw.aiExecutionStyle === "normal" || raw.aiExecutionStyle === "careful" || raw.aiExecutionStyle === "bold"
+        ? raw.aiExecutionStyle
+        : DEFAULT_PREFERENCES.aiExecutionStyle,
+    aiQuestioningStyle:
+      raw.aiQuestioningStyle === "auto" ||
+      raw.aiQuestioningStyle === "proactive" ||
+      raw.aiQuestioningStyle === "minimal"
+        ? raw.aiQuestioningStyle
+        : DEFAULT_PREFERENCES.aiQuestioningStyle,
+    aiExplainStyle:
+      raw.aiExplainStyle === "auto" ||
+      raw.aiExplainStyle === "high_level" ||
+      raw.aiExplainStyle === "step_by_step"
+        ? raw.aiExplainStyle
+        : DEFAULT_PREFERENCES.aiExplainStyle,
+    aiHybridRouting: typeof raw.aiHybridRouting === "boolean" ? raw.aiHybridRouting : DEFAULT_PREFERENCES.aiHybridRouting,
     editorFontSize: clamp(Number(raw.editorFontSize ?? DEFAULT_PREFERENCES.editorFontSize), 10, 24),
     terminalFontSize: clamp(Number(raw.terminalFontSize ?? DEFAULT_PREFERENCES.terminalFontSize), 10, 24),
     aiFontSize: clamp(Number(raw.aiFontSize ?? DEFAULT_PREFERENCES.aiFontSize), 10, 24),

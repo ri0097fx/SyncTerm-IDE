@@ -27,6 +27,46 @@ interface EditorPanelProps {
   onCloseFile: (path: string) => void;
 }
 
+function getSetiIconClassForPath(path: string): string {
+  const name = path.split("/").filter(Boolean).pop() ?? path;
+  const lower = name.toLowerCase();
+
+  // フォーマットはファイルツリーと揃える（.sh はテキスト扱い）
+  if (lower.endsWith(".py")) return "file-tree-icon-python";
+  if (lower.endsWith(".sh")) return "file-tree-icon-text";
+  if (lower.endsWith(".md") || lower.endsWith(".mdx")) return "file-tree-icon-markdown";
+
+  if (lower.endsWith(".ts") || lower.endsWith(".tsx")) return "file-tree-icon-typescript";
+  if (lower.endsWith(".js") || lower.endsWith(".jsx") || lower.endsWith(".mjs")) {
+    return "file-tree-icon-javascript";
+  }
+
+  if (
+    lower.endsWith(".json") ||
+    lower.endsWith(".jsonc") ||
+    lower.endsWith(".jsonl")
+  ) {
+    return "file-tree-icon-json";
+  }
+
+  if (lower.endsWith(".csv")) return "file-tree-icon-csv";
+
+  if (lower.endsWith(".log") || lower.endsWith(".txt")) return "file-tree-icon-text";
+
+  if (
+    lower.endsWith(".png") ||
+    lower.endsWith(".jpg") ||
+    lower.endsWith(".jpeg") ||
+    lower.endsWith(".gif") ||
+    lower.endsWith(".webp") ||
+    lower.endsWith(".svg")
+  ) {
+    return "file-tree-icon-image";
+  }
+
+  return "file-tree-icon-file";
+}
+
 function configureMonacoThemes(monaco: Monaco) {
   monaco.editor.defineTheme("spyder-dark-bright", {
     base: "vs-dark",
@@ -606,6 +646,7 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
             {openFilePaths.map((path) => {
               const isActive = path === filePath;
               const name = path.split("/").filter(Boolean).pop() ?? path;
+              const iconClass = getSetiIconClassForPath(path);
               return (
                 <button
                   key={path}
@@ -614,6 +655,11 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
                   onClick={() => onSelectFile(path)}
                   title={path}
                 >
+                  {!isImagePath(path) && (
+                    <span className="editor-tab-icon">
+                      <span className={`file-tree-icon ${iconClass}`} aria-hidden="true" />
+                    </span>
+                  )}
                   <span className="editor-tab-label">{name}</span>
                   <span
                     className="editor-tab-close"

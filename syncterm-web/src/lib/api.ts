@@ -112,7 +112,7 @@ export interface SyncApi {
     path: string,
     signal?: AbortSignal
   ): Promise<Blob>;
-  getAiModels(watcherId: string, session: string): Promise<{ installed: string[]; suggested: string[]; provider?: string }>;
+  getAiModels(watcherId: string, session: string): Promise<{ installed: string[]; suggested: string[]; recommended?: string[]; provider?: string }>;
   ensureAiModel(watcherId: string, session: string, model: string): Promise<{ ok: boolean }>;
   /** モデル pull の進捗をストリーム。onProgress に { status, percent?, error? } が渡る。*/
   ensureAiModelStream(
@@ -138,9 +138,62 @@ export interface SyncApi {
       editorContent?: string;
       thinking?: string;
       persona?: string;
+      hybridRouting?: boolean;
     },
     options?: { signal?: AbortSignal }
-  ): Promise<{ result: string; command?: string; needsApproval?: boolean }>;
+  ): Promise<{
+    result: string;
+    command?: string;
+    needsApproval?: boolean;
+    logs?: { command: string; exitCode?: number; output?: string; error?: string }[];
+    debates?: {
+      id: string;
+      title?: string;
+      models: string[];
+      turns: { round: number; speaker: string; model: string; role: string; content: string }[];
+    }[];
+  }>;
+
+  /** text/event-stream で AI 応答をストリーミング受信する */
+  streamAi(
+    watcherId: string,
+    session: string,
+    payload: {
+      path: string;
+      action: string;
+      prompt: string;
+      selectedText?: string;
+      fileContent: string;
+      history?: { role: string; content: string }[];
+      model?: string;
+      mode?: string;
+      editorPath?: string;
+      editorSelectedText?: string;
+      editorContent?: string;
+      thinking?: string;
+      persona?: string;
+      hybridRouting?: boolean;
+    },
+    onEvent: (ev: {
+      type: "token" | "done" | "debate_turn";
+      delta?: string;
+      result?: string;
+      command?: string;
+      needsApproval?: boolean;
+      truncated?: boolean;
+      autoContinued?: boolean;
+      logs?: { command: string; exitCode?: number; output?: string; error?: string }[];
+      debates?: {
+        id: string;
+        title?: string;
+        models: string[];
+        turns: { round: number; speaker: string; model: string; role: string; content: string }[];
+      }[];
+      debateId?: string;
+      turn?: { round: number; speaker: string; model: string; role: string; content: string };
+    }) => void,
+    options?: { signal?: AbortSignal }
+  ): Promise<void>;
   sendAiBuddyFeedback(
     payload: {
       message: string;
@@ -521,8 +574,8 @@ class HttpSyncApi implements SyncApi {
   async getAiModels(
     watcherId: string,
     session: string
-  ): Promise<{ installed: string[]; suggested: string[]; provider?: string }> {
-    return http<{ installed: string[]; suggested: string[]; provider?: string }>(
+  ): Promise<{ installed: string[]; suggested: string[]; recommended?: string[]; provider?: string }> {
+    return http<{ installed: string[]; suggested: string[]; recommended?: string[]; provider?: string }>(
       `/watchers/${encodeURIComponent(watcherId)}/sessions/${encodeURIComponent(session)}/ai-models`
     );
   }
@@ -621,6 +674,100 @@ class HttpSyncApi implements SyncApi {
         signal: options?.signal
       }
     );
+  }
+
+  async streamAi(
+    watcherId: string,
+    session: string,
+    payload: {
+      path: string;
+      action: string;
+      prompt: string;
+      selectedText?: string;
+      fileContent: string;
+      history?: { role: string; content: string }[];
+      model?: string;
+      mode?: string;
+      editorPath?: string;
+      editorSelectedText?: string;
+      editorContent?: string;
+      thinking?: string;
+      persona?: string;
+      hybridRouting?: boolean;
+    },
+    onEvent: (ev: {
+      type: "token" | "done" | "debate_turn";
+      delta?: string;
+      result?: string;
+      command?: string;
+      needsApproval?: boolean;
+      truncated?: boolean;
+      autoContinued?: boolean;
+      logs?: { command: string; exitCode?: number; output?: string; error?: string }[];
+      debates?: {
+        id: string;
+        title?: string;
+        models: string[];
+        turns: { round: number; speaker: string; model: string; role: string; content: string }[];
+      }[];
+      debateId?: string;
+      turn?: { round: number; speaker: string; model: string; role: string; content: string };
+    }) => void,
+    options?: { signal?: AbortSignal }
+  ): Promise<void> {
+    const path = `/watchers/${encodeURIComponent(watcherId)}/sessions/${encodeURIComponent(
+      session
+    )}/ai-stream`;
+    const res = await fetch(`${BACKEND_URL}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: options?.signal
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`HTTP ${res.status}: ${text}`);
+    }
+    const reader = res.body?.getReader();
+    if (!reader) return;
+    const dec = new TextDecoder();
+    let buf = "";
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const parts = buf.split("\n\n");
+        buf = parts.pop() ?? "";
+        for (const part of parts) {
+          const m = part.match(/^data:\s*(.+)$/s);
+          if (!m) continue;
+          try {
+            const ev = JSON.parse(m[1].trim());
+            if (ev && typeof ev.type === "string") {
+              onEvent(ev);
+            }
+          } catch {
+            // ignore malformed events
+          }
+        }
+      }
+      if (buf.trim()) {
+        const m = buf.match(/^data:\s*(.+)$/s);
+        if (m) {
+          try {
+            const ev = JSON.parse(m[1].trim());
+            if (ev && typeof ev.type === "string") {
+              onEvent(ev);
+            }
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
   }
 
   async sendAiBuddyFeedback(

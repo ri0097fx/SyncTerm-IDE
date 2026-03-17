@@ -2,12 +2,6 @@
 # 【要編集】接続するリモートサーバーのユーザー名とホスト名
 server = user@relay-host
 
-# アプリルートは ~/SyncTerm-IDE に統一。sessions / _registry はその下に自動作成される（base_path は廃止）。
-
-# 【任意】デプロイ先ディレクトリ（scripts/deploy_backend.sh の第2引数省略時に使用）
-# 未指定時は ~/SyncTerm-IDE。Relay 上でアプリを置くパス（例: ~/mnt）
-# deploy_dir = ~/mnt
-
 [local_paths]
 # 【要編集】GUIクライアントが使用するローカルミラーのパス
 gui_mirror_dir = ~/gui_local_mirror
@@ -36,3 +30,6 @@ relay_local_port = 8001
 # ollama_base_url = http://127.0.0.1:11434
 # Ollama のモデル名（軽量: qwen2.5-coder:1.5b / 標準: qwen2.5-coder:7b）
 # ollama_model = qwen2.5-coder:7b
+#
+# モデルを載せるデバイス: cpu または gpu（未指定時は cpu）
+# device = cpu

@@ -15,12 +15,41 @@ import uuid
 from html.parser import HTMLParser
 from pathlib import PurePosixPath
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
+
+from .schemas import (
+  AiAssistPayload,
+  AiAssistResponse,
+  AiEnsureModelPayload,
+  AiInlinePayload,
+  AgentCommandLog,
+  BuddyFeedbackPayload,
+  ChatMessage,
+  CommandPayload,
+  CopyPathPayload,
+  CreateLinkPayload,
+  CreatePathPayload,
+  CreateSessionModel,
+  DebateThread,
+  DebateTurn,
+  DeletePathPayload,
+  FileChunkModel,
+  FileContentPayload,
+  FileEntryModel,
+  LogChunk,
+  MovePathPayload,
+  RunnerConfigModel,
+  RunnerConfigUpdatePayload,
+  SessionModel,
+  UploadFilePayload,
+  WatcherModel,
+  WatcherStatusModel,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,30 +75,166 @@ def load_paths():
 BASE_PATH, SESSIONS_ROOT, REGISTRY_ROOT = load_paths()
 
 
-class _HtmlTextExtractor(HTMLParser):
-  """外部依存なしで HTML → プレーンテキストに変換する簡易パーサ。"""
+def _get_available_vram_gb() -> Optional[int]:
+  """利用可能な VRAM (GB) を推定する。
 
-  def __init__(self) -> None:
-    super().__init__()
-    self._chunks: List[str] = []
-
-  def handle_data(self, data: str) -> None:
-    text = data.strip()
-    if text:
-      self._chunks.append(text)
-
-  def get_text(self) -> str:
-    return "\n".join(self._chunks)
-
-
-def _html_to_text(html: str) -> str:
-  parser = _HtmlTextExtractor()
+  現状は環境変数 / config.ini の設定値のみを参照し、自動検出は行わない。
+  - 環境変数: AI_VRAM_GB
+  - config.ini: [ai] vram_gb
+  """
+  env = os.environ.get("AI_VRAM_GB")
+  if env:
+    try:
+      return int(env)
+    except ValueError:
+      pass
   try:
-    parser.feed(html)
+    parser = configparser.ConfigParser()
+    parser.read(CONFIG_PATH)
+    if parser.has_section("ai") and parser.has_option("ai", "vram_gb"):
+      raw = parser.get("ai", "vram_gb").strip()
+      if raw:
+        return int(raw)
   except Exception:
-    # パースに失敗した場合は生の HTML を返す
-    return html
-  return parser.get_text()
+    pass
+  return None
+
+
+def route_model(
+  mode: str,
+  requires_reasoning: bool,
+  requires_code_generation: bool,
+  requires_repo_read: bool,
+  complexity: str,
+  available_vram: Optional[int],
+) -> Dict[str, Any]:
+  """タスク内容と VRAM から、planner / executor / inspector / reviewer 用のモデルを選択する。
+
+  - mode: "ask" / "plan" / "agent" / "debug" など
+  - requires_*: タスクの性質
+  - complexity: "low" / "medium" / "high" などの目安（現状はヒューリスティック用途）
+  - available_vram: 利用可能な VRAM (GB)。None の場合は low memory とみなす
+  """
+
+  # 利用可能 VRAM に応じて許可されるモデル群を決定
+  vram = available_vram or 0
+  allowed: List[str]
+  if vram >= 80:
+    # 80GB 以上: すべて許可
+    allowed = [
+      "qwen3.5",
+      "qwen2.5-coder:1.5b",
+      "qwen2.5-coder:3b",
+      "qwen2.5-coder:7b",
+      "qwen2.5-coder:14b",
+      "qwen2.5-coder:32b",
+      "qwen2.5:72b-instruct-q3_K_M",
+      "deepseek-coder:1.3b",
+      "deepseek-coder:6.7b",
+      "deepseek-coder:33b",
+      "deepseek-coder-v2:16b",
+      "deepseek-coder-v2:236b",
+      "llama3.2",
+      "llama3:8b",
+      "llama3:70b",
+      "mistral",
+      "mistral-large",
+    ]
+  elif vram >= 48:
+    allowed = [
+      "qwen3.5",
+      "llama3:70b",
+      "qwen2.5-coder:32b",
+      "deepseek-coder-v2:16b",
+      "qwen2.5-coder:14b",
+      "deepseek-coder:6.7b",
+      "llama3:8b",
+      "qwen2.5-coder:7b",
+      "mistral",
+    ]
+  elif vram >= 24:
+    allowed = [
+      "qwen3.5",
+      "qwen2.5-coder:32b",
+      "deepseek-coder-v2:16b",
+      "qwen2.5-coder:14b",
+      "deepseek-coder:6.7b",
+      "llama3:8b",
+      "qwen2.5-coder:7b",
+      "mistral",
+    ]
+  elif vram >= 16:
+    allowed = [
+      "qwen3.5",
+      "qwen2.5-coder:14b",
+      "deepseek-coder-v2:16b",
+      "deepseek-coder:6.7b",
+      "qwen2.5-coder:7b",
+      "llama3:8b",
+      "mistral",
+    ]
+  elif vram >= 8:
+    allowed = [
+      "qwen3.5",
+      "qwen2.5-coder:7b",
+      "deepseek-coder:6.7b",
+      "llama3:8b",
+      "qwen2.5-coder:3b",
+      "deepseek-coder:1.3b",
+    ]
+  else:
+    # low memory
+    allowed = [
+      "qwen2.5-coder:3b",
+      "deepseek-coder:1.3b",
+      "qwen2.5-coder:1.5b",
+    ]
+
+  def pick(preferred: List[str]) -> str:
+    for m in preferred:
+      if m in allowed:
+        return m
+    # fallback: 最初の allowed
+    return allowed[0]
+
+  # インストール済みモデルのみを候補とする（未インストールモデルは自動選択の対象外）
+  installed = _get_ollama_installed_models()
+  if installed:
+    allowed = [m for m in allowed if m in installed] or allowed
+
+  # ロールごとの優先モデル（仕様書より）
+  planner_pref = ["llama3:70b", "qwen2.5:72b-instruct-q3_K_M", "mistral-large"]
+  executor_pref = ["qwen2.5-coder:32b", "deepseek-coder-v2:16b", "qwen2.5-coder:14b"]
+  inspector_pref = ["deepseek-coder-v2:16b", "qwen2.5-coder:32b", "deepseek-coder:6.7b"]
+  reviewer_pref = ["mistral-large", "llama3:70b", "qwen2.5:72b-instruct-q3_K_M"]
+
+  planner_model = pick(planner_pref)
+  executor_model = pick(executor_pref)
+  inspector_model = pick(inspector_pref)
+  reviewer_model = pick(reviewer_pref)
+
+  # 戦略決定（現段階では主にヒントとして使用）
+  strategy = "single_model"
+  m = mode.strip().lower()
+  if m in ("ask", "plan"):
+    strategy = "single_model"
+  elif m == "debug":
+    strategy = "two_stage_debug"
+  elif m == "agent":
+    if requires_code_generation:
+      strategy = "planner_executor"
+    else:
+      strategy = "single_model"
+
+  return {
+    "planner_model": planner_model,
+    "executor_model": executor_model,
+    "inspector_model": inspector_model,
+    "reviewer_model": reviewer_model,
+    "strategy": strategy,
+    "allowed": allowed,
+    "vram_gb": vram,
+  }
 
 
 def load_ai_config() -> None:
@@ -94,6 +259,17 @@ def load_ai_config() -> None:
       if val and env_key not in os.environ:
         os.environ[env_key] = val
 
+  # AI デバイス指定（cpu / gpu）。未指定時は cpu をデフォルトにする。
+  if "AI_DEVICE" not in os.environ:
+    if parser.has_option("ai", "device"):
+      raw = parser.get("ai", "device").strip().lower()
+      if raw in ("cpu", "gpu"):
+        os.environ["AI_DEVICE"] = raw
+      else:
+        os.environ["AI_DEVICE"] = "cpu"
+    else:
+      os.environ["AI_DEVICE"] = "cpu"
+
 
 load_ai_config()
 
@@ -108,155 +284,12 @@ MAX_CHILDREN_PER_DIR = 200
 MAX_RAW_FILE_BYTES = 20_000_000
 
 
-class WatcherModel(BaseModel):
-  id: str
-  displayName: str
-  lastHeartbeat: float
-
-
-class SessionModel(BaseModel):
-  name: str
-  watcherId: str
-
-
-class CreateSessionModel(BaseModel):
-  name: str
-
-
-class WatcherStatusModel(BaseModel):
-  user: str
-  host: str
-  cwd: str
-  fullCwd: str
-  condaEnv: Optional[str] = None
-  dockerMode: Optional[str] = None
-
-
-class FileEntryModel(BaseModel):
-  id: str
-  name: str
-  path: str
-  kind: str
-  hasChildren: Optional[bool] = False
-  isRemoteLink: Optional[bool] = False
-  children: Optional[List["FileEntryModel"]] = None
-
-
-FileEntryModel.model_rebuild()
-
-
-class RunnerConfigModel(BaseModel):
-  mode: str
-  containerName: Optional[str] = None
-  image: Optional[str] = None
-  mountPath: Optional[str] = None
-  extraArgs: Optional[str] = None
-
-
-class LogChunk(BaseModel):
-  lines: List[str]
-  nextOffset: int
-  hasMore: bool
-
-
-class CommandPayload(BaseModel):
-  command: str
-
-
-class FileContentPayload(BaseModel):
-  path: str
-  content: str
-
-
-class FileChunkModel(BaseModel):
-  path: str
-  offset: int
-  length: int
-  totalSize: int
-  content: str
-  hasMore: bool
-  nextOffset: int
-
-
-class RunnerConfigUpdatePayload(BaseModel):
-  mode: str
-  containerName: Optional[str] = None
-  image: Optional[str] = None
-  mountPath: Optional[str] = None
-  extraArgs: Optional[str] = None
-
-
-class CreateLinkPayload(BaseModel):
-  sourcePath: str
-  linkName: str
-
-
-class CreatePathPayload(BaseModel):
-  path: str
-  kind: str  # "file" | "dir"
-
-
-class DeletePathPayload(BaseModel):
-  path: str
-
-
-class CopyPathPayload(BaseModel):
-  sourcePath: str
-  destPath: str
-
-
-class MovePathPayload(BaseModel):
-  sourcePath: str
-  destPath: str
-
-
-class UploadFilePayload(BaseModel):
-  path: str
-  contentBase64: str
-
-
 def _norm_rel(path: str) -> str:
   """Session-relative path to Watcher rel path (no leading /, no ..)."""
   p = path.strip().lstrip("/").replace("\\", "/")
   if ".." in p.split("/") or p.startswith(".."):
     raise ValueError("path must not contain ..")
   return p or "."
-
-
-class ChatMessage(BaseModel):
-  role: str  # "user" | "assistant"
-  content: str
-
-
-class AiAssistPayload(BaseModel):
-  path: str
-  action: str
-  prompt: str
-  selectedText: Optional[str] = None
-  fileContent: str
-  history: Optional[List[ChatMessage]] = None
-  model: Optional[str] = None
-  mode: Optional[str] = None  # agent | plan | debug | ask
-  # Agent 用: エディタの現在のコンテキスト（コード直接変更・推論に利用）
-  editorPath: Optional[str] = None
-  editorSelectedText: Optional[str] = None
-  editorContent: Optional[str] = None
-  # 思考レベル: quick | balanced | deep
-  thinking: Optional[str] = None
-  # ユーザー定義ペルソナ／追加指示（システムプロンプト先頭に付与）
-  persona: Optional[str] = None
-
-
-class AiInlinePayload(BaseModel):
-  path: str
-  prefix: str
-  suffix: str
-  language: Optional[str] = None
-  model: Optional[str] = None
-
-
-class AiEnsureModelPayload(BaseModel):
-  model: str
 
 
 def watcher_registry_files():
@@ -1048,7 +1081,7 @@ def post_command(wid: str, sess: str, payload: CommandPayload):
   # RT を先に試す（Relay にセッション dir が無くても Watcher に届く）
   rt_resp, rt_error = _post_command_via_rt_with_response(wid, sess, cmd)
   if rt_resp is not None:
-    out = rt_resp.get("output", "")
+    out = _strip_cmd_exit_markers(rt_resp.get("output", ""))
     exit_code = rt_resp.get("exitCode", 0)
     out_lines = len(out.splitlines()) if out else 0
     logger.info("command delivered via RT wid=%s sess=%s output_lines=%d exitCode=%s", wid, sess, out_lines, exit_code)
@@ -1292,6 +1325,20 @@ def wait_internal_exit(log_file: Path, start_size: int, timeout_sec: float = 12.
   return False
 
 
+def _strip_cmd_exit_markers(text: str) -> str:
+  """Watcher 側が付与する内部マーカー行を除去する（UI へ露出させない）。"""
+  if not text:
+    return ""
+  out_lines: List[str] = []
+  for line in str(text).splitlines():
+    # 例: "__CMD_EXIT_CODE__::0" / "__CMD_EXIT_CODE__::INTERNAL:0"
+    if line.startswith("__CMD_EXIT_CODE__::"):
+      continue
+    out_lines.append(line)
+  # 元の末尾改行は UI 的に重要ではないので統一
+  return "\n".join(out_lines).strip("\n")
+
+
 def _count_command_lines(cmd_file: Path) -> int:
   if not cmd_file.exists():
     return 0
@@ -1531,12 +1578,17 @@ def _call_ollama_with_meta(
   """
   base = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
   model = model or os.environ.get("OLLAMA_MODEL", "qwen2.5-coder:7b")
+  device = os.environ.get("AI_DEVICE", "cpu").lower()
+  options: Dict[str, Any] = {"temperature": temperature, "num_predict": max_tokens}
+  if device == "cpu":
+    # GPU を使わず CPU のみで実行させる
+    options.setdefault("num_gpu", 0)
   body = json.dumps(
     {
       "model": model,
       "messages": messages,
       "stream": False,
-      "options": {"temperature": temperature, "num_predict": max_tokens},
+      "options": options,
     }
   ).encode("utf-8")
   req = urllib.request.Request(
@@ -1580,6 +1632,83 @@ def _call_ollama(
   """_call_ollama_with_meta の後方互換ラッパー（content のみ返す）。"""
   content, _truncated = _call_ollama_with_meta(messages, max_tokens=max_tokens, temperature=temperature, model=model)
   return content
+
+
+def _stream_ollama_chat(
+  messages: list,
+  max_tokens: int = 512,
+  temperature: float = 0.2,
+  model: Optional[str] = None,
+):
+  """Ollama /api/chat を stream=True で呼び出し、部分テキストを逐次 yield する。
+
+  戻り値は {"type": "token"|"done", ...} 形式の dict を yield するイテレータ。
+  """
+  base = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+  model = model or os.environ.get("OLLAMA_MODEL", "qwen2.5-coder:7b")
+  device = os.environ.get("AI_DEVICE", "cpu").lower()
+  options: Dict[str, Any] = {"temperature": temperature, "num_predict": max_tokens}
+  if device == "cpu":
+    options.setdefault("num_gpu", 0)
+  body = json.dumps(
+    {
+      "model": model,
+      "messages": messages,
+      "stream": True,
+      "options": options,
+    }
+  ).encode("utf-8")
+  req = urllib.request.Request(
+    f"{base.rstrip('/')}/api/chat",
+    data=body,
+    headers={"Content-Type": "application/json"},
+    method="POST",
+  )
+  acc_chunks: List[str] = []
+  truncated = False
+  try:
+    with urllib.request.urlopen(req, timeout=120) as resp:
+      buf = b""
+      while True:
+        chunk = resp.read(4096)
+        if not chunk:
+          break
+        buf += chunk
+        while b"\n" in buf:
+          line, buf = buf.split(b"\n", 1)
+          line = line.strip()
+          if not line:
+            continue
+          try:
+            ev = json.loads(line.decode("utf-8", errors="replace"))
+          except json.JSONDecodeError:
+            continue
+          msg = str((ev.get("message") or {}).get("content") or "")
+          if msg:
+            acc_chunks.append(msg)
+            yield {"type": "token", "delta": msg}
+          if ev.get("done"):
+            done_reason = str(ev.get("done_reason") or "").lower()
+            truncated = done_reason == "length"
+  except urllib.error.HTTPError as e:
+    detail = e.read().decode("utf-8", errors="replace")
+    raise HTTPException(status_code=502, detail=f"Ollama error: {detail}")
+  except OSError as e:
+    if e.errno == 111:  # Connection refused
+      base = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+      raise HTTPException(
+        status_code=502,
+        detail=(
+          "Ollama に接続できません（Connection refused）。"
+          f"Relay サーバー上で ollama serve を起動し、ollama_base_url={base} が正しいか config.ini を確認してください。"
+        ),
+      )
+    raise HTTPException(status_code=502, detail=f"Ollama request failed: {e}")
+  except Exception as e:
+    raise HTTPException(status_code=502, detail=f"Ollama request failed: {e}")
+
+  full = _cleanup_llm_output("".join(acc_chunks))
+  yield {"type": "done", "result": full, "truncated": truncated}
 
 
 def _call_openai_with_meta(
@@ -1633,6 +1762,98 @@ def _call_openai(messages: list, max_tokens: int = 512, temperature: float = 0.2
   """_call_openai_with_meta の後方互換ラッパー（content のみ返す）。"""
   content, _truncated = _call_openai_with_meta(messages, max_tokens=max_tokens, temperature=temperature)
   return content
+
+
+def _stream_openai_chat(
+  messages: list,
+  max_tokens: int = 512,
+  temperature: float = 0.2,
+):
+  """OpenAI Chat Completions API を stream=true で呼び出し、部分テキストを逐次 yield する。
+
+  戻り値は {"type": "token"|"done", ...} 形式の dict を yield するイテレータ。
+  """
+  api_key = os.environ.get("OPENAI_API_KEY")
+  if not api_key:
+    raise HTTPException(status_code=503, detail="OPENAI_API_KEY is not set")
+  model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+  body = json.dumps(
+    {
+      "model": model,
+      "temperature": temperature,
+      "max_tokens": max_tokens,
+      "messages": messages,
+      "stream": True,
+    }
+  ).encode("utf-8")
+  req = urllib.request.Request(
+    "https://api.openai.com/v1/chat/completions",
+    data=body,
+    headers={
+      "Content-Type": "application/json",
+      "Authorization": f"Bearer {api_key}",
+    },
+    method="POST",
+  )
+  acc_chunks: List[str] = []
+  truncated = False
+  try:
+    with urllib.request.urlopen(req, timeout=90) as resp:
+      buf = ""
+      while True:
+        chunk = resp.read(4096)
+        if not chunk:
+          break
+        buf += chunk.decode("utf-8", errors="replace")
+        lines = buf.split("\n")
+        buf = lines.pop() or ""
+        for line in lines:
+          line = line.strip()
+          if not line or not line.startswith("data:"):
+            continue
+          data_str = line[len("data:") :].strip()
+          if data_str == "[DONE]":
+            break
+          try:
+            ev = json.loads(data_str)
+          except json.JSONDecodeError:
+            continue
+          for choice in ev.get("choices") or []:
+            delta = choice.get("delta") or {}
+            content_piece = str(delta.get("content") or "")
+            if content_piece:
+              acc_chunks.append(content_piece)
+              yield {"type": "token", "delta": content_piece}
+            finish_reason = str(choice.get("finish_reason") or "").lower()
+            if finish_reason == "length":
+              truncated = True
+  except urllib.error.HTTPError as e:
+    detail = e.read().decode("utf-8", errors="replace")
+    raise HTTPException(status_code=502, detail=f"OpenAI error: {detail}")
+  except Exception as e:
+    raise HTTPException(status_code=502, detail=f"OpenAI request failed: {e}")
+
+  full = _cleanup_llm_output("".join(acc_chunks))
+  yield {"type": "done", "result": full, "truncated": truncated}
+
+
+def _stream_llm_messages(
+  messages: List[dict],
+  max_tokens: int = 900,
+  temperature: float = 0.2,
+  model: Optional[str] = None,
+):
+  """AI_PROVIDER / OPENAI_API_KEY に応じて Ollama / OpenAI のストリーミングを切り替える。"""
+  provider = (os.environ.get("AI_PROVIDER") or "").strip().lower()
+  if not provider and os.environ.get("OPENAI_API_KEY"):
+    provider = "openai"
+  if not provider:
+    provider = "ollama"
+  if provider == "ollama":
+    return _stream_ollama_chat(messages, max_tokens=max_tokens, temperature=temperature, model=model)
+  if provider == "openai":
+    return _stream_openai_chat(messages, max_tokens=max_tokens, temperature=temperature)
+  raise HTTPException(status_code=400, detail=f"unsupported AI_PROVIDER: {provider}")
 
 
 def _call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 512, temperature: float = 0.2, model: Optional[str] = None) -> str:
@@ -1806,15 +2027,56 @@ def _ollama_suggested_models() -> List[str]:
         user_models = [m.strip() for m in raw.split(",") if m.strip()]
         # ユーザー指定 + デフォルト候補をマージ（重複は前者優先）
         base_defaults = [
+          # Qwen3.5 系（公式ファミリ＋代表的なサイズ）
+          "qwen3.5",
+          "qwen3.5:0.8b",
+          "qwen3.5:2b",
+          "qwen3.5:4b",
+          "qwen3.5:9b",
+          "qwen3.5:27b",
+          "qwen3.5:35b",
+          "qwen3.5:122b",
+          # Qwen2.5 一般 / コード特化
+          "qwen2.5",
           "qwen2.5-coder:1.5b",
           "qwen2.5-coder:3b",
           "qwen2.5-coder:7b",
           "qwen2.5-coder:14b",
           "qwen2.5-coder:32b",
+          # DeepSeek 系（general / code / reasoning）
+          "deepseek-llm",
+          "deepseek-v2",
+          "deepseek-v2.5",
+          "deepseek-v3",
+          "deepseek-v3.1",
+          "deepseek-v3.2",
+          "deepseek-r1",
+          "deepseek-coder:1.3b",
           "deepseek-coder:6.7b",
           "deepseek-coder:33b",
+          "deepseek-coder-v2:16b",
+          "deepseek-coder-v2:236b",
+          # Llama 3.x 系
+          "llama3.1",
           "llama3.2",
+          "llama3.2-vision",
+          "llama3.3",
+          "llama3:8b",
+          "llama3:70b",
+          # Phi 系
+          "phi3",
+          "phi3.5",
+          "phi4",
+          "phi4-mini",
+          "phi4-reasoning",
+          "phi4-mini-reasoning",
+          # コード特化系
+          "codestral",
+          "starcoder2",
+          "stable-code",
+          # Mistral 系
           "mistral",
+          "mistral-large",
         ]
         merged: List[str] = []
         for name in user_models + base_defaults:
@@ -1824,31 +2086,62 @@ def _ollama_suggested_models() -> List[str]:
   except Exception:
     pass
   # デフォルトの候補（すべて無料のオープンモデル）
-  # - qwen2.5-coder 系: コード特化で高性能（1.5B〜32B）
-  # - deepseek-coder 系: 強力なコード向けモデル（6.7B / 33B）
-  # - deepseek-coder-v2 系: MoE ベースの新世代コードモデル（16B / 236B）
-  # - llama3 系: 一般用途向け（8B / 70B）
+  # - qwen3.5 系: 新世代の汎用モデルファミリ
+  # - qwen2.5 / qwen2.5-coder 系: 一般・コード特化モデル
+  # - deepseek 系: reasoning / code / 一般（v2 / v2.5 / v3 / r1 など）
+  # - llama3.x 系: Meta 系の一般用途モデル
+  # - phi 系: Microsoft 系の軽量〜中規模モデル
+  # - codestral / starcoder / stable-code 系: コード特化モデル
   # - mistral 系: 高性能な一般・コード向けモデル（7B / large）
   return [
-    # Qwen2.5 Coder ファミリ
+    # Qwen3.5 ファミリ（汎用・マルチモーダル）
+    "qwen3.5",
+    "qwen3.5:0.8b",
+    "qwen3.5:2b",
+    "qwen3.5:4b",
+    "qwen3.5:9b",
+    "qwen3.5:27b",
+    "qwen3.5:35b",
+    "qwen3.5:122b",
+    # Qwen2.5 系
+    "qwen2.5",
     "qwen2.5-coder:1.5b",
     "qwen2.5-coder:3b",
     "qwen2.5-coder:7b",
     "qwen2.5-coder:14b",
     "qwen2.5-coder:32b",
-    # より大きな汎用 Qwen モデル（推論用）
     "qwen2.5:72b-instruct-q3_K_M",
-    # DeepSeek Coder
+    # DeepSeek 系（general / code / reasoning）
+    "deepseek-llm",
+    "deepseek-v2",
+    "deepseek-v2.5",
+    "deepseek-v3",
+    "deepseek-v3.1",
+    "deepseek-v3.2",
+    "deepseek-r1",
     "deepseek-coder:1.3b",
     "deepseek-coder:6.7b",
     "deepseek-coder:33b",
-    # DeepSeek Coder V2（MoE）
     "deepseek-coder-v2:16b",
     "deepseek-coder-v2:236b",
-    # Llama 3 系
+    # Llama 3.x 系
+    "llama3.1",
     "llama3.2",           # 小さめ汎用
+    "llama3.2-vision",
+    "llama3.3",
     "llama3:8b",
     "llama3:70b",
+    # Phi 系
+    "phi3",
+    "phi3.5",
+    "phi4",
+    "phi4-mini",
+    "phi4-reasoning",
+    "phi4-mini-reasoning",
+    # コード特化モデル
+    "codestral",
+    "starcoder2",
+    "stable-code",
     # Mistral 系
     "mistral",            # 7B
     "mistral-large",      # 123B クラス
@@ -1866,16 +2159,61 @@ def get_ai_models(wid: str, sess: str):
   if provider != "ollama":
     return {"installed": [], "suggested": [], "provider": provider}
   try:
-    data = _ollama_request("/api/tags", timeout=10)
-    installed = [m.get("name", "").strip() for m in data.get("models", []) if m.get("name")]
-    installed = list(dict.fromkeys(installed))
+    installed = _get_ollama_installed_models()
   except Exception:
     installed = []
-  suggested = _ollama_suggested_models()
+  suggested_all = _ollama_suggested_models()
+  # suggested は「全候補」を返し、うち VRAM 的に特に推奨したいものを recommended として別途返す
+  suggested = suggested_all
+  vram = _get_available_vram_gb() or 0
+  # 「快適に使えるライン」の上位モデルだけを recommended として返す。
+  # （インストール済みかどうかはフロントで Pull バッジを表示する）
+  if vram >= 80:
+    recommended = [
+      "qwen2.5-coder:32b",
+      "qwen2.5:72b-instruct-q3_K_M",
+      "deepseek-coder-v2:16b",
+      "llama3:70b",
+      "mistral-large",
+    ]
+  elif vram >= 48:
+    recommended = [
+      "qwen2.5-coder:32b",
+      "deepseek-coder-v2:16b",
+      "llama3:70b",
+      "mistral-large",
+    ]
+  elif vram >= 24:
+    recommended = [
+      "qwen2.5-coder:32b",
+      "deepseek-coder-v2:16b",
+      "llama3:8b",
+    ]
+  elif vram >= 16:
+    recommended = [
+      "qwen2.5-coder:14b",
+      "deepseek-coder-v2:16b",
+      "llama3:8b",
+    ]
+  elif vram >= 8:
+    recommended = [
+      "qwen2.5-coder:7b",
+      "deepseek-coder:6.7b",
+      "llama3:8b",
+    ]
+  else:
+    recommended = [
+      "qwen2.5-coder:3b",
+      "deepseek-coder:1.3b",
+    ]
+  # 候補に存在しないものは除外
+  recommended = [m for m in recommended if m in suggested_all]
   default = (os.environ.get("OLLAMA_MODEL") or "qwen2.5-coder:7b").strip()
   if default and default not in suggested:
     suggested = [default] + [s for s in suggested if s != default]
-  return {"installed": installed, "suggested": suggested, "provider": provider}
+  if default and default not in recommended and default in suggested_all:
+    recommended = [default] + [s for s in recommended if s != default]
+  return {"installed": installed, "suggested": suggested, "recommended": recommended, "provider": provider}
 
 
 @app.post("/watchers/{wid}/sessions/{sess}/ai-ensure-model")
@@ -2016,15 +2354,119 @@ def upload_file(wid: str, sess: str, payload: UploadFilePayload):
   return {"ok": True, "rt": False}
 
 
+def _extract_commands_from_response(text: str) -> List[str]:
+  matches = re.findall(r"<command>\s*(.*?)\s*</command>", text, re.DOTALL | re.IGNORECASE)
+  out: List[str] = []
+  for m in matches:
+    cmd = (m or "").strip()
+    if cmd:
+      out.append(cmd)
+  return out
+
+
 def _extract_command_from_response(text: str) -> Optional[str]:
-  m = re.search(r"<command>\s*(.*?)\s*</command>", text, re.DOTALL | re.IGNORECASE)
-  if not m:
-    return None
-  return m.group(1).strip()
+  cmds = _extract_commands_from_response(text)
+  return cmds[0] if cmds else None
 
 
 def _strip_command_tags(text: str) -> str:
   return re.sub(r"<command>[\s\S]*?</command>", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
+
+
+def _extract_json_object(text: str) -> Optional[str]:
+  """文字列中の最初の JSON object らしき部分を抜き出す。"""
+  if not text:
+    return None
+  start = text.find("{")
+  if start < 0:
+    return None
+  depth = 0
+  in_str = False
+  esc = False
+  for i in range(start, len(text)):
+    ch = text[i]
+    if in_str:
+      if esc:
+        esc = False
+      elif ch == "\\":
+        esc = True
+      elif ch == '"':
+        in_str = False
+      continue
+    if ch == '"':
+      in_str = True
+      continue
+    if ch == "{":
+      depth += 1
+    elif ch == "}":
+      depth -= 1
+      if depth == 0:
+        return text[start : i + 1]
+  return None
+
+
+def _loads_json_object(text: str) -> Optional[dict]:
+  raw = _extract_json_object(text)
+  if not raw:
+    return None
+  try:
+    data = json.loads(raw)
+    return data if isinstance(data, dict) else None
+  except Exception:
+    return None
+
+
+def _to_plain_text_lines(value: Any) -> List[str]:
+  if value is None:
+    return []
+  if isinstance(value, list):
+    out: List[str] = []
+    for item in value:
+      s = str(item).strip()
+      if s:
+        out.append(s)
+    return out
+  s = str(value).strip()
+  return [s] if s else []
+
+
+def _render_structured_report(data: dict) -> str:
+  """構造化 JSON を UI 向け plain text に整形する。Markdown 見出しは使わない。"""
+  conclusion = "\n".join(_to_plain_text_lines(data.get("conclusion")))
+  evidence = _to_plain_text_lines(data.get("evidence"))
+  next_action = "\n".join(_to_plain_text_lines(data.get("next_action")))
+  status = "\n".join(_to_plain_text_lines(data.get("status")))
+
+  parts: List[str] = []
+  if conclusion:
+    parts.append("Conclusion:")
+    parts.append(conclusion)
+  if evidence:
+    parts.append("")
+    parts.append("Evidence:")
+    for item in evidence[:8]:
+      parts.append(f"- {item}")
+  if next_action:
+    parts.append("")
+    parts.append("Next action:")
+    parts.append(next_action)
+  if status:
+    parts.append("")
+    parts.append("Status:")
+    parts.append(status)
+  return "\n".join(parts).strip()
+
+
+def _normalize_plain_answer(text: str) -> str:
+  """debate / report 系の出力を plain text 寄りに正規化する。"""
+  if not text:
+    return ""
+  text = _strip_command_tags(text)
+  # 先頭・途中の H1〜H6 を plain text ラベルに寄せる
+  text = re.sub(r"^\s{0,3}#{1,6}\s*(.+?)\s*$", r"\1:", text, flags=re.MULTILINE)
+  # 連続空行を抑える
+  text = re.sub(r"\n{3,}", "\n\n", text)
+  return text.strip()
 
 
 def _is_potentially_destructive_command(cmd: str) -> bool:
@@ -2044,6 +2486,251 @@ def _is_potentially_destructive_command(cmd: str) -> bool:
   return any(d in c for d in dangerous)
 
 
+def _truncate_agent_output(text: str, max_chars: int = 8000) -> str:
+  s = _strip_cmd_exit_markers(text or "")
+  if len(s) <= max_chars:
+    return s
+  return "... (truncated) ...\n" + s[-max_chars:]
+
+
+def _format_agent_logs_for_report(logs: List[AgentCommandLog]) -> str:
+  if not logs:
+    return ""
+  lines: List[str] = []
+  for idx, lg in enumerate(logs):
+    try:
+      cmd = getattr(lg, "command", None) or (lg.get("command") if isinstance(lg, dict) else None)
+      exit_code = getattr(lg, "exitCode", None) if not isinstance(lg, dict) else lg.get("exitCode")
+      output = getattr(lg, "output", None) if not isinstance(lg, dict) else lg.get("output")
+      error = getattr(lg, "error", None) if not isinstance(lg, dict) else lg.get("error")
+    except Exception:
+      cmd = None
+      exit_code = None
+      output = None
+      error = None
+
+    header = f"Command {idx+1}: {cmd or '(unknown command)'}"
+    if exit_code is not None:
+      header += f"  (exit {exit_code})"
+    lines.append(header)
+    if output:
+      lines.append("STDOUT:\n" + str(output))
+    if error:
+      lines.append("STDERR:\n" + str(error))
+  return "\n\n".join(lines)
+
+
+def _classify_agent_progress(logs: List[AgentCommandLog]) -> Dict[str, str]:
+  """
+  logs だけを見て、最終レポート化してよいかを判定する。
+  目的:
+  - pwd / ls / cat requirements.txt だけで premature に finalize しない
+  - 実行・import test・install・traceback などの concrete evidence が出るまで続ける
+  """
+  if not logs:
+    return {"ready": "no", "reason": "no_logs"}
+
+  saw_demo_attempt = False
+  saw_import_test = False
+  saw_install_attempt = False
+  saw_traceback = False
+  saw_nonzero = False
+  saw_only_shallow = True
+
+  shallow_prefixes = (
+    "pwd",
+    "ls",
+    "cat ",
+    "head ",
+    "find ",
+    "conda env list",
+    "conda info --envs",
+    "pip list",
+    "pip show",
+    "python --version",
+  )
+
+  for lg in logs:
+    try:
+      cmd = (getattr(lg, "command", None) if not isinstance(lg, dict) else lg.get("command")) or ""
+      exit_code = getattr(lg, "exitCode", None) if not isinstance(lg, dict) else lg.get("exitCode")
+      output = (getattr(lg, "output", None) if not isinstance(lg, dict) else lg.get("output")) or ""
+      error = (getattr(lg, "error", None) if not isinstance(lg, dict) else lg.get("error")) or ""
+    except Exception:
+      cmd = ""
+      exit_code = None
+      output = ""
+      error = ""
+
+    low_cmd = cmd.strip().lower()
+    merged = f"{output}\n{error}".lower()
+
+    if exit_code not in (None, 0):
+      saw_nonzero = True
+    if "traceback" in merged or "error" in merged or "exception" in merged:
+      saw_traceback = True
+    if "demo.py" in low_cmd:
+      saw_demo_attempt = True
+    if "python -c" in low_cmd or ("import " in low_cmd and low_cmd.startswith("python")):
+      saw_import_test = True
+    if ("pip install" in low_cmd) or ("conda install" in low_cmd):
+      saw_install_attempt = True
+
+    if low_cmd and not low_cmd.startswith(shallow_prefixes):
+      saw_only_shallow = False
+
+  # 実行・失敗・install など concrete evidence があれば finalize してよい
+  if saw_demo_attempt or saw_import_test or saw_install_attempt or saw_traceback or saw_nonzero:
+    return {"ready": "yes", "reason": "concrete_evidence"}
+
+  # 浅い確認だけならまだ早い
+  if saw_only_shallow:
+    return {"ready": "no", "reason": "shallow_only"}
+
+  # それ以外は許可
+  return {"ready": "yes", "reason": "enough_context"}
+
+
+def _finalize_agent_report(
+  messages: List[dict],
+  logs: List[AgentCommandLog],
+  model: Optional[str],
+  max_tokens: int,
+  temperature: float,
+) -> Tuple[str, bool, bool]:
+  """
+  すでに集めたコマンド実行結果を、証拠付きの調査レポートへ再要約する。
+  戻り値: (result, truncated, auto_continued)
+  """
+  log_text = _format_agent_logs_for_report(logs)
+
+  report_messages = list(messages)
+  report_messages.append(
+    {
+      "role": "user",
+      "content": (
+        "You have already gathered enough evidence.\n"
+        "Now produce a concise investigation report for reviewers and the user.\n\n"
+        "CRITICAL OUTPUT RULES:\n"
+        "- Output ONLY one valid JSON object.\n"
+        "- Do NOT output Markdown.\n"
+        "- Do NOT output code fences.\n"
+        "- Do NOT output any text before or after the JSON.\n"
+        "- Do NOT output any <command> tags.\n"
+        "- Do NOT ask the user to run commands that were already executed.\n"
+        "- Base the report only on the command outputs already observed.\n"
+        "- If a root cause is already visible, state it clearly instead of giving a generic checklist.\n"
+        "- If evidence is still insufficient, say exactly what is missing.\n\n"
+        "Return exactly this JSON shape:\n"
+        "{\n"
+        '  \"conclusion\": \"short paragraph\",\n'
+        '  \"evidence\": [\"finding 1\", \"finding 2\", \"finding 3\"],\n'
+        '  \"next_action\": \"short paragraph\",\n'
+        '  \"status\": \"solved | blocked | insufficient_evidence\"\n'
+        "}\n\n"
+        "Shared command logs:\n"
+        f"{log_text if log_text else '(none)'}"
+      ),
+    }
+  )
+
+  final, truncated = _call_llm_messages_with_meta(
+    report_messages,
+    max_tokens=max_tokens,
+    temperature=temperature,
+    model=model,
+  )
+  parsed = _loads_json_object(final)
+  if parsed is not None:
+    final = _render_structured_report(parsed)
+  else:
+    final = _normalize_plain_answer(final)
+  auto_continued = False
+
+  for _ in range(MAX_CONTINUATION_ROUNDS):
+    if not truncated:
+      break
+    report_messages.append({"role": "assistant", "content": final})
+    report_messages.append(
+      {
+        "role": "user",
+        "content": (
+          "Continue the same JSON object only. "
+          "Do not add Markdown, code fences, or any new commands."
+        ),
+      }
+    )
+    extra, truncated2 = _call_llm_messages_with_meta(
+      report_messages,
+      max_tokens=max_tokens,
+      temperature=temperature,
+      model=model,
+    )
+    if not extra:
+      truncated = truncated2
+      break
+    combined = final + extra
+    parsed = _loads_json_object(combined)
+    if parsed is not None:
+      final = _render_structured_report(parsed)
+    else:
+      final = _normalize_plain_answer(combined)
+    auto_continued = True
+    truncated = truncated2
+
+  return final, truncated, auto_continued
+
+
+def _execute_agent_command(
+  wid: str,
+  sess: str,
+  cmd: str,
+  timeout: int = 120,
+) -> Tuple[Optional[dict], str]:
+  """
+  Agent 用のコマンド実行経路を通常の /commands と揃える。
+  戻り値:
+    - 成功時: (response_dict, "")
+    - 失敗時: (None, reason)
+  """
+  send_cmd = f"_agent_silent::{cmd}"
+
+  # 1) RT を先に試す
+  rt_resp, rt_error = _post_command_via_rt_with_response(wid, sess, send_cmd, timeout=timeout)
+  if rt_resp is not None:
+    return {
+      "ok": True,
+      "rt": True,
+      "output": _strip_cmd_exit_markers(rt_resp.get("output", "")),
+      "exitCode": rt_resp.get("exitCode", 0),
+      "_trace": {"method": "rt"},
+    }, ""
+
+  # 2) RT watcher があるのに届かなかった場合は、その失敗をそのまま返す
+  rt_port = _get_rt_port(wid)
+  if rt_port is not None:
+    return None, f"rt_delivery_failed:{rt_error}"
+
+  # 3) 非 RT 構成なら commands.txt 経由にフォールバック
+  root = SESSIONS_ROOT / wid / sess
+  if not root.exists():
+    return None, "session_not_found"
+
+  ok = append_command_and_wait_processed(root, send_cmd, timeout_sec=min(float(timeout), 20.0))
+  if not ok:
+    return None, "commands_txt_timeout"
+
+  # commands.txt フォールバックでは watcher 応答本文を即取得できない場合がある。
+  # 少なくとも「配送・処理完了」は返し、次の推論で transport failure 扱いにしない。
+  return {
+    "ok": True,
+    "rt": False,
+    "output": "",
+    "exitCode": 0,
+    "_trace": {"method": "commands_txt"},
+  }, ""
+
+
 # トークン上限で途切れた場合に「続き」を取得する最大回数（任意長対応）
 MAX_CONTINUATION_ROUNDS = 50
 
@@ -2061,90 +2748,128 @@ def _run_agent_loop(
   危険そうなコマンドは実行せず、ユーザー承認用に返す。
   """
   logs: List[AgentCommandLog] = []
-  # 途中ステップでの打ち切りは許容し、最終ステップのみ自動継続を試みる
+  shallow_deferrals = 0
+  no_cmd_deferrals = 0
   for _ in range(max_iterations):
     response = _call_llm_messages(messages, max_tokens=max_tokens, temperature=temperature, model=model)
-    cmd = _extract_command_from_response(response)
-    if not cmd:
-      return AiAssistResponse(result=response, logs=logs)
-    if _is_potentially_destructive_command(cmd):
-      cleaned = _strip_command_tags(response)
-      if not cleaned:
-        cleaned = f"危険な可能性があるコマンドのため自動実行できません。\n\n提案コマンド:\n{cmd}"
-      return AiAssistResponse(result=cleaned, command=cmd, needsApproval=True, logs=logs)
-    # Agent 実行ログは通常ターミナルには出さず、AI ペインの「Logs」タブ専用にするため、
-    # Watcher 側で silent 実行用プレフィックスを付けて送る
-    send_cmd = f"_agent_silent::{cmd}"
-    rt_resp, rt_error = _post_command_via_rt_with_response(wid, sess, send_cmd, timeout=120)
-    if rt_resp is not None:
-      out = rt_resp.get("output", "")
-      exit_code = rt_resp.get("exitCode", 0)
-      if len(out) > 8000:
-        out = "... (truncated) ...\n" + out[-8000:]
-      logs.append(AgentCommandLog(command=cmd, exitCode=exit_code, output=out))
-      feedback = f"[Command executed]\n$ {cmd}\n\nExit code: {exit_code}\n\nOutput:\n{out}"
-    else:
-      logs.append(AgentCommandLog(command=cmd, exitCode=None, output="", error=rt_error))
-      feedback = f"[Command failed - terminal unavailable]\n$ {cmd}\n\nError: {rt_error}\n\nContinue without running more commands; provide your answer based on what you know."
+    cmds = _extract_commands_from_response(response)
+    if not cmds:
+      # まだ一度もコマンドを提案していない場合は、要約ではなく具体的コマンド提案を強制する
+      if not logs and no_cmd_deferrals < 2:
+        no_cmd_deferrals += 1
+        messages.append({"role": "assistant", "content": response})
+        messages.append(
+          {
+            "role": "user",
+            "content": (
+              "You have not proposed any <command> yet.\n"
+              "Do not summarize or restate the plan. "
+              "Now output one or more <command>...</command> blocks with the next concrete shell commands "
+              "that will advance the user's task (such as running demo.py, checking imports, or installing "
+              "dependencies)."
+            ),
+          }
+        )
+        continue
+      if logs:
+        progress = _classify_agent_progress(logs)
+        if progress["ready"] != "yes" and shallow_deferrals < 2:
+          shallow_deferrals += 1
+          messages.append({"role": "assistant", "content": response})
+          messages.append(
+            {
+              "role": "user",
+              "content": (
+                "The investigation is not complete yet.\n"
+                f"Reason: {progress['reason']}\n\n"
+                "Do not summarize yet. "
+                "Run the NEXT concrete safe command that most directly advances the task.\n"
+                "Prefer one of the following when applicable:\n"
+                "- actually execute demo.py\n"
+                "- run a minimal python -c import test\n"
+                "- inspect the exact failing package import\n"
+                "- run one concrete install command if dependency resolution is the next step\n"
+                "Output only <command>...</command> blocks."
+              ),
+            }
+          )
+          continue
+        final, truncated, auto_continued = _finalize_agent_report(
+          messages + [{"role": "assistant", "content": response}],
+          logs,
+          model,
+          max_tokens,
+          temperature,
+        )
+        return AiAssistResponse(
+          result=final,
+          truncated=truncated,
+          autoContinued=auto_continued,
+          logs=logs,
+        )
+      return AiAssistResponse(result=_strip_command_tags(response), logs=logs)
+
+    # 1つの <command> ブロックに複数コマンド（&& や ;）をつなげるのは禁止し、書き直しを促す
+    if any(("&&" in cmd) or (";" in cmd) for cmd in cmds):
+      messages.append({"role": "assistant", "content": response})
+      messages.append(
+        {
+          "role": "user",
+          "content": (
+            "For safety, do NOT chain multiple shell commands with '&&' or ';' inside a single <command>...</command> block.\n"
+            "Rewrite your plan so that each <command> block contains exactly ONE shell command (no &&, no ;), "
+            "and try again."
+          ),
+        }
+      )
+      continue
+
+    for cmd in cmds:
+      if _is_potentially_destructive_command(cmd):
+        cleaned = _strip_command_tags(response)
+        if not cleaned:
+          cleaned = f"危険な可能性があるコマンドのため自動実行できません。\n\n提案コマンド:\n{cmd}"
+        return AiAssistResponse(result=cleaned, command=cmd, needsApproval=True, logs=logs)
+
+    feedback_blocks: List[str] = []
+    for cmd in cmds:
+      exec_resp, exec_error = _execute_agent_command(wid, sess, cmd, timeout=120)
+      if exec_resp is not None:
+        out = _truncate_agent_output(exec_resp.get("output", ""))
+        exit_code = exec_resp.get("exitCode", 0)
+        logs.append(AgentCommandLog(command=cmd, exitCode=exit_code, output=out))
+        feedback_blocks.append(
+          f"[Command executed]\n"
+          f"$ {cmd}\n\n"
+          f"Exit code: {exit_code}\n\n"
+          f"Output:\n{out}"
+        )
+      else:
+        logs.append(AgentCommandLog(command=cmd, exitCode=None, output="", error=exec_error))
+        feedback_blocks.append(
+          f"[Command delivery failed]\n"
+          f"$ {cmd}\n\n"
+          f"Error: {exec_error}"
+        )
+
+    feedback = (
+      "\n\n".join(feedback_blocks)
+      + "\n\n"
+      + "Decide the next best step. Do NOT claim that you are unable to run commands in general. "
+      "If one command failed, treat it as a command-specific shell or transport failure only. "
+      "If more evidence is needed, you may run another safe command."
+    )
     messages.append({"role": "assistant", "content": response})
     messages.append({"role": "user", "content": feedback})
-  # 最終回答はトークン上限で切れる限り「続き」を取得して連結する（最大 MAX_CONTINUATION_ROUNDS 回）
-  final, truncated = _call_llm_messages_with_meta(messages, max_tokens=max_tokens, temperature=temperature, model=model)
-  auto_continued = False
-  for _ in range(MAX_CONTINUATION_ROUNDS):
-    if not truncated:
-      break
-    messages.append({"role": "assistant", "content": final})
-    messages.append(
-      {
-        "role": "user",
-        "content": "Continue the previous answer from where you stopped, keeping the same style and level of detail.",
-      }
-    )
-    extra, truncated2 = _call_llm_messages_with_meta(
-      messages,
-      max_tokens=max_tokens,
-      temperature=temperature,
-      model=model,
-    )
-    if not extra:
-      truncated = truncated2
-      break
-    final = final + ("\n\n" if not final.endswith("\n") and extra else "") + extra
-    auto_continued = True
-    truncated = truncated2
+
+  final, truncated, auto_continued = _finalize_agent_report(
+    messages,
+    logs,
+    model,
+    max_tokens,
+    temperature,
+  )
   return AiAssistResponse(result=final, truncated=truncated, autoContinued=auto_continued, logs=logs)
-
-
-class AgentCommandLog(BaseModel):
-  command: str
-  exitCode: Optional[int] = None
-  output: str = ""
-  error: Optional[str] = None
-
-
-class AiAssistResponse(BaseModel):
-  result: str
-  command: Optional[str] = None
-  needsApproval: bool = False
-  # モデルがトークン上限で打ち切られたかどうか（OpenAI / Ollama の finish_reason / done_reason ベース）
-  truncated: bool = False
-  # 自動で "Continue." を送って続きを連結した場合に True
-  autoContinued: bool = False
-  # Agent モードで実行したコマンドと出力のログ（デバッグタブ用）
-  logs: List[AgentCommandLog] = Field(default_factory=list)
-
-
-class BuddyFeedbackPayload(BaseModel):
-  message: str
-  role: str = "assistant"
-  rating: str  # "good" | "bad"
-  taskType: Optional[str] = None
-  mode: Optional[str] = None
-  thinking: Optional[str] = None
-  model: Optional[str] = None
-  watcherId: Optional[str] = None
-  session: Optional[str] = None
 
 
 BUDDY_MEMORY_PATH = BASE_PATH / "ai_buddy_memory.jsonl"
@@ -2310,27 +3035,361 @@ def ai_assist(wid: str, sess: str, payload: AiAssistPayload):
     if payload.editorContent and not payload.editorSelectedText:
       context_parts.append(f"Current file content (for reference):\n```\n{payload.editorContent[:6000]}\n```")
     context_block = "\n\n".join(context_parts) if context_parts else ""
+    # モデル選択:
+    # - payload.model が指定されていればそれを優先
+    # - Auto の場合でも hybridRouting が false のときは単一モデル（OLLAMA_MODEL or デフォルト）を使用
+    # - hybridRouting が true かつ model 未指定のときだけ、route_model によるハイブリッドルーティングを行う
+    requested_model = (payload.model or "").strip() or None
+    use_hybrid = bool(payload.hybridRouting)
+    if requested_model:
+      selected_model = requested_model
+    elif use_hybrid and mode != "multi":
+      requires_reasoning = True
+      requires_code_generation = False
+      requires_repo_read = mode == "agent"
+      complexity = "high" if thinking == "deep" else "medium"
+      routing = route_model(
+        mode=mode,
+        requires_reasoning=requires_reasoning,
+        requires_code_generation=requires_code_generation,
+        requires_repo_read=requires_repo_read,
+        complexity=complexity,
+        available_vram=_get_available_vram_gb(),
+      )
+      if mode in ("ask", "plan", "debug"):
+        selected_model = routing["planner_model"]
+      elif mode == "agent":
+        selected_model = routing["inspector_model"]
+      else:
+        selected_model = os.environ.get("OLLAMA_MODEL") or "qwen2.5-coder:7b"
+    else:
+      selected_model = os.environ.get("OLLAMA_MODEL") or "qwen2.5-coder:7b"
+    # マルチモデル・ディベートモード（multi）はここで分岐
+    if mode == "multi":
+      # 代表モデル 1 つを Agent として使い、その観点でコマンド実行を行ったうえで、
+      # 複数モデルがその結果をレビュー・ディベートし、最後にモデレーターが結論をまとめる。
+      # 利用するモデル集合:
+      # - payload.model にカンマ区切りで入っている場合はそれを優先（例: "qwen3.5:9b,deepseek-coder:6.7b"）
+      # - そうでなければ、代表的な汎用＋コード特化モデルのペアを使用
+      raw_models = (payload.model or "").strip()
+      if raw_models:
+        candidate_models = [m.strip() for m in raw_models.split(",") if m.strip()]
+      else:
+        candidate_models = [
+          os.environ.get("OLLAMA_MODEL") or "qwen3.5",
+          "qwen2.5-coder:7b",
+          "deepseek-coder:6.7b",
+        ]
+      # ユーザーが 1 モデルだけ指定している場合は、自動的に「別系統」のモデルを補完して 2〜3 モデルにする。
+      if len(candidate_models) == 1:
+        base = candidate_models[0].lower()
+        extras: List[str] = []
+        # Qwen 系（汎用 or coder）の場合 → DeepSeek Coder + Llama 系を追加
+        if base.startswith("qwen3.5") or base.startswith("qwen2.5"):
+          extras.extend(["deepseek-coder:6.7b", "llama3.2"])
+        # DeepSeek Coder 系の場合 → Qwen 汎用 + Llama 系を追加
+        elif base.startswith("deepseek-coder"):
+          extras.extend(["qwen3.5", "llama3.2"])
+        # Llama 系の場合 → Qwen Coder + DeepSeek Coder を追加
+        elif base.startswith("llama3"):
+          extras.extend(["qwen2.5-coder:7b", "deepseek-coder:6.7b"])
+        else:
+          # その他 → 汎用 + コード特化の代表セットを追加
+          extras.extend(["qwen3.5", "qwen2.5-coder:7b"])
+        candidate_models = candidate_models + extras
+      # 重複排除 + 先頭2〜3件
+      seen: set[str] = set()
+      models = []
+      for name in candidate_models:
+        if name not in seen:
+          seen.add(name)
+          models.append(name)
+        if len(models) >= 3:
+          break
+      if not models:
+        models = [os.environ.get("OLLAMA_MODEL") or "qwen2.5-coder:7b", "deepseek-coder:6.7b"]
+
+      # Round 0 の前に、代表モデル (models[0]) を Agent ループとして動かし、
+      # 必要に応じてコマンド実行を行ったうえで一次レポートを得る。
+      history = payload.history or []
+      history = history[-max_history:]
+      # Agent 用 system プロンプト（通常の agent モードに近いが、Multi 用の軽量版）
+      system_agent = (
+        "You are the primary investigating agent in a multi‑model debate.\n"
+        "You can run safe shell commands using the <command>...</command> format to inspect the codebase or environment.\n"
+        "You ARE actually connected to a real shell via this mechanism.\n"
+        "Focus on gathering concrete evidence and summarizing it clearly for other models to review.\n"
+        "\n"
+        "CRITICAL BEHAVIOR RULES:\n"
+        "- When the user asks to run, verify, or delegate commands (e.g. environment setup, running scripts, checking versions), YOU must execute them using <command>...</command> instead of telling the user to run them.\n"
+        "- Do NOT say things like 'I am an AI model and cannot run commands' or 'please run these commands yourself' — those are incorrect in this session.\n"
+        "- Prefer sequences of concrete, safe commands (conda/pip installs, python -c checks, running demo scripts) wrapped in <command> blocks, and base your explanation on the actual outputs.\n"
+      )
+      if context_block:
+        system_agent += "\n\n--- Editor context (for reference) ---\n" + context_block
+      if thinking == "deep":
+        system_agent += (
+          "\n\n[Deep mode]\n"
+          "Reason carefully and verify your hypotheses with commands when helpful, but keep your final explanation compact."
+        )
+      elif thinking == "quick":
+        system_agent += (
+          "\n\n[Quick mode]\n"
+          "Prefer a short sequence of commands and a concise summary."
+        )
+      if payload.persona and payload.persona.strip():
+        system_agent = "User-defined persona / instructions:\n" + payload.persona.strip() + "\n\n" + system_agent
+
+      agent_messages: List[dict] = [{"role": "system", "content": system_agent}]
+      for m in history:
+        role = (m.role or "user").strip().lower()
+        if role not in ("user", "assistant"):
+          role = "user"
+        agent_messages.append({"role": role, "content": (m.content or "").strip()})
+      agent_user_content = payload.prompt.strip()
+      agent_messages.append({"role": "user", "content": agent_user_content})
+
+      # 代表モデルは models[0]
+      representative_model = models[0]
+      # Multi では無限にループさせず、Agent イテレーション数を少し絞る
+      agent_max_iter = min(agent_iterations, 6)
+      agent_res = _run_agent_loop(
+        wid,
+        sess,
+        agent_messages,
+        representative_model,
+        max_iterations=agent_max_iter,
+        max_tokens=chat_max_tokens,
+      )
+
+      history = payload.history or []
+      history = history[-max_history:]
+      base_messages = []
+      if context_block:
+        # マルチモデルでも共通の system + コンテキストは同じ
+        base_system = (
+          "You are one of multiple AI assistants collaborating to answer the user's question.\n"
+          "First, provide your own best answer clearly.\n"
+          "Later, you may receive a summary of others' answers to refine the final conclusion.\n"
+        )
+        system_prompt_debate = base_system + "\n\n--- Shared editor context ---\n" + context_block
+      else:
+        system_prompt_debate = (
+          "You are one of multiple AI assistants collaborating to answer the user's question.\n"
+          "First, provide your own best answer clearly.\n"
+        )
+      base_messages.append({"role": "system", "content": system_prompt_debate})
+      for m in history:
+        role = (m.role or "user").strip().lower()
+        if role not in ("user", "assistant"):
+          role = "user"
+        base_messages.append({"role": role, "content": (m.content or "").strip()})
+      user_content = payload.prompt.strip()
+      base_messages.append({"role": "user", "content": user_content})
+
+      debate_turns: List[DebateTurn] = []
+
+      # Round 0: 代表モデル（唯一のエージェント）の一次回答のみ
+      representative_model = models[0]
+      primary_answer = _strip_command_tags((agent_res.result or "").strip())
+      if not primary_answer:
+        primary_answer = "Investigation completed, but the agent did not produce a narrative summary. Refer to the shared command logs."
+      debate_turns.append(
+        DebateTurn(
+          round=0,
+          speaker=f"agent:{representative_model}",
+          model=representative_model,
+          role="assistant",
+          content=primary_answer,
+        )
+      )
+
+      # Round 1: 他モデルは「レビューア」として一次回答の妥当性を評価（独立の再回答はしない）
+      reviewer_comments: List[tuple[str, str]] = []
+      # 代表エージェントが実行したコマンドログを、レビュワーにも共有するためのテキスト
+      agent_logs = getattr(agent_res, "logs", []) or []
+      if agent_logs:
+        log_lines: List[str] = []
+        for idx, lg in enumerate(agent_logs):
+          try:
+            cmd = getattr(lg, "command", None) or (lg.get("command") if isinstance(lg, dict) else None)
+            exit_code = getattr(lg, "exitCode", None) if not isinstance(lg, dict) else lg.get("exitCode")
+            output = getattr(lg, "output", None) if not isinstance(lg, dict) else lg.get("output")
+            error = getattr(lg, "error", None) if not isinstance(lg, dict) else lg.get("error")
+          except Exception:
+            cmd = None
+            exit_code = None
+            output = None
+            error = None
+          header = f"Command {idx+1}: {cmd or '(unknown command)'}"
+          if isinstance(exit_code, int):
+            header += f"  (exit {exit_code})"
+          log_lines.append(header)
+          if output:
+            log_lines.append("STDOUT:\n" + str(output))
+          if error:
+            log_lines.append("STDERR:\n" + str(error))
+        shared_agent_log_text = "\n\n".join(log_lines)
+      else:
+        shared_agent_log_text = ""
+
+      review_system = (
+        "You are a reviewer in a multi-agent debate.\n"
+        "You see the user's question, the PRIMARY agent's answer, "
+        "and a log of the shell commands that the primary agent executed (with their outputs).\n"
+        "\n"
+        "CRITICAL:\n"
+        "- You may rely on the provided command outputs as factual observations.\n"
+        "- Never claim you directly inspected the filesystem, current directory, file list, git status, or environment beyond what is shown in the logs.\n"
+        "- If the primary answer still lacks concrete evidence for a 'current state' question, explicitly ask the primary agent to run safe commands (e.g. pwd, ls -la) and include outputs.\n"
+        "- Do NOT invent any file names, directory paths, or outputs that are not present in the logs or primary answer.\n"
+        "- Do NOT mention your own capabilities or limitations.\n"
+        "- Do NOT say 'I cannot run commands' or similar phrases.\n"
+        "Task:\n"
+        "- Check whether the primary answer is correct and sufficiently detailed, given the evidence from the command logs.\n"
+        "- Point out concrete issues, missing steps, or risks.\n"
+        "- If you agree, say so briefly and add only high-value improvements.\n"
+        "Output requirements:\n"
+        "- Keep it short.\n"
+        "- Do NOT rewrite the whole answer.\n"
+        "- Do NOT invent facts (e.g., file lists, current directory) not present in the primary answer or logs.\n"
+      )
+      for model_name in models[1:]:
+        review_messages = [
+          {"role": "system", "content": review_system},
+          {
+            "role": "user",
+            "content": (
+              "User question:\n"
+              f"{payload.prompt.strip()}\n\n"
+              + (
+                "Primary agent command logs (shared with you):\n"
+                f"{shared_agent_log_text}\n\n"
+                if shared_agent_log_text
+                else ""
+              )
+              + "Primary agent answer:\n"
+              + f"{primary_answer}\n\n"
+              + "Provide your review now."
+            ),
+          },
+        ]
+        comment, _tr_review = _call_llm_messages_with_meta(
+          review_messages,
+          max_tokens=max(256, min(1024, chat_max_tokens)),
+          temperature=0.2,
+          model=model_name,
+        )
+        comment_text = (comment or "").strip()
+        reviewer_comments.append((model_name, comment_text))
+        debate_turns.append(
+          DebateTurn(
+            round=1,
+            speaker=f"reviewer:{model_name}",
+            model=model_name,
+            role="assistant",
+            content=comment_text,
+          )
+        )
+
+      # Round 2: モデレーターが一次回答＋レビューコメントから、ユーザー向けの最終回答だけを生成
+      moderator_model = representative_model
+      summary_prompt = (
+        "You are the moderator combining multiple AI assistant answers.\n"
+        "You will receive a primary answer and reviewer comments.\n"
+        "\n"
+        "Your primary goal is to provide the BEST POSSIBLE direct answer to the user's question.\n"
+        "- Start from the primary agent answer as the backbone.\n"
+        "- Integrate only genuinely important corrections or additions from reviewer comments.\n"
+        "- Do NOT mention reviewers, assistants, agreements, disagreements, or meta discussion.\n"
+        "- Ignore reviewer meta-comments about capabilities or inability to run commands.\n"
+        "- Do NOT say that the AI system is unable to run commands.\n"
+        "- If command execution failed, describe it as a shell failure or session transport failure, not as an AI limitation.\n"
+        "- Do NOT generate brand-new code, configs, installation steps, or project structure unless they are directly supported by the primary answer or shared logs.\n"
+        "- If the evidence is insufficient, say what is missing instead of fabricating a complete implementation guide.\n"
+        "- Output a single clean plain-text answer for the user.\n"
+        "- Do NOT use Markdown headings, code fences, or article-style titles.\n"
+      )
+      summary_messages = [
+        {"role": "system", "content": summary_prompt},
+      ]
+      joined_reviews = []
+      for idx, (model_name, text) in enumerate(reviewer_comments):
+        joined_reviews.append(f"Reviewer {idx+1} ({model_name}):\n{text or '(no comment)'}")
+      summary_user = (
+        "User question:\n"
+        f"{payload.prompt.strip()}\n\n"
+        "Primary answer:\n"
+        f"{primary_answer}\n\n"
+        "Reviewer comments:\n\n"
+        + ("\n\n---\n\n".join(joined_reviews) if joined_reviews else "(none)")
+      )
+      summary_messages.append({"role": "user", "content": summary_user})
+      final_answer, _tr2 = _call_llm_messages_with_meta(
+        summary_messages,
+        max_tokens=chat_max_tokens,
+        temperature=0.2,
+        model=moderator_model,
+      )
+      final_answer = _normalize_plain_answer((final_answer or "").strip())
+      if not final_answer:
+        final_answer = primary_answer
+      debate_turns.append(
+        DebateTurn(
+          round=2,
+          speaker="moderator",
+          model=moderator_model,
+          role="assistant",
+          content=final_answer,
+        )
+      )
+
+      debate = DebateThread(
+        id=str(uuid.uuid4()),
+        title="Multi-model debate",
+        models=models,
+        turns=debate_turns,
+      )
+      # Agent の実行ログや潜在的な approval 要求も Multi の結果に伝搬する
+      return AiAssistResponse(
+        result=final_answer,
+        command=getattr(agent_res, "command", None),
+        needsApproval=getattr(agent_res, "needsApproval", False),
+        logs=getattr(agent_res, "logs", []),
+        debates=[debate],
+        truncated=getattr(agent_res, "truncated", False),
+        autoContinued=getattr(agent_res, "autoContinued", False),
+      )
+
     if mode == "agent":
       system_prompt = (
-        "You are an autonomous AI coding agent that collaborates with the user. Think step by step and use the terminal when it helps.\n"
-        "You can run real shell commands in this session. When the user asks to inspect files, run a script, or check the environment, "
+        "You are SyncTerm-IDE's local coding agent. You collaborate with the user as a careful pair-programming partner.\n"
+        "Your priorities are: (1) be correct and useful, (2) avoid destructive actions, (3) prefer small, verifiable steps, "
+        "(4) prefer observation over guessing, (5) keep the user in control.\n"
+        "\n"
+        "You CAN run real shell commands in this session. When the user asks to inspect files, run a script, or check the environment, "
         "use the format <command>SHELL_COMMAND</command> (e.g. <command>pwd</command>, <command>ls -la</command>) and base your answer on the output.\n"
-        "Never claim you cannot run commands in this session. Do NOT run destructive commands (rm -rf, mkfs, etc.) without explicit user request.\n"
+        "Never claim you cannot run commands in this session. Do NOT run destructive commands (rm -rf, mkfs, shutdown, reboot, fork bombs, etc.).\n"
+        "In each <command>...</command> block, put exactly ONE shell command only (no '&&', no ';').\n"
         "Reply in the same language as the user.\n"
         "\n"
-        "Collaboration principles (MUST follow):\n"
-        "- When the request is ambiguous or large (big refactors, new tools, environment changes), first ask clarifying questions instead of guessing.\n"
-        "- Before running a series of commands or editing multiple files, propose a short plan (1–3 steps) and wait for the user's confirmation.\n"
+        "Execution policy:\n"
+        "- Level 0 (read-only: ls, cat, rg, git status, etc.): allowed automatically when helpful.\n"
+        "- Level 1 (light operations: tests, lint, dry-run builds): allowed, but briefly mention what you are about to run.\n"
+        "- Level 2 (workspace modifications: edits, new files, renames): first propose a short plan (1–3 steps) and wait for the user's confirmation before running commands.\n"
+        "- Level 3 (environment changes: installs, deletes, git commit/reset, system changes): NEVER execute without explicit user approval.\n"
+        "  For installs/updates (pip/conda/npm/apt etc.), propose the exact command and a sandbox/venv strategy, then wait for approval.\n"
+        "\n"
+        "Collaboration style:\n"
+        "- When the request is ambiguous or large (big refactors, new tools, environment changes), ask 1–3 clarifying questions instead of guessing.\n"
+        "- Before running a series of commands or editing multiple files, show a short plan and ask whether to proceed.\n"
         "- After each major step, briefly summarize what changed and ask whether to continue, instead of trying to solve everything in one shot.\n"
         "\n"
-        "Safety rules (MUST follow):\n"
-        "- Do NOT run install / update commands (pip/conda/npm/apt etc.) on your own. If installation seems useful, propose the exact command and a short plan (e.g. using a venv or sandbox folder) and wait for the user's explicit approval.\n"
-        "- Do NOT create, overwrite, or delete files unless the user has clearly requested it. When new files are needed, propose the path/name first and ask for confirmation.\n"
-        "- Prefer read-only or low‑risk commands by default.\n"
-        "\n"
-        "When the user asks how a symbol is used across the project, actively explore:\n"
-        "- First search the repo (e.g. <command>rg -n \"MyModel\" .</command>).\n"
-        "- Then open defining/importing files (e.g. via <command>sed -n '1,160p path/to/file.py'</command>) and base your explanation on all relevant files."
+        "Response structure for agent/debug tasks:\n"
+        "- Understanding: what you think the user wants and what you observed.\n"
+        "- Plan: 1–3 concrete steps you intend to take.\n"
+        "- Action: what you actually did (commands, edits, inspections).\n"
+        "- Result / Next: what you found or changed, and the next options for the user.\n"
       )
       if context_block:
         system_prompt += "\n\n--- Editor context (use for code changes when relevant) ---\n" + context_block
@@ -2406,7 +3465,7 @@ def ai_assist(wid: str, sess: str, payload: AiAssistPayload):
         wid,
         sess,
         messages,
-        payload.model,
+        selected_model,
         max_iterations=agent_iterations,
         max_tokens=chat_max_tokens,
       )
@@ -2417,7 +3476,7 @@ def ai_assist(wid: str, sess: str, payload: AiAssistPayload):
         messages,
         max_tokens=chat_max_tokens,
         temperature=0.2,
-        model=payload.model,
+        model=selected_model,
       )
       auto_continued = False
       for _ in range(MAX_CONTINUATION_ROUNDS):
@@ -2444,6 +3503,28 @@ def ai_assist(wid: str, sess: str, payload: AiAssistPayload):
         truncated = truncated2
   else:
     mode = (payload.mode or "ask").strip().lower()
+    # コード生成系（action != "chat"）のモデル決定
+    requested_model = (payload.model or "").strip() or None
+    use_hybrid = bool(payload.hybridRouting)
+    if requested_model:
+      selected_model = requested_model
+    elif use_hybrid:
+      requires_reasoning = True
+      requires_code_generation = True
+      requires_repo_read = False
+      complexity = "high"
+      routing = route_model(
+        mode=mode,
+        requires_reasoning=requires_reasoning,
+        requires_code_generation=requires_code_generation,
+        requires_repo_read=requires_repo_read,
+        complexity=complexity,
+        available_vram=_get_available_vram_gb(),
+      )
+      selected_model = routing["executor_model"]
+    else:
+      selected_model = os.environ.get("OLLAMA_MODEL") or "qwen2.5-coder:7b"
+
     if mode == "agent":
       system_prompt = (
         "You are an autonomous coding agent. Take a deep breath and think step by step about the best change.\n"
@@ -2474,11 +3555,532 @@ def ai_assist(wid: str, sess: str, payload: AiAssistPayload):
     if payload.persona and payload.persona.strip():
       system_prompt = "User-defined persona / instructions:\n" + payload.persona.strip() + "\n\n" + system_prompt
     user_prompt = build_ai_prompt(payload)
-    result = _call_llm(system_prompt, user_prompt, max_tokens=code_max_tokens, temperature=0.2, model=payload.model)
+    result = _call_llm(system_prompt, user_prompt, max_tokens=code_max_tokens, temperature=0.2, model=selected_model)
     # コード生成モードでは安全のため自動継続は行わない
     truncated = False
     auto_continued = False
   return AiAssistResponse(result=result, truncated=truncated, autoContinued=auto_continued)
+
+
+@app.post("/watchers/{wid}/sessions/{sess}/ai-stream")
+def ai_stream(wid: str, sess: str, payload: AiAssistPayload):
+  """AI 応答を text/event-stream でストリーミング返却するエンドポイント。
+
+  - chat / debate（Multi モード）の通常応答は LLM ネイティブのストリーミング API を使用
+  - Agent / コード生成系など複雑なモードは、従来どおり ai_assist の結果を疑似ストリーミングする
+  """
+  session_root(wid, sess)
+
+  action = (payload.action or "").strip().lower()
+  mode = (payload.mode or "ask").strip().lower()
+
+  thinking = (payload.thinking or "balanced").strip().lower()
+  if thinking == "quick":
+    chat_max_tokens = 1024
+    max_history = 6
+  elif thinking == "deep":
+    chat_max_tokens = 4096
+    max_history = 20
+  else:
+    chat_max_tokens = 2048
+    max_history = 12
+
+  # chat アクションかつ Agent / Multi 以外 → 真のストリーミングで返す
+  if action == "chat" and mode not in ("agent", "multi"):
+    # ai_assist の chat 分岐と同じロジックでコンテキストとモデル選択を行う
+      context_parts: List[str] = []
+      if payload.editorPath:
+        context_parts.append(f"Current file: {payload.editorPath}")
+      if payload.editorSelectedText:
+        context_parts.append(f"Selected text in editor:\n```\n{payload.editorSelectedText[:4000]}\n```")
+      if payload.editorContent and not payload.editorSelectedText:
+        context_parts.append(f"Current file content (for reference):\n```\n{payload.editorContent[:6000]}\n```")
+      context_block = "\n\n".join(context_parts) if context_parts else ""
+
+      requested_model = (payload.model or "").strip() or None
+      use_hybrid = bool(payload.hybridRouting)
+      if requested_model:
+        selected_model = requested_model
+      elif use_hybrid and mode != "multi":
+        requires_reasoning = True
+        requires_code_generation = False
+        requires_repo_read = mode == "agent"
+        complexity = "high" if thinking == "deep" else "medium"
+        routing = route_model(
+          mode=mode,
+          requires_reasoning=requires_reasoning,
+          requires_code_generation=requires_code_generation,
+          requires_repo_read=requires_repo_read,
+          complexity=complexity,
+          available_vram=_get_available_vram_gb(),
+        )
+        if mode in ("ask", "plan", "debug"):
+          selected_model = routing["planner_model"]
+        elif mode == "agent":
+          selected_model = routing["inspector_model"]
+        else:
+          selected_model = os.environ.get("OLLAMA_MODEL") or "qwen2.5-coder:7b"
+      else:
+        selected_model = os.environ.get("OLLAMA_MODEL") or "qwen2.5-coder:7b"
+
+      # system プロンプト（ai_assist と同等だが、Agent 以外のみ）
+      if mode == "plan":
+        system_prompt = (
+          "You are a planning assistant. Take a moment to think through the problem, then help the user plan:\n"
+          "- Outline clear steps and milestones\n"
+          "- Call out risks and alternatives when important\n"
+          "Use headings and numbered lists, but keep the final answer concise."
+        )
+        if context_block:
+          system_prompt += "\n\n--- Editor context (for planning around current code) ---\n" + context_block
+      elif mode == "debug":
+        system_prompt = (
+          "You are a debugging assistant. Think deeply about possible root causes before proposing fixes.\n"
+          "Analyze errors, propose hypotheses, and then suggest concrete fixes. "
+          "Explain root causes in plain text; include code snippets only when relevant."
+        )
+        if context_block:
+          system_prompt += "\n\n--- Editor context (use this code when debugging) ---\n" + context_block
+      else:
+        system_prompt = "You are a helpful assistant. Reply concisely. Use plain text, no code fences unless the user asks for code."
+        if context_block:
+          system_prompt += "\n\n--- Editor context (for reference) ---\n" + context_block
+
+      if thinking == "deep":
+        system_prompt += (
+          "\n\n[Deep thinking mode]\n"
+          "Take a moment to reason internally about multiple possibilities and sanity-check your final answer. "
+          "In the final output, present 2–4 concise steps (or sections) that show the high-level flow of your reasoning, "
+          "followed by a short conclusion. Do not expose every tiny internal reasoning step."
+        )
+      elif thinking == "quick":
+        system_prompt += (
+          "\n\n[Quick mode]\n"
+          "Answer in a single short paragraph or list when possible. Focus on the most important points only."
+        )
+
+      system_prompt += (
+        "\n\n[Output quality rules]\n"
+        "- Do not repeat the same sentence or disclaimer multiple times.\n"
+        "- If the answer cannot be determined from the provided information, say this once, then briefly suggest what additional information would be needed.\n"
+      )
+      if payload.persona and payload.persona.strip():
+        system_prompt = "User-defined persona / instructions:\n" + payload.persona.strip() + "\n\n" + system_prompt
+
+      history = payload.history or []
+      history = history[-max_history:]
+      messages: List[dict] = [{"role": "system", "content": system_prompt}]
+      for m in history:
+        role = (m.role or "user").strip().lower()
+        if role not in ("user", "assistant"):
+          role = "user"
+        messages.append({"role": role, "content": (m.content or "").strip()})
+      user_content = payload.prompt.strip()
+      messages.append({"role": "user", "content": user_content})
+
+      def _iter_events_chat():
+        full_text = ""
+        truncated_flag = False
+        for ev in _stream_llm_messages(messages, max_tokens=chat_max_tokens, temperature=0.2, model=selected_model):
+          if ev.get("type") == "token" and ev.get("delta"):
+            full_text += str(ev.get("delta") or "")
+            yield f"data: {json.dumps({'type': 'token', 'delta': ev.get('delta')}, ensure_ascii=False)}\n\n"
+          elif ev.get("type") == "done":
+            result_text = str(ev.get("result") or "") or full_text
+            truncated_flag = bool(ev.get("truncated"))
+            done_ev = {
+              "type": "done",
+              "result": result_text,
+              "command": None,
+              "needsApproval": False,
+              "truncated": truncated_flag,
+              "autoContinued": False,
+              "logs": [],
+              "debates": [],
+            }
+            yield f"data: {json.dumps(done_ev, ensure_ascii=False)}\n\n"
+
+      return StreamingResponse(_iter_events_chat(), media_type="text/event-stream")
+
+  # Multi モードでは、代表エージェント + レビューモデル + モデレーターによるディベートを
+  # ラウンド／ターン単位でストリーミングする。
+  if action == "chat" and mode == "multi":
+    def _iter_events_multi():
+      # thinking / chat_max_tokens / max_history / agent_iterations は ai_assist と同じロジックを再利用
+      thinking = (payload.thinking or "balanced").strip().lower()
+      if thinking == "quick":
+        chat_max_tokens = 1024
+        max_history = 6
+        agent_iterations = 4
+      elif thinking == "deep":
+        chat_max_tokens = 4096
+        max_history = 20
+        agent_iterations = 16
+      else:
+        chat_max_tokens = 2048
+        max_history = 12
+        agent_iterations = 10
+
+      # エディタコンテキストの組み立て（ai_assist と同じ）
+      context_parts: List[str] = []
+      if payload.editorPath:
+        context_parts.append(f"Current file: {payload.editorPath}")
+      if payload.editorSelectedText:
+        context_parts.append(f"Selected text in editor:\n```\n{payload.editorSelectedText[:4000]}\n```")
+      if payload.editorContent and not payload.editorSelectedText:
+        context_parts.append(f"Current file content (for reference):\n```\n{payload.editorContent[:6000]}\n```")
+      context_block = "\n\n".join(context_parts) if context_parts else ""
+
+      # モデル集合の決定（ai_assist の multi と同じロジック）
+      raw_models = (payload.model or "").strip()
+      if raw_models:
+        candidate_models = [m.strip() for m in raw_models.split(",") if m.strip()]
+      else:
+        candidate_models = [
+          os.environ.get("OLLAMA_MODEL") or "qwen3.5",
+          "qwen2.5-coder:7b",
+          "deepseek-coder:6.7b",
+        ]
+      if len(candidate_models) == 1:
+        base_name = candidate_models[0].lower()
+        extras: List[str] = []
+        if base_name.startswith("qwen3.5") or base_name.startswith("qwen2.5"):
+          extras.extend(["deepseek-coder:6.7b", "llama3.2"])
+        elif base_name.startswith("deepseek-coder"):
+          extras.extend(["qwen3.5", "llama3.2"])
+        elif base_name.startswith("llama3"):
+          extras.extend(["qwen2.5-coder:7b", "deepseek-coder:6.7b"])
+        else:
+          extras.extend(["qwen3.5", "qwen2.5-coder:7b"])
+        candidate_models = candidate_models + extras
+      seen_models: set[str] = set()
+      models: List[str] = []
+      for name in candidate_models:
+        if name in seen_models:
+          continue
+        seen_models.add(name)
+        models.append(name)
+        if len(models) >= 3:
+          break
+      if not models:
+        models = [os.environ.get("OLLAMA_MODEL") or "qwen2.5-coder:7b", "deepseek-coder:6.7b"]
+
+      # 代表モデル（唯一のエージェント） = models[0]
+      representative_model = models[0]
+
+      # 履歴の切り詰め
+      history = payload.history or []
+      history = history[-max_history:]
+
+      # 代表エージェント用 system プロンプト
+      system_agent = (
+        "You are the primary investigating agent in a multi-model debate.\n"
+        "Only YOU can run real shell commands in this session using <command>...</command>.\n"
+        "Other models will only see your report and logs; they do NOT see the raw environment.\n"
+        "You ARE actually connected to a real shell via this mechanism.\n"
+        "Focus on gathering concrete evidence and summarizing it clearly for others to review.\n"
+        "\n"
+        "CRITICAL:\n"
+        "- You DO have access to the remote session via commands. Never say you cannot access the filesystem.\n"
+        "- Never say things like 'I am just an AI model and cannot run commands' or 'please run these commands yourself' — those are incorrect in this session.\n"
+        "- If the user asks about CURRENT STATE (e.g. current directory, file list, git status, running processes, env), you MUST run safe commands to verify.\n"
+        "- If the user delegates environment setup, dependency installation, or running demo scripts to you, plan the steps and then execute the necessary commands using <command>...</command>, asking for approval only when a command might be risky.\n"
+        "- Prefer: <command>pwd</command>, <command>ls -la</command>, <command>git status</command>, conda/pip installs, python -c checks, etc.\n"
+        "- When reporting files, paths, or versions, base your answer ONLY on command output. If a command failed, say so and try an alternative safe command.\n"
+        "- In each <command>...</command> block, put exactly ONE shell command only (no '&&', no ';').\n"
+      )
+      if context_block:
+        system_agent += "\n\n--- Editor context (for reference) ---\n" + context_block
+      if thinking == "deep":
+        system_agent += (
+          "\n\n[Deep mode]\n"
+          "Reason carefully and verify your hypotheses with commands when helpful, "
+          "but keep your final explanation compact."
+        )
+      elif thinking == "quick":
+        system_agent += (
+          "\n\n[Quick mode]\n"
+          "Prefer a short sequence of commands and a concise summary."
+        )
+      if payload.persona and payload.persona.strip():
+        system_agent = "User-defined persona / instructions:\n" + payload.persona.strip() + "\n\n" + system_agent
+
+      agent_messages: List[dict] = [{"role": "system", "content": system_agent}]
+      for m in history:
+        role = (m.role or "user").strip().lower()
+        if role not in ("user", "assistant"):
+          role = "user"
+        agent_messages.append({"role": role, "content": (m.content or "").strip()})
+      agent_user_content = payload.prompt.strip()
+      agent_messages.append({"role": "user", "content": agent_user_content})
+
+      # 代表エージェントの Agent ループ（ここは同期実行だが、完了次第すぐに debate_turn を流す）
+      agent_max_iter = min(agent_iterations, 6)
+      agent_res = _run_agent_loop(
+        wid,
+        sess,
+        agent_messages,
+        representative_model,
+        max_iterations=agent_max_iter,
+        max_tokens=chat_max_tokens,
+      )
+
+      agent_logs = getattr(agent_res, "logs", []) or []
+      if agent_logs:
+        log_lines: List[str] = []
+        for idx, lg in enumerate(agent_logs):
+          try:
+            cmd = getattr(lg, "command", None) or (lg.get("command") if isinstance(lg, dict) else None)
+            exit_code = getattr(lg, "exitCode", None) if not isinstance(lg, dict) else lg.get("exitCode")
+            output = getattr(lg, "output", None) if not isinstance(lg, dict) else lg.get("output")
+            error = getattr(lg, "error", None) if not isinstance(lg, dict) else lg.get("error")
+          except Exception:
+            cmd = None
+            exit_code = None
+            output = None
+            error = None
+          header = f"Command {idx+1}: {cmd or '(unknown command)'}"
+          if isinstance(exit_code, int):
+            header += f"  (exit {exit_code})"
+          log_lines.append(header)
+          if output:
+            log_lines.append("STDOUT:\n" + str(output))
+          if error:
+            log_lines.append("STDERR:\n" + str(error))
+        shared_agent_log_text = "\n\n".join(log_lines)
+      else:
+        shared_agent_log_text = ""
+
+      debate_turns: List[DebateTurn] = []
+
+      # Round 0: 代表エージェントのレポートをまず流す
+      agent_text = _strip_command_tags((agent_res.result or "").strip())
+      if not agent_text:
+        agent_text = "Investigation completed, but the agent did not produce a narrative summary. Refer to the shared command logs."
+      debate_turns.append(
+        DebateTurn(
+          round=0,
+          speaker=f"agent:{representative_model}",
+          model=representative_model,
+          role="assistant",
+          content=agent_text,
+        )
+      )
+      first_debate = DebateThread(
+        id=str(uuid.uuid4()),
+        title="Multi-model debate",
+        models=models,
+        turns=debate_turns[:],
+      )
+      # 代表ターンを即座にフロントへ送信
+      ev0 = {
+        "type": "debate_turn",
+        "debateId": first_debate.id,
+        "turn": {
+          "round": 0,
+          "speaker": f"agent:{representative_model}",
+          "model": representative_model,
+          "role": "assistant",
+          "content": agent_text,
+        },
+      }
+      yield f"data: {json.dumps(ev0, ensure_ascii=False)}\n\n"
+
+      debate_id = first_debate.id
+
+      # Round 1: 他モデルは「レビューア」として一次回答を評価（再回答しない）
+      review_system = (
+        "You are a reviewer in a multi-agent debate.\n"
+        "You see the user's question, the PRIMARY agent's answer, "
+        "and a log of the shell commands that the primary agent executed (with their outputs).\n"
+        "\n"
+        "CRITICAL:\n"
+        "- You may rely on the provided command outputs as factual observations.\n"
+        "- Never claim you directly inspected the filesystem, current directory, file list, git status, or environment beyond what is shown in the logs.\n"
+        "- If the primary answer still lacks concrete evidence for a current-state question, explicitly ask the primary agent to run safe commands and include outputs.\n"
+        "- Do NOT invent any file names, directory paths, outputs, versions, or code that are not present in the logs or primary answer.\n"
+        "- Do NOT mention your own capabilities or limitations.\n"
+        "- Do NOT say 'I cannot run commands' or similar phrases.\n"
+        "Task:\n"
+        "- Check whether the primary answer is correct and sufficiently detailed, given the evidence from the command logs.\n"
+        "- Point out concrete issues, missing steps, or risks.\n"
+        "- If you agree, say so briefly and add only high-value improvements.\n"
+        "Output requirements:\n"
+        "- Keep it short.\n"
+        "- Do NOT rewrite the whole answer.\n"
+        "- Do NOT invent facts not present in the primary answer or logs.\n"
+      )
+      reviewer_comments: List[tuple[str, str]] = []
+      for model_name in models[1:]:
+        review_messages = [
+          {"role": "system", "content": review_system},
+          {
+            "role": "user",
+            "content": (
+              "User question:\n"
+              f"{payload.prompt.strip()}\n\n"
+              + (
+                "Primary agent command logs (shared with you):\n"
+                f"{shared_agent_log_text}\n\n"
+                if shared_agent_log_text
+                else ""
+              )
+              + "Primary agent answer:\n"
+              + f"{agent_text}\n\n"
+              + "Provide your review now."
+            ),
+          },
+        ]
+        comment, _tr = _call_llm_messages_with_meta(
+          review_messages,
+          max_tokens=max(256, min(1024, chat_max_tokens)),
+          temperature=0.2,
+          model=model_name,
+        )
+        text = (comment or "").strip()
+        reviewer_comments.append((model_name, text))
+        turn = DebateTurn(
+          round=1,
+          speaker=f"reviewer:{model_name}",
+          model=model_name,
+          role="assistant",
+          content=text,
+        )
+        debate_turns.append(turn)
+        ev_turn = {
+          "type": "debate_turn",
+          "debateId": debate_id,
+          "turn": {
+            "round": 1,
+            "speaker": f"reviewer:{model_name}",
+            "model": model_name,
+            "role": "assistant",
+            "content": text,
+          },
+        }
+        yield f"data: {json.dumps(ev_turn, ensure_ascii=False)}\n\n"
+
+      # Round 2: モデレーターが一次回答＋レビューコメントから最終回答を作る（メタ無し）
+      moderator_model = representative_model
+      summary_prompt = (
+        "You are the moderator.\n"
+        "You will receive a primary answer and reviewer comments.\n"
+        "\n"
+        "Your primary goal is to provide the BEST POSSIBLE direct answer to the user's question.\n"
+        "- Start from the primary answer as the backbone.\n"
+        "- Integrate only genuinely important corrections or additions from reviewer comments.\n"
+        "- Do NOT mention reviewers, assistants, agreements, disagreements, or meta discussion.\n"
+        "- Ignore reviewer meta-comments about capabilities or inability to run commands.\n"
+        "- Do NOT say that the AI system is unable to run commands.\n"
+        "- If command execution failed, describe it as a shell failure or session transport failure, not as an AI limitation.\n"
+        "- Do NOT generate brand-new code, configs, installation steps, or project structure unless they are directly supported by the primary answer or shared logs.\n"
+        "- If the evidence is insufficient, say what is missing instead of fabricating a complete implementation guide.\n"
+        "- Output a single clean plain-text answer for the user.\n"
+        "- Do NOT use Markdown headings, code fences, or article-style titles.\n"
+      )
+      summary_messages = [
+        {"role": "system", "content": summary_prompt},
+      ]
+      joined_reviews = []
+      for idx, (model_name, text) in enumerate(reviewer_comments):
+        joined_reviews.append(f"Reviewer {idx+1} ({model_name}):\n{text or '(no comment)'}")
+      summary_user = (
+        "User question:\n"
+        f"{payload.prompt.strip()}\n\n"
+        "Primary answer:\n"
+        f"{agent_text}\n\n"
+        "Reviewer comments:\n\n"
+        + ("\n\n---\n\n".join(joined_reviews) if joined_reviews else "(none)")
+      )
+      summary_messages.append({"role": "user", "content": summary_user})
+      final_answer, _tr2 = _call_llm_messages_with_meta(
+        summary_messages,
+        max_tokens=chat_max_tokens,
+        temperature=0.2,
+        model=moderator_model,
+      )
+      final_answer = _normalize_plain_answer((final_answer or "").strip())
+      if not final_answer:
+        final_answer = agent_text
+      debate_turns.append(
+        DebateTurn(
+          round=2,
+          speaker="moderator",
+          model=moderator_model,
+          role="assistant",
+          content=final_answer,
+        )
+      )
+      ev_mod = {
+        "type": "debate_turn",
+        "debateId": debate_id,
+        "turn": {
+          "round": 2,
+          "speaker": "moderator",
+          "model": moderator_model,
+          "role": "assistant",
+          "content": final_answer,
+        },
+      }
+      yield f"data: {json.dumps(ev_mod, ensure_ascii=False)}\n\n"
+
+      # Chat 本文はモデレーターの最終回答を token ストリームとして流す（疑似）
+      text = final_answer or ""
+      chunk_size = 80
+      for i in range(0, len(text), chunk_size):
+        chunk = text[i : i + chunk_size]
+        if not chunk:
+          continue
+        ev = {"type": "token", "delta": chunk}
+        yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+
+      debate = DebateThread(
+        id=debate_id,
+        title="Multi-model debate",
+        models=models,
+        turns=debate_turns,
+      )
+
+      done_ev = {
+        "type": "done",
+        "result": final_answer,
+        "command": getattr(agent_res, "command", None),
+        "needsApproval": getattr(agent_res, "needsApproval", False),
+        "truncated": getattr(agent_res, "truncated", False),
+        "autoContinued": getattr(agent_res, "autoContinued", False),
+        "logs": [l.model_dump() for l in getattr(agent_res, "logs", [])],
+        "debates": [debate.model_dump()],
+      }
+      yield f"data: {json.dumps(done_ev, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(_iter_events_multi(), media_type="text/event-stream")
+
+  # Agent やコード生成系など、その他複雑なモードは既存の ai_assist を利用した疑似ストリーミングを継続
+  resp = ai_assist(wid, sess, payload)
+
+  def _iter_events_fallback():
+    text = resp.result or ""
+    chunk_size = 80
+    for i in range(0, len(text), chunk_size):
+      chunk = text[i : i + chunk_size]
+      if not chunk:
+        continue
+      ev = {"type": "token", "delta": chunk}
+      yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+
+    done_ev = {
+      "type": "done",
+      "result": resp.result,
+      "command": resp.command,
+      "needsApproval": resp.needsApproval,
+      "truncated": resp.truncated,
+      "autoContinued": resp.autoContinued,
+      "logs": [l.model_dump() for l in resp.logs] if hasattr(resp, "logs") else [],
+      "debates": [d.model_dump() for d in resp.debates] if hasattr(resp, "debates") else [],
+    }
+    yield f"data: {json.dumps(done_ev, ensure_ascii=False)}\n\n"
+
+  return StreamingResponse(_iter_events_fallback(), media_type="text/event-stream")
 
 
 @app.post("/watchers/{wid}/sessions/{sess}/ai-inline")

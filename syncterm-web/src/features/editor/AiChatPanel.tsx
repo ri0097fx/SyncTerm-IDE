@@ -17,7 +17,7 @@ import { useActiveEditor } from "./ActiveEditorContext";
 import { api, type BuddyState } from "../../lib/api";
 
 type Message = { role: "user" | "assistant"; text: string; feedback?: "good" | "bad" };
-type PendingCommand = { command: string };
+type PendingCommand = { command: string; chatId: string };
 const AUTO_MODEL = "__auto__";
 
 const CHAT_STORAGE_KEY = "syncterm-ai-chat";
@@ -38,13 +38,26 @@ export function getStoredAiModel(watcherId: string, sessionName: string): string
   }
 }
 
-export type ChatMode = "agent" | "plan" | "debug" | "ask";
+export type ChatMode = "agent" | "plan" | "debug" | "ask" | "multi";
 export type ThinkingMode = "quick" | "balanced" | "deep";
 
 type ChatState = {
   chatIds: string[];
   activeChatId: string;
-  chats: Record<string, { name?: string; messages: Message[]; logs?: AgentLogEntry[] }>;
+  chats: Record<
+    string,
+    {
+      name?: string;
+      messages: Message[];
+      logs?: AgentLogEntry[];
+      debates?: {
+        id: string;
+        title?: string;
+        models: string[];
+        turns: { round: number; speaker: string; model: string; role: string; content: string }[];
+      }[];
+    }
+  >;
   selectedModel?: string;
   chatMode?: ChatMode;
   thinkingMode?: ThinkingMode;
@@ -221,7 +234,22 @@ export const AiChatPanel: React.FC = () => {
   const [tab, setTab] = useState<"chat" | "assist" | "buddy" | "settings">("chat");
   const [chatIds, setChatIds] = useState<string[]>([]);
   const [activeChatId, setActiveChatId] = useState<string>("");
-  const [chats, setChats] = useState<Record<string, { name?: string; messages: Message[] }>>({});
+  const [chats, setChats] = useState<
+    Record<
+      string,
+      {
+        name?: string;
+        messages: Message[];
+        logs?: AgentLogEntry[];
+        debates?: {
+          id: string;
+          title?: string;
+          models: string[];
+          turns: { round: number; speaker: string; model: string; role: string; content: string }[];
+        }[];
+      }
+    >
+  >({});
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
   const [chatMode, setChatMode] = useState<ChatMode>("ask");
   const [thinkingMode, setThinkingMode] = useState<ThinkingMode>("balanced");
@@ -232,12 +260,16 @@ export const AiChatPanel: React.FC = () => {
   const [aiResult, setAiResult] = useState("");
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
-  const [aiModels, setAiModels] = useState<{ installed: string[]; suggested: string[] }>({ installed: [], suggested: [] });
+  const [aiModels, setAiModels] = useState<{ installed: string[]; suggested: string[]; recommended?: string[] }>({
+    installed: [],
+    suggested: [],
+    recommended: []
+  });
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const [ensuringModel, setEnsuringModel] = useState<string | null>(null);
   const [installProgress, setInstallProgress] = useState<{ model: string; status: string; percent?: number } | null>(null);
   const [pendingCommand, setPendingCommand] = useState<PendingCommand | null>(null);
-  const [chatView, setChatView] = useState<"messages" | "logs">("messages");
+  const [chatView, setChatView] = useState<"messages" | "logs" | "debate">("messages");
   const [editingMessageIndex, setEditingMessageIndex] = useState<number | null>(null);
   const [editingMessageText, setEditingMessageText] = useState("");
   const [buddyState, setBuddyState] = useState<BuddyState | null>(null);
@@ -248,6 +280,7 @@ export const AiChatPanel: React.FC = () => {
   const [buddyTasksError, setBuddyTasksError] = useState<string | null>(null);
   const [buddyTasksLoading, setBuddyTasksLoading] = useState(false);
   const [buddyAllowCommands, setBuddyAllowCommands] = useState(false);
+  const [showAdvancedPersona, setShowAdvancedPersona] = useState(false);
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
   const [thinkingMenuOpen, setThinkingMenuOpen] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -276,6 +309,21 @@ export const AiChatPanel: React.FC = () => {
     } else if (preferences.aiLanguage === "en") {
       parts.push("Respond in English.");
     }
+    if (preferences.aiExecutionStyle === "careful") {
+      parts.push("Prefer cautious, incremental changes and double-check risky operations with the user before proceeding.");
+    } else if (preferences.aiExecutionStyle === "bold") {
+      parts.push("Be more proactive in proposing larger refactors or concrete code edits, while still calling out risks clearly.");
+    }
+    if (preferences.aiQuestioningStyle === "proactive") {
+      parts.push("Ask clarifying questions when the request is ambiguous or under-specified instead of guessing.");
+    } else if (preferences.aiQuestioningStyle === "minimal") {
+      parts.push("Avoid too many clarification questions; make reasonable assumptions and minimize interruptions.");
+    }
+    if (preferences.aiExplainStyle === "high_level") {
+      parts.push("Prefer high-level explanations and summaries; avoid unnecessary low-level step-by-step detail.");
+    } else if (preferences.aiExplainStyle === "step_by_step") {
+      parts.push("Explain your reasoning and solutions step by step so the user can follow the process.");
+    }
     if (buddyState && buddyState.hints && buddyState.hints.length) {
       const enabledHints = buddyState.hints;
       if (enabledHints.length) {
@@ -290,6 +338,20 @@ export const AiChatPanel: React.FC = () => {
   };
 
   const currentMessages = Array.isArray(chats[activeChatId]?.messages) ? chats[activeChatId].messages : [];
+  const currentDebates = Array.isArray((chats[activeChatId] as any)?.debates)
+    ? ((chats[activeChatId] as any).debates as {
+        id: string;
+        title?: string;
+        models: string[];
+        turns: { round: number; speaker: string; model: string; role: string; content: string }[];
+      }[])
+    : [];
+  const [debateForNextCycle, setDebateForNextCycle] = useState<{
+    id: string;
+    title?: string;
+    models: string[];
+    turns: { round: number; speaker: string; model: string; role: string; content: string }[];
+  } | null>(null);
   const scrollToBottom = () => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
 
   useEffect(() => { chatsRef.current = chats; }, [chats]);
@@ -351,12 +413,22 @@ export const AiChatPanel: React.FC = () => {
   useEffect(() => {
     if (!currentWatcher || !currentSession) return;
     let cancelled = false;
-    api.getAiModels(currentWatcher.id, currentSession.name).then((r) => {
-      if (!cancelled) setAiModels({ installed: r.installed ?? [], suggested: r.suggested ?? [] });
-    }).catch(() => {
-      if (!cancelled) setAiModels({ installed: [], suggested: [] });
-    });
-    return () => { cancelled = true; };
+    api
+      .getAiModels(currentWatcher.id, currentSession.name)
+      .then((r) => {
+        if (!cancelled)
+          setAiModels({
+            installed: r.installed ?? [],
+            suggested: r.suggested ?? [],
+            recommended: r.recommended ?? []
+          });
+      })
+      .catch(() => {
+        if (!cancelled) setAiModels({ installed: [], suggested: [], recommended: [] });
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [currentWatcher?.id, currentSession?.name]);
 
   // モデル一覧取得後、まだ選択されていない場合は最初の候補をデフォルト選択にする
@@ -417,7 +489,32 @@ export const AiChatPanel: React.FC = () => {
   const send = useCallback(
     async (text: string, options?: { historyBeforeIndex?: number }) => {
       if (!currentWatcher || !currentSession || !text.trim()) return;
-      const userMessage = text.trim();
+      const rawUserMessage = text.trim();
+      let apiPrompt = rawUserMessage;
+
+      // 追加サイクル（前回ディベートを踏まえた再ディベート）の場合は、
+      // 前回ディベートのログをプロンプトに埋め込んでから送信する
+      if (debateForNextCycle && chatMode === "multi") {
+        const d = debateForNextCycle;
+        const turnsText = d.turns
+          .map(
+            (t) =>
+              `Round ${t.round} · ${t.speaker} (${t.model}):\n${t.content || "(no content)"}`
+          )
+          .join("\n\n---\n\n");
+        const userExtra =
+          rawUserMessage && rawUserMessage.length > 0
+            ? `ユーザーからの追加コメント:\n${rawUserMessage}`
+            : "ユーザーからの追加コメントはありません。";
+        apiPrompt =
+          "以下は前回のマルチモデル・ディベートのログです。これを前提知識として扱い、必要であれば内容を修正・発展させてください。\n\n" +
+          turnsText +
+          "\n\n---\n\n" +
+          userExtra +
+          "\n\nこれらを踏まえて、改めて最良の回答を出してください。";
+        setDebateForNextCycle(null);
+      }
+
       const mid = activeChatId;
       const prevMessages = chats[mid]?.messages ?? [];
       const historyForApi =
@@ -427,12 +524,21 @@ export const AiChatPanel: React.FC = () => {
       if (options?.historyBeforeIndex != null) {
         setChats((prev) => ({
           ...prev,
-          [mid]: { ...prev[mid], messages: [...prevMessages.slice(0, options.historyBeforeIndex!), { role: "user", text: userMessage }] }
+          [mid]: {
+            ...prev[mid],
+            messages: [
+              ...prevMessages.slice(0, options.historyBeforeIndex!),
+              { role: "user", text: rawUserMessage }
+            ]
+          }
         }));
       } else {
         setChats((prev) => ({
           ...prev,
-          [mid]: { ...prev[mid], messages: [...(prev[mid]?.messages ?? []), { role: "user", text: userMessage }] }
+          [mid]: {
+            ...prev[mid],
+            messages: [...(prev[mid]?.messages ?? []), { role: "user", text: rawUserMessage }]
+          }
         }));
       }
       setInput("");
@@ -442,42 +548,7 @@ export const AiChatPanel: React.FC = () => {
         if (aiAbortRef.current) aiAbortRef.current.abort();
         aiAbortRef.current = controller;
         const history = historyForApi.map((m) => ({ role: m.role, content: m.text }));
-        const res = await api.runAiAssist(currentWatcher.id, currentSession.name, {
-          path: "",
-          action: "chat",
-          prompt: userMessage,
-          fileContent: "",
-          history,
-          model: selectedModel === AUTO_MODEL ? autoResolved ?? undefined : selectedModel ?? undefined,
-          mode: chatMode,
-          editorPath: activeEditor.path ?? undefined,
-          editorSelectedText: activeEditor.selectedText ?? undefined,
-          editorContent: activeEditor.content ?? undefined,
-          thinking: thinkingMode,
-          persona: buildPersonaInstructions()
-        }, { signal: controller.signal });
-        const reply = (res as any).result ? String((res as any).result).trim() : "";
-        const logs = (res as any).logs as AgentLogEntry[] | undefined;
-        if (logs && logs.length) {
-          setChats((prev) => {
-            const original = prev[mid];
-            const anyOriginal = original as any;
-            const curLogs = Array.isArray(anyOriginal?.logs) ? (anyOriginal.logs as AgentLogEntry[]) : [];
-            return {
-              ...prev,
-              [mid]: {
-                ...(original ?? { name: undefined, messages: [] as Message[] }),
-                logs: [...curLogs, ...logs],
-              },
-            };
-          });
-        }
-        if (res.needsApproval && res.command) {
-          setPendingCommand({ command: res.command });
-        } else {
-          setPendingCommand(null);
-        }
-        // アニメーション表示: アシスタントメッセージを1文字ずつ伸ばしていく
+        // ストリーミング用に、空のアシスタントメッセージを 1 つ追加しておく
         setChats((prev) => ({
           ...prev,
           [mid]: {
@@ -485,29 +556,136 @@ export const AiChatPanel: React.FC = () => {
             messages: [...(prev[mid]?.messages ?? []), { role: "assistant", text: "" }]
           }
         }));
-        const speed = 12; // ms / 文字
-        let index = 0;
-        const timer = window.setInterval(() => {
-          index += 1;
-          setChats((prev) => {
-            const cur = prev[mid];
-            if (!cur) return prev;
-            const msgs = cur.messages ?? [];
-            if (!msgs.length) return prev;
-            const last = msgs[msgs.length - 1];
-            if (!last || last.role !== "assistant") return prev;
-            const nextLast = { ...last, text: reply.slice(0, index) };
-            const nextMsgs = [...msgs.slice(0, -1), nextLast];
-            return {
-              ...prev,
-              [mid]: { ...cur, messages: nextMsgs }
-            };
-          });
-          if (index >= reply.length) {
-            window.clearInterval(timer);
-            setTimeout(scrollToBottom, 50);
-          }
-        }, speed);
+        await api.streamAi(
+          currentWatcher.id,
+          currentSession.name,
+          {
+            path: "",
+            action: "chat",
+            prompt: apiPrompt,
+            fileContent: "",
+            history,
+            model: buildModelForPayload(),
+            mode: chatMode,
+            editorPath: activeEditor.path ?? undefined,
+            editorSelectedText: activeEditor.selectedText ?? undefined,
+            editorContent: activeEditor.content ?? undefined,
+            thinking: thinkingMode,
+            persona: buildPersonaInstructions(),
+            hybridRouting: preferences.aiHybridRouting || undefined
+          },
+          (ev) => {
+            if (ev.type === "token" && ev.delta) {
+              setChats((prev) => {
+                const cur = prev[mid];
+                if (!cur) return prev;
+                const msgs = cur.messages ?? [];
+                if (!msgs.length) return prev;
+                const last = msgs[msgs.length - 1];
+                if (!last || last.role !== "assistant") return prev;
+                const nextLast = { ...last, text: (last.text ?? "") + ev.delta };
+                const nextMsgs = [...msgs.slice(0, -1), nextLast];
+                return {
+                  ...prev,
+                  [mid]: { ...cur, messages: nextMsgs }
+                };
+              });
+            }
+            if (ev.type === "debate_turn" && ev.debateId && ev.turn) {
+              setChats((prev) => {
+                const cur = prev[mid] || { name: undefined, messages: [] as Message[] };
+                const existingDebates =
+                  Array.isArray((cur as any).debates) && (cur as any).debates.length
+                    ? ((cur as any).debates as {
+                        id: string;
+                        title?: string;
+                        models: string[];
+                        turns: { round: number; speaker: string; model: string; role: string; content: string }[];
+                      }[])
+                    : [];
+                const idx = existingDebates.findIndex((d) => d.id === ev.debateId);
+                let nextDebates = existingDebates.slice();
+                if (idx === -1) {
+                  nextDebates = [
+                    ...existingDebates,
+                    {
+                      id: ev.debateId!,
+                      title: "Multi-model debate",
+                      models: [],
+                      turns: [ev.turn!],
+                    },
+                  ];
+                } else {
+                  const d = nextDebates[idx]!;
+                  nextDebates[idx] = { ...d, turns: [...d.turns, ev.turn!] };
+                }
+                return {
+                  ...prev,
+                  [mid]: { ...(cur as any), debates: nextDebates },
+                };
+              });
+            }
+            if (ev.type === "done") {
+              // token ストリームが空だった場合でも、最終結果は done.result で補完する
+              if (ev.result) {
+                setChats((prev) => {
+                  const cur = prev[mid];
+                  if (!cur) return prev;
+                  const msgs = cur.messages ?? [];
+                  if (!msgs.length) return prev;
+                  const last = msgs[msgs.length - 1];
+                  if (!last || last.role !== "assistant") return prev;
+                  const lastText = (last.text ?? "").trim();
+                  if (lastText.length > 0) return prev;
+                  const nextLast = { ...last, text: ev.result ?? "" };
+                  return { ...prev, [mid]: { ...cur, messages: [...msgs.slice(0, -1), nextLast] } };
+                });
+              }
+              const logs = ev.logs;
+              const debates = ev.debates;
+              if (logs && logs.length) {
+                setChats((prev) => {
+                  const original = prev[mid];
+                  const curLogs = Array.isArray(original?.logs) ? (original!.logs as AgentLogEntry[]) : [];
+                  return {
+                    ...prev,
+                    [mid]: {
+                      ...(original ?? { name: undefined, messages: [] as Message[] }),
+                      logs: [...curLogs, ...logs]
+                    }
+                  };
+                });
+              }
+              if (debates && debates.length) {
+                setChats((prev) => {
+                  const original = prev[mid];
+                  const curDebates = Array.isArray(original?.debates) ? original!.debates! : [];
+                  const merged = [...curDebates];
+                  for (const d of debates) {
+                    if (!d || typeof (d as any).id !== "string") continue;
+                    const idx = merged.findIndex((x: any) => x?.id === (d as any).id);
+                    if (idx >= 0) merged[idx] = d as any;
+                    else merged.push(d as any);
+                  }
+                  return {
+                    ...prev,
+                    [mid]: {
+                      ...(original ?? { name: undefined, messages: [] as Message[] }),
+                      debates: merged
+                    }
+                  };
+                });
+              }
+              if (ev.needsApproval && ev.command) {
+                setPendingCommand({ command: ev.command, chatId: mid });
+              } else {
+                setPendingCommand(null);
+              }
+              setTimeout(scrollToBottom, 50);
+            }
+          },
+          { signal: controller.signal }
+        );
       } catch (e) {
         if ((e as any)?.name === "AbortError") {
           // ユーザーが停止した場合はエラーメッセージを出さない
@@ -530,16 +708,37 @@ export const AiChatPanel: React.FC = () => {
     [currentWatcher?.id, currentSession?.name, activeChatId, chats, selectedModel, chatMode, thinkingMode, activeEditor.path, activeEditor.selectedText, activeEditor.content]
   );
 
+  const rerunMultiDebate = useCallback(
+    (debate: {
+      id: string;
+      title?: string;
+      models: string[];
+      turns: { round: number; speaker: string; model: string; role: string; content: string }[];
+    }) => {
+      if (!currentWatcher || !currentSession) return;
+      if (chatMode !== "multi") return;
+      setDebateForNextCycle(debate);
+      // 入力欄にフォーカスし、必要ならテンプレートメッセージを挿入
+      setInput((prev) =>
+        prev && prev.trim().length > 0
+          ? prev
+          : "前回のディベート内容を踏まえてもう1サイクル実行します。追記や修正したい点があればここに入力してください。"
+      );
+      chatInputRef.current?.focus();
+    },
+    [currentWatcher, currentSession, chatMode]
+  );
+
   const runPendingCommand = useCallback(async () => {
     if (!pendingCommand || !currentWatcher || !currentSession) return;
     const cmd = pendingCommand.command;
+    const mid = pendingCommand.chatId || activeChatIdRef.current;
     setPendingCommand(null);
     try {
       const out = await api.sendRemoteCommand(currentWatcher.id, currentSession.name, cmd);
       const output = out.output ?? "";
       const exitCode = out.exitCode ?? 0;
       const feedback = `[Command executed]\n$ ${cmd}\n\nExit code: ${exitCode}\n\nOutput:\n${output}`;
-      const mid = activeChatIdRef.current;
       setChats((prev) => ({
         ...prev,
         [mid]: { ...prev[mid], messages: [...(prev[mid]?.messages ?? []), { role: "user", text: feedback }] }
@@ -554,7 +753,7 @@ export const AiChatPanel: React.FC = () => {
         prompt: "Continue.",
         fileContent: "",
         history,
-        model: selectedModel === AUTO_MODEL ? autoResolved ?? undefined : selectedModel ?? undefined,
+        model: buildModelForPayload(),
         mode: chatMode,
         ...(chatMode === "agent" && {
           editorPath: activeEditor.path ?? undefined,
@@ -562,10 +761,18 @@ export const AiChatPanel: React.FC = () => {
           editorContent: activeEditor.content ?? undefined
         }),
         thinking: thinkingMode,
-        persona: buildPersonaInstructions()
+        persona: buildPersonaInstructions(),
+        hybridRouting: preferences.aiHybridRouting || undefined
       });
       const reply = (res.result ?? "").trim();
-      if (res.needsApproval && res.command) setPendingCommand({ command: res.command });
+      if (res.needsApproval && res.command) {
+        // 同じコマンドを繰り返し提案している場合はループを防ぐ
+        if (res.command.trim() === cmd.trim()) {
+          setPendingCommand(null);
+        } else {
+          setPendingCommand({ command: res.command, chatId: mid });
+        }
+      }
       const replyText =
         res.needsApproval && res.command && !reply
           ? `コマンドを実行して確認します。\n\n提案コマンド: ${res.command}`
@@ -611,8 +818,8 @@ export const AiChatPanel: React.FC = () => {
   const skipPendingCommand = useCallback(async () => {
     if (!pendingCommand || !currentWatcher || !currentSession) return;
     const cmd = pendingCommand.command;
+    const mid = pendingCommand.chatId || activeChatIdRef.current;
     setPendingCommand(null);
-    const mid = activeChatIdRef.current;
     const feedback = `[Command skipped]\n$ ${cmd}\n\nReason: user denied execution. Continue without running commands and answer based on reasoning only.`;
     setChats((prev) => ({
       ...prev,
@@ -628,10 +835,11 @@ export const AiChatPanel: React.FC = () => {
         prompt: "Continue.",
         fileContent: "",
         history,
-        model: selectedModel === AUTO_MODEL ? autoResolved ?? undefined : selectedModel ?? undefined,
+        model: buildModelForPayload(),
         mode: chatMode,
         thinking: thinkingMode,
-        persona: buildPersonaInstructions()
+        persona: buildPersonaInstructions(),
+        hybridRouting: preferences.aiHybridRouting || undefined
       });
       const reply = (res.result ?? "").trim();
       setChats((prev) => ({
@@ -666,7 +874,7 @@ export const AiChatPanel: React.FC = () => {
           prompt: userMessage,
           fileContent: activeEditor.content ?? "",
           history,
-          model: selectedModel ?? undefined,
+          model: buildModelForPayload(),
           mode: modeForBuddy,
           ...(modeForBuddy === "agent" && {
             editorPath: activeEditor.path ?? undefined,
@@ -674,7 +882,8 @@ export const AiChatPanel: React.FC = () => {
             editorContent: activeEditor.content ?? undefined
           }),
           thinking: thinkingMode,
-          persona: buildPersonaInstructions()
+          persona: buildPersonaInstructions(),
+          hybridRouting: preferences.aiHybridRouting || undefined
         });
         const reply = (res.result ?? "").trim() || "(no response)";
         setBuddyMessages((msgs) => [...msgs, { role: "assistant", text: reply }]);
@@ -798,7 +1007,8 @@ export const AiChatPanel: React.FC = () => {
     { id: "agent", label: "Agent", title: "自律的にタスクを分解して実行" },
     { id: "plan", label: "Plan", title: "計画・ステップの整理" },
     { id: "debug", label: "Debug", title: "デバッグ・原因調査" },
-    { id: "ask", label: "Ask", title: "シンプルな質問応答" }
+    { id: "ask", label: "Ask", title: "シンプルな質問応答" },
+    { id: "multi", label: "Multi", title: "複数モデルでディベートして結論を出す" }
   ];
 
   const thinkingOptions: { id: ThinkingMode; label: string; title: string }[] = [
@@ -809,6 +1019,21 @@ export const AiChatPanel: React.FC = () => {
 
   const currentChatModeMeta = chatModeOptions.find((o) => o.id === chatMode);
   const currentThinkingMeta = thinkingOptions.find((o) => o.id === thinkingMode);
+
+  // 推奨モデル（UI 上で "Recommended" バッジを付ける対象）は、backend が VRAM に応じて返す recommended を使用
+
+  const buildModelForPayload = () => {
+    if (selectedModel === AUTO_MODEL) {
+      // Auto 選択時:
+      // - ハイブリッドルーティング有効: model は送らず backend 側の router に任せる
+      // - 無効: フロント側で選ばれた autoResolved を model として送る
+      if (preferences.aiHybridRouting) {
+        return undefined;
+      }
+      return autoResolved ?? undefined;
+    }
+    return selectedModel ?? undefined;
+  };
 
   const handleAiAssist = useCallback(async () => {
     if (!currentWatcher || !currentSession) return;
@@ -821,10 +1046,11 @@ export const AiChatPanel: React.FC = () => {
         prompt: aiPrompt.trim() || "Improve this code",
         selectedText: activeEditor.selectedText,
         fileContent: activeEditor.content,
-        model: selectedModel === AUTO_MODEL ? autoResolved ?? undefined : selectedModel ?? undefined,
+        model: buildModelForPayload(),
         mode: chatMode,
         thinking: thinkingMode,
-        persona: buildPersonaInstructions()
+        persona: buildPersonaInstructions(),
+        hybridRouting: preferences.aiHybridRouting || undefined
       });
       setAiResult(res.result || "");
     } catch (e) {
@@ -849,14 +1075,16 @@ export const AiChatPanel: React.FC = () => {
         ? `${effectiveModel.slice(0, 20)}…`
         : effectiveModel
       : "Model";
+  const suggestedModels = aiModels.suggested ?? [];
+  const installedModels = aiModels.installed ?? [];
+  const allModelsOrdered = Array.from(new Set([...suggestedModels, ...installedModels]));
   const modelOptions = [
     ...(selectedModel &&
     selectedModel !== AUTO_MODEL &&
-    !aiModels.suggested.includes(selectedModel) &&
-    !aiModels.installed.includes(selectedModel)
+    !allModelsOrdered.includes(selectedModel)
       ? [selectedModel]
       : []),
-    ...Array.from(new Set([...aiModels.suggested, ...aiModels.installed]))
+    ...allModelsOrdered
   ];
 
   return (
@@ -972,6 +1200,73 @@ export const AiChatPanel: React.FC = () => {
                 <option value="ja">主に日本語</option>
                 <option value="en">主に英語</option>
               </select>
+            </div>
+            <div className="ai-settings-section">
+              <label className="ai-settings-label">モデルのハイブリッド運用</label>
+              <p className="ai-settings-hint">
+                Auto 選択時に、タスク内容と VRAM に応じて Qwen / DeepSeek / Llama / Mistral を自動で切り替えるかどうかを指定します。
+              </p>
+              <label className="ai-settings-toggle">
+                <input
+                  type="checkbox"
+                  checked={preferences.aiHybridRouting}
+                  onChange={(e) => updatePreferences({ aiHybridRouting: e.target.checked })}
+                />
+                <span>ハイブリッドルーティングを有効にする（Auto 時に最適なモデルを自動選択）</span>
+              </label>
+            </div>
+            <div className="ai-settings-section ai-settings-advanced">
+              <button
+                type="button"
+                className="ai-settings-advanced-toggle"
+                onClick={() => setShowAdvancedPersona((v) => !v)}
+              >
+                <span>詳細な性格設定</span>
+                <span className="ai-settings-advanced-chevron">{showAdvancedPersona ? "▾" : "▸"}</span>
+              </button>
+              {showAdvancedPersona && (
+                <div className="ai-settings-advanced-body">
+                  <div className="ai-settings-subsection">
+                    <label className="ai-settings-label">実行スタイル</label>
+                    <p className="ai-settings-hint">どれくらい慎重 / 積極的にコード変更やコマンド実行を提案するか。</p>
+                    <select
+                      className="ai-settings-select"
+                      value={preferences.aiExecutionStyle}
+                      onChange={(e) => updatePreferences({ aiExecutionStyle: e.target.value as any })}
+                    >
+                      <option value="normal">標準</option>
+                      <option value="careful">慎重に（小さなステップで）</option>
+                      <option value="bold">積極的に（大きめの提案も含める）</option>
+                    </select>
+                  </div>
+                  <div className="ai-settings-subsection">
+                    <label className="ai-settings-label">質問スタイル</label>
+                    <p className="ai-settings-hint">どの程度、確認質問をはさむかの傾向です。</p>
+                    <select
+                      className="ai-settings-select"
+                      value={preferences.aiQuestioningStyle}
+                      onChange={(e) => updatePreferences({ aiQuestioningStyle: e.target.value as any })}
+                    >
+                      <option value="auto">自動（ケースバイケース）</option>
+                      <option value="proactive">積極的に質問してから進める</option>
+                      <option value="minimal">あまり質問せず、なるべく推測で進める</option>
+                    </select>
+                  </div>
+                  <div className="ai-settings-subsection">
+                    <label className="ai-settings-label">説明スタイル</label>
+                    <p className="ai-settings-hint">回答の説明をどのくらいステップバイステップにするか。</p>
+                    <select
+                      className="ai-settings-select"
+                      value={preferences.aiExplainStyle}
+                      onChange={(e) => updatePreferences({ aiExplainStyle: e.target.value as any })}
+                    >
+                      <option value="auto">自動（内容に応じて調整）</option>
+                      <option value="high_level">なるべく要点だけ・高い粒度で</option>
+                      <option value="step_by_step">ステップを追いながら丁寧に解説</option>
+                    </select>
+                  </div>
+                </div>
+              )}
             </div>
             <div className="ai-settings-section">
               <label className="ai-settings-label">Buddy Monitor</label>
@@ -1280,9 +1575,16 @@ export const AiChatPanel: React.FC = () => {
           >
             Logs
           </button>
+          <button
+            type="button"
+            className={`ai-chat-subtab${chatView === "debate" ? " active" : ""}`}
+            onClick={() => setChatView("debate")}
+          >
+            Debate
+          </button>
         </div>
         <div className="ai-chat-messages">
-          {chatView === "messages" && pendingCommand && (
+          {chatView === "messages" && pendingCommand && pendingCommand.chatId === activeChatId && (
             <div className="ai-chat-msg ai-chat-msg-assistant">
               <span className="ai-chat-msg-role">AI</span>
               <div className="ai-chat-command-card">
@@ -1563,6 +1865,71 @@ export const AiChatPanel: React.FC = () => {
               ))}
             </div>
           )}
+          {chatView === "debate" && (
+            <div className="ai-chat-logs">
+              {(!currentDebates || currentDebates.length === 0) && (
+                <div className="ai-chat-inline-note">
+                  まだマルチモデル・ディベートの履歴がありません（Chat モードを Multi にして送信すると記録されます）。
+                </div>
+              )}
+              {currentDebates.map((debate) => (
+                <div key={debate.id} className="ai-chat-log-entry">
+                  <div className="ai-chat-log-header">
+                    <span className="ai-chat-log-label">
+                      {debate.title || "Multi‑model debate"}
+                    </span>
+                    <span className="ai-chat-log-label">
+                      {debate.models.join(" , ")}
+                    </span>
+                    {chatMode === "multi" && (
+                      <button
+                        type="button"
+                        className="icon-button ai-mini-icon-btn"
+                        onClick={() => rerunMultiDebate(debate)}
+                        title="もう1サイクル実行"
+                        aria-label="もう1サイクル実行"
+                      >
+                        <svg
+                          width="16"
+                          height="16"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <polyline points="1 4 1 10 7 10" />
+                          <polyline points="23 20 23 14 17 14" />
+                          <path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10" />
+                          <path d="M3.51 15A9 9 0 0 0 18.36 18.36L23 14" />
+                        </svg>
+                      </button>
+                    )}
+                  </div>
+                  {debate.turns.map((t, idx) => (
+                    <div
+                      key={idx}
+                      className="ai-chat-msg"
+                      style={{
+                        paddingTop: 2,
+                        paddingBottom: 2,
+                        borderTop: idx === 0 ? "none" : "1px solid var(--color-pane-border)",
+                        marginTop: idx === 0 ? 0 : 4
+                      }}
+                    >
+                      <span className="ai-chat-msg-role">
+                        Round {t.round} · {t.speaker} ({t.model})
+                      </span>
+                      <div className="ai-chat-msg-text">
+                        {t.content}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          )}
           {loading && tab === "chat" && (
             <div className="ai-chat-msg ai-chat-msg-assistant">
               <span className="ai-chat-msg-role">AI</span>
@@ -1645,6 +2012,14 @@ export const AiChatPanel: React.FC = () => {
                       {chatMode === "ask" && (
                         <svg viewBox="0 0 24 24">
                           <path d="M5 5h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H9l-4 4v-4H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z" />
+                        </svg>
+                      )}
+                      {chatMode === "multi" && (
+                        <svg viewBox="0 0 24 24">
+                          {/* three overlapping bubbles to express multi-agent */}
+                          <path d="M4 7h9a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H9l-3 3v-3H4a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2Z" />
+                          <path d="M11 4h7a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2h-1" />
+                          <path d="M13 13h5a2 2 0 0 1 2 2v1.5" />
                         </svg>
                       )}
                     </span>
@@ -1770,24 +2145,40 @@ export const AiChatPanel: React.FC = () => {
                             {autoResolved ? `Auto (${autoResolved})` : "Auto"}
                           </span>
                         </button>
-                        {modelOptions.map((m) => (
-                          <button
-                            key={m}
-                            type="button"
-                            className={`ai-chat-model-option${selectedModel === m ? " active" : ""}`}
-                            onClick={() => void selectModel(m)}
-                            disabled={ensuringModel !== null}
-                            title={m}
-                          >
-                            <span className="ai-chat-model-option-check" aria-hidden>
-                              {selectedModel === m ? "✓" : ""}
-                            </span>
-                            <span className="ai-chat-model-option-label">
-                              {m}
-                              {aiModels.installed.includes(m) ? "" : " (未インストール)"}
-                            </span>
-                          </button>
-                        ))}
+                        {modelOptions.map((m) => {
+                          const isSelected = selectedModel === m;
+                          const isInstalled = installedModels.includes(m);
+                          const isRecommended = (aiModels.recommended ?? []).includes(m);
+                          const titleParts = [m];
+                          if (isRecommended) titleParts.push("recommended");
+                          if (!isInstalled) titleParts.push("not installed");
+                          const titleText = titleParts.join(" · ");
+                          return (
+                            <button
+                              key={m}
+                              type="button"
+                              className={`ai-chat-model-option${isSelected ? " active" : ""}`}
+                              onClick={() => void selectModel(m)}
+                              disabled={ensuringModel !== null}
+                              title={titleText}
+                            >
+                              <span className="ai-chat-model-option-check" aria-hidden>
+                                {isSelected ? "✓" : ""}
+                              </span>
+                              <span className="ai-chat-model-option-label">
+                                <span className="ai-chat-model-name">{m}</span>
+                                <span className="ai-chat-model-tags">
+                                  {isRecommended && (
+                                    <span className="ai-chat-model-tag ai-chat-model-tag-suggest">Recommended</span>
+                                  )}
+                                  {!isInstalled && (
+                                    <span className="ai-chat-model-tag ai-chat-model-tag-uninstalled">Pull</span>
+                                  )}
+                                </span>
+                              </span>
+                            </button>
+                          );
+                        })}
                         {modelOptions.length === 0 && !ensuringModel && (
                           <div className="ai-chat-model-option muted">利用可能なモデルがありません</div>
                         )}

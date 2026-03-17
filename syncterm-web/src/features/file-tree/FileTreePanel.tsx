@@ -841,15 +841,59 @@ const TreeNode: React.FC<NodeProps> = ({
   const isFolder = entry.kind === "dir" || entry.kind === "symlink";
   const isDragOver = dragOverPath === entry.path;
 
-  const icon =
-    entry.kind === "symlink"
-      ? "🔗"
-      : entry.kind === "dir"
-      ? open
-        ? "📂"
-        : "📁"
-      : "📄";
-  const caret = hasChildren ? (open ? "▼" : "▶") : " ";
+  const name = entry.name || "";
+  const lowerName = name.toLowerCase();
+  const canExpand = hasChildren && isFolder;
+
+  const getSetiIconClass = (): string => {
+    // フォルダは Seti アイコンではなく、展開ボタン（ケアット）をアイコン位置に表示する
+    if (isFolder) return "";
+    // Python
+    if (lowerName.endsWith(".py")) return "file-tree-icon-python";
+    // Shell (.sh) は Docker っぽいアイコンを避け、テキスト扱いに
+    if (lowerName.endsWith(".sh")) return "file-tree-icon-text";
+    // Markdown
+    if (lowerName.endsWith(".md") || lowerName.endsWith(".mdx")) return "file-tree-icon-markdown";
+    // JSON 系
+    if (
+      lowerName.endsWith(".json") ||
+      lowerName.endsWith(".jsonc") ||
+      lowerName.endsWith(".jsonl")
+    ) {
+      return "file-tree-icon-json";
+    }
+    // CSV
+    if (lowerName.endsWith(".csv")) return "file-tree-icon-csv";
+    // プレーンテキスト系
+    if (lowerName.endsWith(".log") || lowerName.endsWith(".txt")) return "file-tree-icon-text";
+    // 画像系
+    if (
+      lowerName.endsWith(".png") ||
+      lowerName.endsWith(".jpg") ||
+      lowerName.endsWith(".jpeg") ||
+      lowerName.endsWith(".gif") ||
+      lowerName.endsWith(".webp") ||
+      lowerName.endsWith(".svg")
+    ) {
+      return "file-tree-icon-image";
+    }
+    // その他は汎用ファイルアイコン
+    return "file-tree-icon-file";
+  };
+
+  const icon = isFolder && canExpand ? (
+    <svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true">
+      {open ? (
+        <path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      ) : (
+        <path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      )}
+    </svg>
+  ) : !isFolder ? (
+    <span className={`file-tree-icon ${getSetiIconClass()}`} aria-hidden="true" />
+  ) : (
+    <span style={{ width: 12, display: "inline-block" }} aria-hidden="true" />
+  );
 
   const handleDragStart = (e: React.DragEvent) => {
     onDragStart([]);
@@ -894,11 +938,13 @@ const TreeNode: React.FC<NodeProps> = ({
   };
 
   return (
-    <div>
+    <div
+      className="tree-node"
+      style={{ "--tree-depth": depth } as React.CSSProperties & { [key: string]: string | number }}
+    >
       <button
         type="button"
         className={`tree-row ${isSelected ? "tree-row-selected" : ""} ${isDragOver ? "file-tree-drag-over" : ""}`}
-        style={{ paddingLeft: 8 + depth * 14 }}
         draggable
         onDragStart={handleDragStart}
         onDragOver={isFolder ? handleDragOver : undefined}
@@ -919,7 +965,6 @@ const TreeNode: React.FC<NodeProps> = ({
         }}
         onContextMenu={(e) => onContextMenu(e, entry)}
       >
-        <span style={{ width: 14, opacity: hasChildren ? 0.9 : 0.25 }}>{caret}</span>
         <span className="tree-row-icon">{icon}</span>
         <span className="tree-row-label">
           {entry.name}
@@ -939,7 +984,10 @@ const TreeNode: React.FC<NodeProps> = ({
           />
         )}
       {isFolder && open && (
-        <div>
+        <div
+          className="tree-node-children"
+          style={{ "--tree-depth": depth } as React.CSSProperties & { [key: string]: string | number }}
+        >
           {(entry.children ?? []).map((child) => (
             <TreeNode
               key={child.id}

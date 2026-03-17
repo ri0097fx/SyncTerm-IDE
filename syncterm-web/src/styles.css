@@ -327,6 +327,10 @@ body {
   margin-bottom: 0.8rem;
 }
 
+.ai-settings-subsection {
+  margin-top: 0.4rem;
+}
+
 .ai-settings-label {
   display: block;
   font-size: 0.8rem;
@@ -377,6 +381,36 @@ body {
 .ai-settings-select:focus {
   outline: none;
   border-color: #f59e0b;
+}
+
+.ai-settings-advanced {
+  border-top: 1px dashed var(--color-pane-border, #374151);
+  padding-top: 0.5rem;
+}
+
+.ai-settings-advanced-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 0.2rem 0;
+  background: none;
+  border: none;
+  color: var(--color-text-muted, #9ca3af);
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.ai-settings-advanced-toggle:hover {
+  color: var(--color-text, #e5e7eb);
+}
+
+.ai-settings-advanced-body {
+  margin-top: 0.3rem;
+}
+
+.ai-settings-advanced-chevron {
+  font-size: 0.7rem;
 }
 
 .ai-chat-verify {
@@ -1200,10 +1234,10 @@ body {
 }
 
 .ai-chat-model-option-label {
-  display: block;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.18rem;
   max-width: 100%;
   text-align: left;
 }
@@ -1252,6 +1286,42 @@ body {
 
 .ai-chat-model-option-check {
   width: 1rem;
+}
+
+.ai-chat-model-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.ai-chat-model-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.ai-chat-model-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  font-size: 0.65rem;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  border: 1px solid rgba(148, 163, 184, 0.6);
+}
+
+.ai-chat-model-tag-suggest {
+  border-color: rgba(96, 165, 250, 0.8);
+  background: rgba(37, 99, 235, 0.18);
+  color: #bfdbfe;
+}
+
+.ai-chat-model-tag-uninstalled {
+  border-color: rgba(148, 163, 184, 0.7);
+  background: rgba(15, 23, 42, 0.6);
+  color: #cbd5e1;
 }
 
 .ai-chat-input:focus {
@@ -1556,11 +1626,13 @@ body {
   color: inherit;
   display: flex;
   align-items: center;
-  gap: 0.25rem;
-  padding: 0.15rem 0.35rem;
+  gap: 0.3rem;
+  padding: 0.15rem 0.4rem;
   border-radius: 0.4rem;
   cursor: pointer;
   font-size: 0.8rem;
+  /* depth ごとに 12px ずつインデントし、ケアット列の中心が (depth * 12 + 6)px になるようにする */
+  padding-left: calc(var(--tree-depth, 0) * 12px);
 }
 
 .tree-row:hover {
@@ -1571,14 +1643,132 @@ body {
   background: var(--color-row-selected);
 }
 
+.tree-row-caret {
+  width: 14px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.8;
+}
+
 .tree-row-icon {
-  width: 1.2rem;
+  width: 12px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 2px; /* 線との距離を少し広げる */
+}
+
+@font-face {
+  font-family: "seti";
+  src: url("/assets/vscode-file-icons/seti.woff") format("woff");
+  font-weight: normal;
+  font-style: normal;
+}
+
+.file-tree-icon {
+  font-family: "seti", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 14px;
+  line-height: 1;
+  display: inline-block;
+}
+
+.file-tree-icon::before {
+  display: inline-block;
+}
+
+/* minimal subset of Seti icons we use */
+
+.file-tree-icon-file::before {
+  content: "\E023"; /* _default */
+  color: #9ca3af;
+}
+
+.file-tree-icon-folder::before {
+  content: "\E05C";
+  color: #6b7280;
+}
+
+.file-tree-icon-folder-open::before {
+  content: "\E05D";
+  color: #e5b567;
+}
+
+.file-tree-icon-python::before {
+  content: "\E07B";
+  color: #519aba;
+}
+
+.file-tree-icon-json::before {
+  content: "\E055";
+  color: #cbcb41;
+}
+
+.file-tree-icon-markdown::before {
+  content: "\E06F";
+  color: #519aba;
+}
+
+.file-tree-icon-javascript::before {
+  content: "\E060";
+  color: #e0af68;
+}
+
+.file-tree-icon-typescript::before {
+  content: "\E0A0";
+  color: #519aba;
+}
+
+.file-tree-icon-text::before {
+  /* プレーンテキスト用：汎用ドキュメントアイコンと同じだが色を少し弱める */
+  content: "\E023";
+  color: #6b7280;
+}
+
+.file-tree-icon-image::before {
+  /* 画像ファイル用アイコン */
+  content: "\E04C"; /* _image */
+  color: #a074c4;
+}
+
+.file-tree-icon-shell::before {
+  content: "\E037"; /* _shell 相当の落ち着いたシンボル */
+  color: #519aba;
+}
+
+.file-tree-icon-csv::before {
+  content: "\E01E"; /* _csv */
+  color: #8dc149;
 }
 
 .tree-row-label {
   white-space: nowrap;
   text-overflow: ellipsis;
   overflow: hidden;
+}
+
+.tree-node-children {
+  /* 子ノード全体はほぼフラットなインデントにしつつ、線の位置だけを独立して制御する */
+  position: relative;
+  margin-left: 0;
+  padding-left: 0;
+}
+
+.tree-node-children::before {
+  /* 縦線はコンテナ内で固定位置に配置し、アイコン列のすぐ隣を通るように調整 */
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  /* 展開ボタン（ケアット）の中心 (depth * 12 + 6)px に線を合わせる */
+  left: calc((var(--tree-depth, 0) * 12px) + 6px);
+  border-left: 1px solid rgba(55, 65, 81, 0.7);
+}
+
+.tree-node-children .tree-node-children::before {
+  border-left-color: rgba(55, 65, 81, 0.45);
 }
 
 .file-tree-context-menu {
@@ -1655,6 +1845,14 @@ body {
   max-width: 220px;
   cursor: pointer;
   font-size: 0.82rem;
+}
+
+.editor-tab-icon {
+  width: 14px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .editor-tab.active {
