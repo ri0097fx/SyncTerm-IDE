@@ -770,8 +770,17 @@ def debug_symlink(wid: str, sess: str, path: str = Query(..., description="path 
 
 
 @app.get("/watchers/{wid}/sessions/{sess}/files", response_model=List[FileEntryModel])
-def get_file_tree(wid: str, sess: str, path: str = Query("/", description="root path, currently ignored")):
+def get_file_tree(
+  wid: str,
+  sess: str,
+  path: str = Query("/", description="root path, currently ignored"),
+  source: str = Query("relay", description="relay | watcher"),
+):
   root = session_root(wid, sess)
+  if (source or "").strip().lower() == "watcher":
+    # RT がある場合は Watcher 経由で root の children を取得し、relay mirror の遅延を避ける
+    children = list_dir_entries_via_watcher(wid, sess, root, ".")
+    return [build_entry(root, root, children=children)]
   return serialize_file_tree(root)
 
 
@@ -1284,19 +1293,35 @@ def _parse_ls_result_to_entries(rel_path: str, text: str) -> List[FileEntryModel
     name = raw.strip()
     if not name or name in (".", ".."):
       continue
-    is_dir = name.endswith("/")
-    clean = name[:-1] if is_dir else name
+    # ls -F style suffixes:
+    #   / = directory, @ = symlink, * = executable file, | = fifo, = = socket
+    marker = name[-1] if name and name[-1] in ("/", "@", "*", "|", "=") else ""
+    clean = name[:-1] if marker else name
     if not clean or clean.startswith("."):
       continue
     item_rel = f"{base_rel}/{clean}" if base_rel else clean
+    if marker == "/":
+      kind: FileKind = "dir"
+      has_children = True
+      is_remote_link = False
+    elif marker == "@":
+      kind = "symlink"
+      # Watcher 側の ls はリンク先がディレクトリでも "/" を付けないため、
+      # UI 側で lazy expand できるよう hasChildren を真にしておく。
+      has_children = True
+      is_remote_link = True
+    else:
+      kind = "file"
+      has_children = False
+      is_remote_link = False
     out.append(
       FileEntryModel(
         id=item_rel,
         name=clean,
         path="/" + item_rel,
-        kind="dir" if is_dir else "file",
-        hasChildren=bool(is_dir),
-        isRemoteLink=False,
+        kind=kind,
+        hasChildren=has_children,
+        isRemoteLink=is_remote_link,
         children=None,
       )
     )

@@ -8,7 +8,44 @@ APP_ROOT="${1:-.}"
 cd "$APP_ROOT"
 CONFIG="${APP_ROOT}/config.ini"
 OLLAMA_PORT="${OLLAMA_PORT:-11434}"
+OLLAMA_BIND_HOST="${OLLAMA_BIND_HOST:-127.0.0.1}"
 DEFAULT_MODEL="qwen2.5-coder:7b"
+
+# config.ini の [ai] ollama_base_url を読み、host/port を決める（未指定時は 127.0.0.1:11434）
+get_ollama_host_port() {
+  if [[ -f "$CONFIG" ]]; then
+    hp=$(python3 -c "
+import configparser, sys
+from urllib.parse import urlparse
+c = configparser.ConfigParser()
+c.read('$CONFIG')
+url = None
+if c.has_section('ai') and c.has_option('ai', 'ollama_base_url'):
+    url = (c.get('ai', 'ollama_base_url') or '').strip()
+if not url:
+    sys.exit(1)
+u = urlparse(url)
+host = u.hostname or '127.0.0.1'
+port = u.port or 11434
+print(f'{host}:{port}')
+" 2>/dev/null) || true
+    if [[ -n "${hp:-}" ]]; then
+      echo "$hp"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+# config.ini があれば base_url に寄せる（環境変数指定が優先）
+if [[ -z "${OLLAMA_PORT:-}" || "${OLLAMA_PORT:-11434}" == "11434" ]] && [[ -z "${OLLAMA_BIND_HOST:-}" || "${OLLAMA_BIND_HOST:-127.0.0.1}" == "127.0.0.1" ]]; then
+  if hp=$(get_ollama_host_port); then
+    OLLAMA_BIND_HOST="${hp%%:*}"
+    OLLAMA_PORT="${hp##*:}"
+  fi
+fi
+
+OLLAMA_HOST_ADDR="${OLLAMA_BIND_HOST}:${OLLAMA_PORT}"
 
 # config.ini の [ai] ollama_model を読む
 get_ollama_model() {
@@ -29,6 +66,7 @@ MODEL=$(get_ollama_model)
 [[ -z "$MODEL" ]] && MODEL="$DEFAULT_MODEL"
 
 echo "[Ollama] Using model: $MODEL"
+echo "[Ollama] Target: http://${OLLAMA_HOST_ADDR}"
 
 # 1) 未インストールならユーザー領域にインストール（sudo 不要・SSH 非対話で実行可能）
 OLLAMA_USER_DIR="${OLLAMA_USER_DIR:-$HOME/.local/ollama}"
@@ -114,11 +152,11 @@ else
   OLLAMA_CMD="ollama"
 fi
 
-# 2) 11434 で listen していなければ ollama serve を起動
+# 2) 指定ポートで listen していなければ ollama serve を起動
 if command -v lsof >/dev/null 2>&1; then
   if ! lsof -nP -i "TCP:${OLLAMA_PORT}" -sTCP:LISTEN -t >/dev/null 2>&1; then
     echo "[Ollama] Starting ollama serve (port $OLLAMA_PORT)..."
-    ( cd "$APP_ROOT" && nohup $OLLAMA_CMD serve </dev/null >> ollama.log 2>&1 & )
+    ( cd "$APP_ROOT" && nohup env OLLAMA_HOST="$OLLAMA_HOST_ADDR" $OLLAMA_CMD serve </dev/null >> ollama.log 2>&1 & )
     disown 2>/dev/null || true
     sleep 2
   else
@@ -127,7 +165,7 @@ if command -v lsof >/dev/null 2>&1; then
 else
   if ! pgrep -f "ollama serve" >/dev/null 2>&1; then
     echo "[Ollama] Starting ollama serve..."
-    ( cd "$APP_ROOT" && nohup $OLLAMA_CMD serve </dev/null >> ollama.log 2>&1 & )
+    ( cd "$APP_ROOT" && nohup env OLLAMA_HOST="$OLLAMA_HOST_ADDR" $OLLAMA_CMD serve </dev/null >> ollama.log 2>&1 & )
     disown 2>/dev/null || true
     sleep 2
   fi
@@ -137,4 +175,4 @@ fi
 echo "[Ollama] Pulling model: $MODEL (may take a while on first run)"
 $OLLAMA_CMD pull "$MODEL"
 
-echo "[Ollama] Setup done. Backend can use Ollama at http://127.0.0.1:${OLLAMA_PORT}"
+echo "[Ollama] Setup done. Backend can use Ollama at http://${OLLAMA_HOST_ADDR}"

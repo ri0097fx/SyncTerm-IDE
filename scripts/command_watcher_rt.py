@@ -295,7 +295,8 @@ class SessionContext:
             _, rel = cmd.split("::", 1)
             p = (self.base_dir / rel).resolve()
             proc = subprocess.run(
-                f"ls -p '{p}'",
+                # -F: append indicators (/ dir, @ symlink, etc.) so relay can parse symlinks correctly
+                f"ls -pF '{p}'",
                 shell=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

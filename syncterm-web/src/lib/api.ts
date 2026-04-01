@@ -47,7 +47,11 @@ export interface SyncApi {
   }>;
   fetchLogTail(watcherId: string, session: string): Promise<TerminalLine[]>;
 
-  listFiles(watcherId: string, session: string): Promise<FileEntry[]>;
+  listFiles(
+    watcherId: string,
+    session: string,
+    options?: { source?: "relay" | "watcher" }
+  ): Promise<FileEntry[]>;
   listChildren(
     watcherId: string,
     session: string,
@@ -398,9 +402,16 @@ class HttpSyncApi implements SyncApi {
     }));
   }
 
-  async listFiles(watcherId: string, session: string): Promise<FileEntry[]> {
+  async listFiles(
+    watcherId: string,
+    session: string,
+    options?: { source?: "relay" | "watcher" }
+  ): Promise<FileEntry[]> {
+    const source = options?.source;
     return http<FileEntry[]>(
-      `/watchers/${encodeURIComponent(watcherId)}/sessions/${encodeURIComponent(session)}/files?path=/`
+      `/watchers/${encodeURIComponent(watcherId)}/sessions/${encodeURIComponent(
+        session
+      )}/files?path=/${source ? `&source=${encodeURIComponent(source)}` : ""}`
     );
   }
 

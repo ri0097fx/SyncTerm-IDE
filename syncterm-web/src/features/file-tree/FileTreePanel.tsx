@@ -174,7 +174,8 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
     setLoading(true);
     setTreeError(null);
     try {
-      const entries = await api.listFiles(currentWatcher.id, currentSession.name);
+      // Refresh ボタンは relay mirror ではなく watcher から取得して「同期されない」問題を回避する
+      const entries = await api.listFiles(currentWatcher.id, currentSession.name, { source: "watcher" });
       const merged = snapshot.size ? mergeChildrenFromSnapshot(entries, snapshot) : entries;
       setRoots(merged);
     } catch (e) {
