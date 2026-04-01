@@ -42,6 +42,24 @@ REMOTE_ARG="${ARGS[1]:-}"
 BACKEND_PORT="${ARGS[2]:-8000}"
 BACKEND_HOST="${TARGET#*@}"
 
+# If TARGET is omitted, try config.ini [remote] server.
+if [[ -z "${TARGET:-}" ]] && [[ -f "config.ini" ]]; then
+  CFG_SERVER=$(python3 -c "
+import configparser
+c = configparser.ConfigParser()
+c.read('config.ini')
+if c.has_section('remote') and c.has_option('remote', 'server'):
+    print(c.get('remote', 'server').strip())
+" 2>/dev/null || true)
+  if [[ -n "${CFG_SERVER:-}" ]]; then
+    TARGET="$CFG_SERVER"
+    echo "Using relay server from config.ini: $TARGET"
+  fi
+fi
+
+# Recompute BACKEND_HOST after possible TARGET update
+BACKEND_HOST="${TARGET#*@}"
+
 # REMOTE_DIR: use 2nd arg, or config.ini deploy_dir, or リレー上でバックエンドが動いているディレクトリを検出, or default
 if [[ -n "${REMOTE_ARG:-}" ]]; then
   REMOTE_DIR="$REMOTE_ARG"
@@ -78,6 +96,7 @@ fi
 
 if [[ -z "$TARGET" ]]; then
   echo "Usage: $0 <user@host> [remote_dir] [backend_port] [--setup-ollama] [--setup-train] [--setup-browser]"
+  echo "  (If omitted, tries config.ini [remote] server.)"
   echo "  remote_dir: optional; default from config.ini [remote] deploy_dir, else ~/SyncTerm-IDE"
   echo "  --setup-ollama: optional; on Relay install Ollama, start ollama serve, pull config.ini [ai] ollama_model"
   echo "  --setup-train: optional; on Relay create .venv-train and install backend/training/requirements.txt"
