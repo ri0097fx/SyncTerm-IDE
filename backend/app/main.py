@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import base64
 import configparser
+import ast
 import json
 import logging
 import mimetypes
 import os
+import queue
 import re
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -15,7 +18,7 @@ import uuid
 from html.parser import HTMLParser
 from pathlib import PurePosixPath
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -43,6 +46,7 @@ from .schemas import (
   FileEntryModel,
   LogChunk,
   MovePathPayload,
+  ProposedAgentEdit,
   RunnerConfigModel,
   RunnerConfigUpdatePayload,
   SessionModel,
@@ -270,8 +274,50 @@ def load_ai_config() -> None:
     else:
       os.environ["AI_DEVICE"] = "cpu"
 
+  # LLM への HTTP 待ち上限（秒）。長い推論・大きな出力では 1800 以上を推奨。
+  if "AI_LLM_HTTP_TIMEOUT" not in os.environ and parser.has_option("ai", "llm_http_timeout"):
+    v = parser.get("ai", "llm_http_timeout").strip()
+    if v:
+      os.environ["AI_LLM_HTTP_TIMEOUT"] = v
+  # AI SSE キープアライブ間隔（秒）。0 以下で無効。プロキシのアイドル切断対策。
+  if "AI_SSE_KEEPALIVE_SECONDS" not in os.environ and parser.has_option("ai", "sse_keepalive_seconds"):
+    v = parser.get("ai", "sse_keepalive_seconds").strip()
+    if v:
+      os.environ["AI_SSE_KEEPALIVE_SECONDS"] = v
+
 
 load_ai_config()
+
+
+def _ai_llm_http_timeout() -> float:
+  raw = (os.environ.get("AI_LLM_HTTP_TIMEOUT") or "").strip()
+  if raw:
+    try:
+      t = float(raw)
+      if t >= 30:
+        return t
+    except ValueError:
+      pass
+  return 1800.0
+
+
+def _ai_sse_keepalive_interval() -> float:
+  raw = (os.environ.get("AI_SSE_KEEPALIVE_SECONDS") or "").strip()
+  if raw:
+    try:
+      t = float(raw)
+      return t
+    except ValueError:
+      pass
+  return 20.0
+
+
+# nginx 等のバッファリング抑止・中間キャッシュ抑止（長時間 SSE 向け）
+_AI_SSE_HEADERS = {
+  "Cache-Control": "no-cache, no-transform",
+  "Connection": "keep-alive",
+  "X-Accel-Buffering": "no",
+}
 
 # Ensure session/registry dirs exist at startup (e.g. after deploy)
 SESSIONS_ROOT.mkdir(parents=True, exist_ok=True)
@@ -282,6 +328,8 @@ MAX_LOG_CHUNK_BYTES = 1_000_000
 MAX_TREE_DEPTH = 4
 MAX_CHILDREN_PER_DIR = 200
 MAX_RAW_FILE_BYTES = 20_000_000
+# Agent の <edit> で送れる最大文字数（モデル・帯域の暴発を抑える）
+MAX_AGENT_EDIT_CHARS = min(MAX_FILE_BYTES, 512_000)
 
 
 def _norm_rel(path: str) -> str:
@@ -779,16 +827,55 @@ def get_file_tree(
   root = session_root(wid, sess)
   if (source or "").strip().lower() == "watcher":
     # RT がある場合は Watcher 経由で root の children を取得し、relay mirror の遅延を避ける
-    children = list_dir_entries_via_watcher(wid, sess, root, ".")
+    children = list_dir_entries_via_watcher(wid, sess, root, ".", strict=True)
     return [build_entry(root, root, children=children)]
-  return serialize_file_tree(root)
+
+  # Default (relay): relay mirror を正としつつ、watcher 側にしか存在しないエントリ（remote-only）を root に補完する。
+  # 例: relay の session root には出ないが、watcher 側では見える作業ディレクトリ等。
+  tree = serialize_file_tree(root)
+  try:
+    if tree and tree[0] is not None:
+      watcher_children = list_dir_entries_via_watcher(wid, sess, root, ".", strict=False)
+      if watcher_children:
+        base_children = list(tree[0].children or [])
+        by_path = {c.path: c for c in base_children if getattr(c, "path", None)}
+        for wc in watcher_children:
+          p = getattr(wc, "path", None)
+          if p and p not in by_path:
+            base_children.append(wc)
+        tree[0].children = base_children
+  except Exception:
+    # 補完はベストエフォート（失敗しても従来の relay 表示にフォールバック）
+    pass
+  return tree
+
+
+def _session_list_rel_from_query(path: str) -> str:
+  """files/children の path クエリをセッションルート相対に正規化（先頭 / は無視）。"""
+  rel = path.replace("\\", "/").strip().lstrip("/") or "."
+  rel_path = PurePosixPath(rel)
+  if rel_path.is_absolute() or ".." in rel_path.parts:
+    raise HTTPException(status_code=400, detail="unsafe path")
+  return rel
 
 
 @app.get("/watchers/{wid}/sessions/{sess}/files/children", response_model=List[FileEntryModel])
-def get_file_children(wid: str, sess: str, path: str = Query("/", description="dir path under session root")):
+def get_file_children(
+  wid: str,
+  sess: str,
+  path: str = Query("/", description="dir path under session root"),
+  source: str = Query(
+    "relay",
+    description="relay: relay 上のミラー | watcher: Watcher 上で ls（ターミナル補完向け・RT 優先）",
+  ),
+):
   root = session_root(wid, sess)
+  if (source or "").strip().lower() == "watcher":
+    rel = _session_list_rel_from_query(path)
+    return list_dir_entries_via_watcher(wid, sess, root, rel, strict=False)
+
   target = resolve_session_file(root, path)
-  rel = path.lstrip("/") or "."
+  rel = path.replace("\\", "/").strip().lstrip("/") or "."
 
   # Symlink: まず relay 上で解決して直接一覧取得を試す（RT モードで Watcher が別マシンの場合、symlink 先が relay 上にあれば成功）
   if target.is_symlink():
@@ -956,6 +1043,9 @@ def get_log_chunk(wid: str, sess: str, fromOffset: int = 0):
     cleaned = raw.split("\r")[-1]
     cleaned = cleaned.strip("\r")
     if cleaned:
+      # 内部コマンド由来のマーカーは UI に出さない
+      if cleaned.startswith("__CMD_EXIT_CODE__::") or cleaned.startswith("__LS_DONE__::"):
+        continue
       # Trim pathological long lines so frontend rendering remains responsive.
       lines.append(cleaned[:4000])
   next_offset = start + len(chunk)
@@ -1210,7 +1300,13 @@ def clear_commands(wid: str, sess: str):
   return {"ok": True, "relay_cleared": relay_done, "watcher_cleaned": watcher_cleaned}
 
 
-def list_dir_entries_via_watcher(wid: str, sess: str, root: Path, rel_path: str) -> List[FileEntryModel]:
+def list_dir_entries_via_watcher(
+  wid: str,
+  sess: str,
+  root: Path,
+  rel_path: str,
+  strict: bool = False,
+) -> List[FileEntryModel]:
   # RT モード: HTTP で即送信し、レスポンスの ls_result を直接使う（rsync 待ち不要）
   cmd = f"_internal_list_dir::{rel_path}"
   resp, _ = _post_command_via_rt_with_response(wid, sess, cmd)
@@ -1218,6 +1314,8 @@ def list_dir_entries_via_watcher(wid: str, sess: str, root: Path, rel_path: str)
     ls_result = resp.get("ls_result")
     if ls_result is not None and isinstance(ls_result, str) and not ls_result.startswith("ERROR:"):
       return _parse_ls_result_to_entries(rel_path, ls_result)
+    if strict:
+      raise HTTPException(status_code=502, detail="watcher dir listing failed (rt response error)")
 
   # フォールバック: commands.txt 経由（従来モード or RT で HTTP 失敗時）
   cmd_file = root / "commands.txt"
@@ -1262,6 +1360,8 @@ def list_dir_entries_via_watcher(wid: str, sess: str, root: Path, rel_path: str)
     saw_done = True
 
   if not saw_done:
+    if strict:
+      raise HTTPException(status_code=504, detail="watcher dir listing timed out (no ls_result received)")
     return []
   # __LS_DONE__ で break した場合、.ls_result.txt が rsync で届くまで待つ（最大 8 秒）
   if not ls_file.exists():
@@ -1271,6 +1371,8 @@ def list_dir_entries_via_watcher(wid: str, sess: str, root: Path, rel_path: str)
         break
       time.sleep(0.3)
   if not ls_file.exists():
+    if strict:
+      raise HTTPException(status_code=504, detail="watcher dir listing timed out (ls_result file missing)")
     return []
   if before_ls_mtime >= 0 and ls_file.stat().st_mtime <= before_ls_mtime:
     # stale result; give watcher a short extra window
@@ -1279,6 +1381,8 @@ def list_dir_entries_via_watcher(wid: str, sess: str, root: Path, rel_path: str)
   try:
     text = ls_file.read_text("utf-8", errors="replace")
   except Exception:
+    if strict:
+      raise HTTPException(status_code=500, detail="failed to read watcher ls_result")
     return []
   return _parse_ls_result_to_entries(rel_path, text)
 
@@ -1569,6 +1673,67 @@ def build_ai_prompt(payload: AiAssistPayload) -> str:
   )
 
 
+def _build_chat_editor_context_block(payload: AiAssistPayload, *, mode: str, thinking: str) -> str:
+  """チャット用エディタ文脈。Agent/debug/plan/multi では選択中でもファイル全文を送り、抜け参照を防ぐ。"""
+  m = (mode or "ask").strip().lower()
+  t = (thinking or "balanced").strip().lower()
+  use_rich = m in ("agent", "debug", "plan", "multi")
+
+  if t == "deep":
+    max_file_rich, max_sel_rich = 48_000, 16_000
+    max_file_ask, max_sel_ask = 12_000, 8_000
+  elif t == "quick":
+    max_file_rich, max_sel_rich = 16_000, 6_000
+    max_file_ask, max_sel_ask = 6_000, 4_000
+  else:
+    max_file_rich, max_sel_rich = 32_000, 12_000
+    max_file_ask, max_sel_ask = 8_000, 6_000
+
+  max_file = max_file_rich if use_rich else max_file_ask
+  max_sel = max_sel_rich if use_rich else max_sel_ask
+
+  parts: List[str] = []
+  ep = (payload.editorPath or "").strip()
+  if ep:
+    parts.append(f"Current file (path): {ep}")
+
+  sel = (payload.editorSelectedText or "").strip()
+  content = (payload.editorContent or "").strip()
+
+  if use_rich:
+    if sel and content:
+      parts.append(
+        "When both selection and full file are present: the selection is the user's focus, but the FULL FILE is "
+        "authoritative for imports, signatures, surrounding functions, and structure."
+      )
+      parts.append(f"User's current selection:\n```\n{sel[:max_sel]}\n```")
+      body = content[:max_file]
+      trunc = ""
+      if len(content) > max_file:
+        trunc = f"\n\n[Editor buffer truncated at {max_file} chars; file length {len(content)}. Use safe <command> to read more on the remote session if needed.]"
+      parts.append(f"Full file content:\n```\n{body}\n```{trunc}")
+    elif sel and not content:
+      parts.append(f"User's current selection (full file buffer was empty — sync or open the file in the editor):\n```\n{sel[:max_sel]}\n```")
+      parts.append("If you need the rest of the file, run safe read commands (e.g. cat, sed -n) on the path above.")
+    elif content:
+      body = content[:max_file]
+      trunc = ""
+      if len(content) > max_file:
+        trunc = f"\n\n[Truncated: {len(content)} chars total.]"
+      parts.append(f"Current file content:\n```\n{body}\n```{trunc}")
+  else:
+    if sel:
+      parts.append(f"Selected text in editor:\n```\n{sel[:max_sel]}\n```")
+    elif content:
+      body = content[:max_file]
+      trunc = ""
+      if len(content) > max_file:
+        trunc = f"\n\n[Truncated: {len(content)} chars.]"
+      parts.append(f"Current file content (for reference):\n```\n{body}\n```{trunc}")
+
+  return "\n\n".join(parts) if parts else ""
+
+
 def _cleanup_llm_output(text: str, max_repeats: int = 2) -> str:
   """LLM 出力の単純な後処理。
 
@@ -1623,7 +1788,7 @@ def _call_ollama_with_meta(
     method="POST",
   )
   try:
-    with urllib.request.urlopen(req, timeout=120) as resp:
+    with urllib.request.urlopen(req, timeout=_ai_llm_http_timeout()) as resp:
       data = json.loads(resp.read().decode("utf-8", errors="replace"))
   except urllib.error.HTTPError as e:
     detail = e.read().decode("utf-8", errors="replace")
@@ -1692,7 +1857,7 @@ def _stream_ollama_chat(
   acc_chunks: List[str] = []
   truncated = False
   try:
-    with urllib.request.urlopen(req, timeout=120) as resp:
+    with urllib.request.urlopen(req, timeout=_ai_llm_http_timeout()) as resp:
       buf = b""
       while True:
         chunk = resp.read(4096)
@@ -1764,7 +1929,7 @@ def _call_openai_with_meta(
     method="POST",
   )
   try:
-    with urllib.request.urlopen(req, timeout=45) as resp:
+    with urllib.request.urlopen(req, timeout=_ai_llm_http_timeout()) as resp:
       data = json.loads(resp.read().decode("utf-8", errors="replace"))
   except urllib.error.HTTPError as e:
     detail = e.read().decode("utf-8", errors="replace")
@@ -1823,7 +1988,7 @@ def _stream_openai_chat(
   acc_chunks: List[str] = []
   truncated = False
   try:
-    with urllib.request.urlopen(req, timeout=90) as resp:
+    with urllib.request.urlopen(req, timeout=_ai_llm_http_timeout()) as resp:
       buf = ""
       while True:
         chunk = resp.read(4096)
@@ -1879,6 +2044,73 @@ def _stream_llm_messages(
   if provider == "openai":
     return _stream_openai_chat(messages, max_tokens=max_tokens, temperature=temperature)
   raise HTTPException(status_code=400, detail=f"unsupported AI_PROVIDER: {provider}")
+
+
+def _iter_sse_chat_llm_events(
+  messages: List[dict],
+  chat_max_tokens: int,
+  temperature: float,
+  selected_model: Optional[str],
+) -> Iterator[str]:
+  """チャット用 LLM ストリームを SSE に変換。長いトークン間ギャップ中はコメント行でキープアライブを送る。"""
+
+  full_text = ""
+  truncated_flag = False
+  ping = _ai_sse_keepalive_interval()
+
+  def format_ev(ev: dict) -> Optional[str]:
+    nonlocal full_text, truncated_flag
+    if ev.get("type") == "token" and ev.get("delta"):
+      full_text += str(ev.get("delta") or "")
+      return f"data: {json.dumps({'type': 'token', 'delta': ev.get('delta')}, ensure_ascii=False)}\n\n"
+    if ev.get("type") == "done":
+      result_text = str(ev.get("result") or "") or full_text
+      truncated_flag = bool(ev.get("truncated"))
+      done_ev = {
+        "type": "done",
+        "result": result_text,
+        "command": None,
+        "needsApproval": False,
+        "truncated": truncated_flag,
+        "autoContinued": False,
+        "logs": [],
+        "debates": [],
+      }
+      return f"data: {json.dumps(done_ev, ensure_ascii=False)}\n\n"
+    return None
+
+  if ping <= 0:
+    for ev in _stream_llm_messages(messages, max_tokens=chat_max_tokens, temperature=temperature, model=selected_model):
+      line = format_ev(ev)
+      if line:
+        yield line
+    return
+
+  q: queue.Queue[Tuple[str, Any]] = queue.Queue(maxsize=256)
+
+  def worker() -> None:
+    try:
+      for ev in _stream_llm_messages(messages, max_tokens=chat_max_tokens, temperature=temperature, model=selected_model):
+        q.put(("ev", ev))
+    except BaseException as e:
+      q.put(("err", e))
+    finally:
+      q.put(("end", None))
+
+  threading.Thread(target=worker, daemon=True).start()
+  while True:
+    try:
+      kind, payload = q.get(timeout=ping)
+    except queue.Empty:
+      yield ": syncterm-hb\n\n"
+      continue
+    if kind == "end":
+      break
+    if kind == "err":
+      raise payload
+    line = format_ev(payload)
+    if line:
+      yield line
 
 
 def _call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 512, temperature: float = 0.2, model: Optional[str] = None) -> str:
@@ -2264,7 +2496,7 @@ def ai_ensure_model_stream(wid: str, sess: str, payload: AiEnsureModelPayload):
   if (os.environ.get("AI_PROVIDER") or "").strip().lower() == "openai":
     def _openai_done():
       yield f"data: {json.dumps({'status': 'success', 'message': 'OpenAI does not require model install'})}\n\n"
-    return StreamingResponse(_openai_done(), media_type="text/event-stream")
+    return StreamingResponse(_openai_done(), media_type="text/event-stream", headers=dict(_AI_SSE_HEADERS))
 
   def _gen():
     model = payload.model.strip()
@@ -2280,7 +2512,7 @@ def ai_ensure_model_stream(wid: str, sess: str, payload: AiEnsureModelPayload):
     # pull 完了後に他モデルをアンロード
     _ollama_stop_unselected(model)
 
-  return StreamingResponse(_gen(), media_type="text/event-stream")
+  return StreamingResponse(_gen(), media_type="text/event-stream", headers=dict(_AI_SSE_HEADERS))
 
 
 @app.post("/watchers/{wid}/sessions/{sess}/links")
@@ -2398,100 +2630,302 @@ def _strip_command_tags(text: str) -> str:
   return re.sub(r"<command>[\s\S]*?</command>", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
 
 
-def _extract_json_object(text: str) -> Optional[str]:
-  """文字列中の最初の JSON object らしき部分を抜き出す。"""
-  if not text:
-    return None
-  start = text.find("{")
-  if start < 0:
-    return None
-  depth = 0
-  in_str = False
-  esc = False
-  for i in range(start, len(text)):
-    ch = text[i]
-    if in_str:
-      if esc:
-        esc = False
-      elif ch == "\\":
-        esc = True
-      elif ch == '"':
-        in_str = False
+def _strip_edit_tags(text: str) -> str:
+  return re.sub(r"<edit\s+[^>]+>[\s\S]*?</edit\s*>", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
+
+
+def _extract_edits_from_response(text: str) -> List[Tuple[str, str]]:
+  """<edit path=\"rel/path\">...</edit> を抽出。本文はファイルの完全な置き換え内容（UTF-8 テキスト想定）。"""
+  pat = re.compile(
+    r'<edit\s+path\s*=\s*(["\'])([^"\']+)\1\s*>([\s\S]*?)</edit\s*>',
+    re.IGNORECASE | re.DOTALL,
+  )
+  out: List[Tuple[str, str]] = []
+  for m in pat.finditer(text or ""):
+    rel_raw = (m.group(2) or "").strip()
+    body = m.group(3)
+    if rel_raw and body is not None:
+      out.append((rel_raw, body.rstrip("\n")))
+  return out
+
+
+def _is_blocked_agent_edit_rel(rel: str) -> bool:
+  low = rel.lower()
+  base = low.split("/")[-1]
+  if base in (".env", ".env.local", ".env.production", ".env.development", "id_rsa", "id_ed25519", "id_ecdsa"):
+    return True
+  if low == ".env" or low.endswith("/.env"):
+    return True
+  if low.startswith(".ssh/") or "/.ssh/" in f"/{low}/":
+    return True
+  return False
+
+
+def _build_proposed_agent_edits(wid: str, sess: str, response: str) -> List[ProposedAgentEdit]:
+  """応答内の <edit> を抽出し、現在のファイル内容とあわせて提案リストにする（即保存しない）。"""
+  out: List[ProposedAgentEdit] = []
+  root = SESSIONS_ROOT / wid / sess
+  for path_raw, body in _extract_edits_from_response(response):
+    try:
+      rel = _norm_rel(path_raw)
+    except ValueError:
       continue
-    if ch == '"':
-      in_str = True
+    if not rel or rel == ".":
       continue
-    if ch == "{":
-      depth += 1
-    elif ch == "}":
-      depth -= 1
-      if depth == 0:
-        return text[start : i + 1]
+    if _is_blocked_agent_edit_rel(rel):
+      continue
+    if "\x00" in body:
+      continue
+    if len(body) > MAX_AGENT_EDIT_CHARS:
+      continue
+    prev = ""
+    try:
+      prev = fetch_file_via_watcher(root, rel, wid=wid, sess=sess)
+    except HTTPException:
+      prev = ""
+    except Exception:
+      prev = ""
+    out.append(ProposedAgentEdit(path=rel, previousContent=prev, newContent=body.rstrip("\n")))
+  return out
+
+
+def _python_syntax_error_for_edit(path: str, content: str) -> Optional[str]:
+  low = (path or "").lower().replace("\\", "/")
+  if not low.endswith(".py"):
+    return None
+  try:
+    ast.parse(content, filename=path or "<edit>")
+  except SyntaxError as e:
+    line = getattr(e, "lineno", None) or "?"
+    return f"{path}: line {line}: {e.msg}"
   return None
 
 
-def _loads_json_object(text: str) -> Optional[dict]:
-  raw = _extract_json_object(text)
-  if not raw:
-    return None
-  try:
-    data = json.loads(raw)
-    return data if isinstance(data, dict) else None
-  except Exception:
-    return None
+def _collect_python_syntax_errors_for_edits(edits: List[ProposedAgentEdit]) -> List[str]:
+  msgs: List[str] = []
+  for e in edits:
+    err = _python_syntax_error_for_edit(e.path, e.newContent)
+    if err:
+      msgs.append(err)
+  return msgs
 
 
-def _to_plain_text_lines(value: Any) -> List[str]:
-  if value is None:
-    return []
-  if isinstance(value, list):
-    out: List[str] = []
-    for item in value:
-      s = str(item).strip()
-      if s:
-        out.append(s)
-    return out
-  s = str(value).strip()
-  return [s] if s else []
+def _norm_editor_rel_for_agent(path: Optional[str]) -> Optional[str]:
+  p = (path or "").strip().replace("\\", "/").lstrip("/")
+  return p or None
 
 
-def _render_structured_report(data: dict) -> str:
-  """構造化 JSON を UI 向け plain text に整形する。Markdown 見出しは使わない。"""
-  conclusion = "\n".join(_to_plain_text_lines(data.get("conclusion")))
-  evidence = _to_plain_text_lines(data.get("evidence"))
-  next_action = "\n".join(_to_plain_text_lines(data.get("next_action")))
-  status = "\n".join(_to_plain_text_lines(data.get("status")))
-
-  parts: List[str] = []
-  if conclusion:
-    parts.append("Conclusion:")
-    parts.append(conclusion)
-  if evidence:
-    parts.append("")
-    parts.append("Evidence:")
-    for item in evidence[:8]:
-      parts.append(f"- {item}")
-  if next_action:
-    parts.append("")
-    parts.append("Next action:")
-    parts.append(next_action)
-  if status:
-    parts.append("")
-    parts.append("Status:")
-    parts.append(status)
-  return "\n".join(parts).strip()
+def _append_syncterm_edit_protocol_user_suffix(user_content: str, ep: Optional[str]) -> str:
+  if not ep:
+    return user_content
+  return (
+    user_content
+    + "\n\n[SyncTerm — required when you change this file]\n"
+    + "The IDE attached the open file above. If your answer modifies it, you MUST respond with exactly one block:\n"
+    + f'<edit path="{ep}"> ... complete updated file ... </edit>\n'
+    + "Do not output a full file rewrite as plain assistant text (markdown fences do not count). "
+    + "Brief explanation may appear before or after the <edit> block.\n"
+  )
 
 
-def _normalize_plain_answer(text: str) -> str:
-  """debate / report 系の出力を plain text 寄りに正規化する。"""
+def _extract_current_file_path_from_messages(messages: List[dict]) -> Optional[str]:
+  """system の Editor context に含まれる Current file (path): を拾う（クライアントが editorPath を欠落させた場合のフォールバック）。"""
+  for m in messages:
+    if (m.get("role") or "") != "system":
+      continue
+    c = m.get("content") or ""
+    for line in c.splitlines():
+      s = line.strip()
+      if s.startswith("Current file (path):"):
+        rest = s.split(":", 1)[1].strip()
+        guessed = _norm_editor_rel_for_agent(rest)
+        if guessed:
+          return guessed
+  return None
+
+
+def _user_message_suggests_file_edit(messages: List[dict]) -> bool:
+  """直近の user メッセージが、ソース修正・スタイル変更の意図を含むか（再プロンプト判定用）。"""
+  for m in reversed(messages):
+    if (m.get("role") or "") != "user":
+      continue
+    c = m.get("content") or ""
+    low = c.lower()
+    jp = any(
+      k in c
+      for k in (
+        "変更",
+        "修正",
+        "にしたい",
+        "してほしい",
+        "直して",
+        "書き換",
+        "凡例",
+        "移して",
+        "直したい",
+        "変えて",
+        "追加して",
+        "削除して",
+      )
+    )
+    jp2 = ("したい" in c or "してください" in c or "してほしい" in c) and any(
+      k in c for k in ("凡例", "グラフ", "プロット", "legend", "コード", "ファイル", "図", "位置")
+    )
+    en = any(
+      x in low
+      for x in (
+        "change ",
+        " fix ",
+        "update ",
+        "modify ",
+        " edit ",
+        "move ",
+        "legend",
+        "implement",
+        "refactor",
+        "rewrite",
+        "adjust ",
+        "set the",
+        "make the",
+      )
+    )
+    return jp or jp2 or en
+  return False
+
+
+def _response_has_python_file_shape(text: str) -> bool:
+  """短く切れた応答でも、Python ファイル貼り付けと分かる最小シグナル。"""
+  t = text or ""
+  if len(t) < 320:
+    return False
+  head = t[:6000]
+  low = head.lower()
+  if "#!/usr/bin" in low:
+    return True
+  if "import matplotlib" in low or "import pandas" in low:
+    return "def " in t or "class " in t
+  return False
+
+
+def _response_looks_like_plain_file_dump(text: str) -> bool:
+  """<edit> なしでソース全体をチャットに垂れ流した応答っぽいか。"""
+  t = text or ""
+  if "<edit" in t.lower():
+    return False
+  if len(t) < 400:
+    return False
+  nlines = t.count("\n")
+  head = t[:5000].lower()
+  if "#!/usr/bin" in head and nlines >= 8:
+    return True
+  if len(t) < 700 and nlines < 12:
+    return False
+  if nlines < 12:
+    return False
+  if "#!/usr/bin" in head:
+    return True
+  if "import matplotlib" in head or "import pandas" in head:
+    return True
+  if "def main(" in t and nlines >= 18:
+    return True
+  if nlines >= 35:
+    return True
+  return False
+
+
+def _normalize_plain_answer(text: str, flatten_md_headings: bool = True) -> str:
+  """debate / report 系の出力を正規化する。flatten_md_headings=False で見出し付き markdown を維持（エージェント最終返答向け）。"""
   if not text:
     return ""
   text = _strip_command_tags(text)
-  # 先頭・途中の H1〜H6 を plain text ラベルに寄せる
-  text = re.sub(r"^\s{0,3}#{1,6}\s*(.+?)\s*$", r"\1:", text, flags=re.MULTILINE)
-  # 連続空行を抑える
+  if flatten_md_headings:
+    text = re.sub(r"^\s{0,3}#{1,6}\s*(.+?)\s*$", r"\1:", text, flags=re.MULTILINE)
   text = re.sub(r"\n{3,}", "\n\n", text)
   return text.strip()
+
+
+def _command_looks_like_bare_python_or_non_shell(cmd: str) -> bool:
+  """<command> はシェル 1 行である必要がある。Python 文をそのまま渡すと bash が構文エラーになるため検知する。"""
+  c = (cmd or "").strip()
+  if not c:
+    return False
+  # 複数行で shebang なし → 貼り付けたコードの可能性が高い
+  if "\n" in c and not c.lstrip().startswith("#!"):
+    return True
+
+  one = c.strip()
+  low_start = one.lower()
+  if low_start.startswith("import ") or low_start.startswith("from "):
+    return True
+
+  # obj.method( ... ) はほぼ Python（plt.legend, df.head, np.array 等）
+  if re.match(r"^[A-Za-z_][\w]*\.[A-Za-z_][\w]*\s*\(", one):
+    return True
+
+  shell_leaders = frozenset(
+    {
+      "python",
+      "python3",
+      "pip",
+      "pip3",
+      "conda",
+      "git",
+      "ls",
+      "cd",
+      "cat",
+      "grep",
+      "rg",
+      "find",
+      "sed",
+      "awk",
+      "echo",
+      "head",
+      "tail",
+      "wc",
+      "mkdir",
+      "rmdir",
+      "mv",
+      "cp",
+      "chmod",
+      "export",
+      "source",
+      "bash",
+      "sh",
+      "curl",
+      "wget",
+      "tar",
+      "docker",
+      "kubectl",
+      "make",
+      "npm",
+      "npx",
+      "yarn",
+      "pnpm",
+      "pytest",
+      "cargo",
+      "rustc",
+      "env",
+      "which",
+      "pwd",
+      "uname",
+      "whoami",
+      "touch",
+      "test",
+      "exec",
+      "eval",
+    }
+  )
+
+  m = re.match(r"^([A-Za-z_][\w]*)\s*\(", one)
+  if m:
+    w = m.group(1).lower()
+    if w in shell_leaders:
+      return False
+    return True
+
+  if re.search(r"\b(plt|np|pd|sns|matplotlib|sklearn)\b", one):
+    return True
+  return False
 
 
 def _is_potentially_destructive_command(cmd: str) -> bool:
@@ -2554,6 +2988,16 @@ def _classify_agent_progress(logs: List[AgentCommandLog]) -> Dict[str, str]:
   """
   if not logs:
     return {"ready": "no", "reason": "no_logs"}
+
+  # ファイル編集だけでシェル証拠が無い場合は、検証コマンドやユーザー返答の余地を残す
+  all_edits = True
+  for lg in logs:
+    c = (getattr(lg, "command", None) if not isinstance(lg, dict) else lg.get("command")) or ""
+    if not str(c).strip().lower().startswith("[edit]"):
+      all_edits = False
+      break
+  if all_edits:
+    return {"ready": "no", "reason": "edits_only_expect_shell_or_reply"}
 
   saw_demo_attempt = False
   saw_import_test = False
@@ -2624,8 +3068,8 @@ def _finalize_agent_report(
   temperature: float,
 ) -> Tuple[str, bool, bool]:
   """
-  すでに集めたコマンド実行結果を、証拠付きの調査レポートへ再要約する。
-  戻り値: (result, truncated, auto_continued)
+  コマンド実行の結果を踏まえ、ユーザーにそのまま見せる自然な最終返答を生成する（Cursor 的エージェント向け）。
+  旧仕様の JSON 固定レポートは廃止し、対話・質問・次の一手の提案が成立するようにする。
   """
   log_text = _format_agent_logs_for_report(logs)
 
@@ -2634,27 +3078,20 @@ def _finalize_agent_report(
     {
       "role": "user",
       "content": (
-        "You have already gathered enough evidence.\n"
-        "Now produce a concise investigation report for reviewers and the user.\n\n"
-        "CRITICAL OUTPUT RULES:\n"
-        "- Output ONLY one valid JSON object.\n"
-        "- Do NOT output Markdown.\n"
-        "- Do NOT output code fences.\n"
-        "- Do NOT output any text before or after the JSON.\n"
-        "- Do NOT output any <command> tags.\n"
-        "- Do NOT ask the user to run commands that were already executed.\n"
-        "- Base the report only on the command outputs already observed.\n"
-        "- If a root cause is already visible, state it clearly instead of giving a generic checklist.\n"
-        "- If evidence is still insufficient, say exactly what is missing.\n\n"
-        "Return exactly this JSON shape:\n"
-        "{\n"
-        '  \"conclusion\": \"short paragraph\",\n'
-        '  \"evidence\": [\"finding 1\", \"finding 2\", \"finding 3\"],\n'
-        '  \"next_action\": \"short paragraph\",\n'
-        '  \"status\": \"solved | blocked | insufficient_evidence\"\n'
-        "}\n\n"
-        "Shared command logs:\n"
-        f"{log_text if log_text else '(none)'}"
+        "The command execution round for this turn is complete. Write ONE message directly to the user.\n\n"
+        "Goals:\n"
+        "- Answer the user's actual question or task in a natural, conversational way (same language as the user when possible).\n"
+        "- Ground claims in the command outputs below; do not invent results.\n"
+        "- Use markdown when helpful (short headings, bullet lists, fenced code blocks for logs or code).\n"
+        "- If something is still unclear, ask specific clarifying questions.\n"
+        "- Offer concrete next steps (what you could do next, or what they could try) when appropriate.\n"
+        "- If installs, destructive actions, or ambiguous refactors were not run, explain briefly and offer to proceed after confirmation.\n\n"
+        "Hard rules:\n"
+        "- Do NOT output only JSON. Do NOT use a rigid template like \"Conclusion:/Evidence:/Status:\" unless the user explicitly asked for a formal report.\n"
+        "- Do NOT use <command>...</command> in this message (no further auto-execution in this turn).\n"
+        "- Do NOT tell the user to run commands that were already executed above; refer to the outputs you already have.\n\n"
+        "Command logs from this turn:\n"
+        f"{log_text if log_text else '(no commands were run)'}"
       ),
     }
   )
@@ -2665,11 +3102,7 @@ def _finalize_agent_report(
     temperature=temperature,
     model=model,
   )
-  parsed = _loads_json_object(final)
-  if parsed is not None:
-    final = _render_structured_report(parsed)
-  else:
-    final = _normalize_plain_answer(final)
+  final = _normalize_plain_answer(final, flatten_md_headings=False)
   auto_continued = False
 
   for _ in range(MAX_CONTINUATION_ROUNDS):
@@ -2680,8 +3113,8 @@ def _finalize_agent_report(
       {
         "role": "user",
         "content": (
-          "Continue the same JSON object only. "
-          "Do not add Markdown, code fences, or any new commands."
+          "Your previous reply was cut off. Continue from exactly where you stopped, same tone and language. "
+          "Still: natural prose/markdown to the user, no JSON-only, no <command> tags."
         ),
       }
     )
@@ -2694,12 +3127,10 @@ def _finalize_agent_report(
     if not extra:
       truncated = truncated2
       break
-    combined = final + extra
-    parsed = _loads_json_object(combined)
-    if parsed is not None:
-      final = _render_structured_report(parsed)
-    else:
-      final = _normalize_plain_answer(combined)
+    final = _normalize_plain_answer(
+      final + ("\n\n" if final and not final.endswith("\n") else "") + extra,
+      flatten_md_headings=False,
+    )
     auto_continued = True
     truncated = truncated2
 
@@ -2768,15 +3199,97 @@ def _run_agent_loop(
   max_iterations: int = 10,
   max_tokens: int = 900,
   temperature: float = 0.2,
+  *,
+  editor_rel_path: Optional[str] = None,
 ) -> AiAssistResponse:
-  """Agent モード: 安全な <command> を自動実行し、出力を受け取って推論を続ける。
-  危険そうなコマンドは実行せず、ユーザー承認用に返す。
-  """
+  """Agent モード: <edit> は提案として返し UI 承認後に保存、<command> でシェル実行。危険コマンドは承認待ち。"""
   logs: List[AgentCommandLog] = []
   shallow_deferrals = 0
   no_cmd_deferrals = 0
+  edit_plain_dump_retries = 0
+  edit_syntax_retries = 0
   for _ in range(max_iterations):
+    effective_editor = editor_rel_path or _extract_current_file_path_from_messages(messages)
     response = _call_llm_messages(messages, max_tokens=max_tokens, temperature=temperature, model=model)
+    proposed = _build_proposed_agent_edits(wid, sess, response)
+    py_syntax_errs = _collect_python_syntax_errors_for_edits(proposed)
+    if proposed and py_syntax_errs:
+      if edit_syntax_retries < 2:
+        edit_syntax_retries += 1
+        messages.append({"role": "assistant", "content": response})
+        messages.append(
+          {
+            "role": "user",
+            "content": (
+              "Python の構文チェック（ast.parse）に失敗しました。<edit> 内の該当ファイルを修正し、"
+              "正しい構文で再度 <edit> ブロックだけを出力してください。\n\n" + "\n".join(py_syntax_errs)
+            ),
+          }
+        )
+        continue
+      errs_text = "\n".join(py_syntax_errs)
+      proposed = [e for e in proposed if _python_syntax_error_for_edit(e.path, e.newContent) is None]
+      if not proposed:
+        return AiAssistResponse(
+          result=(
+            "繰り返し修正しても Python の構文エラーが解消されませんでした。手動で編集してください。\n\n"
+            + errs_text
+          ),
+          proposedEdits=[],
+          needsEditApproval=False,
+          logs=logs,
+        )
+    if proposed:
+      for pe in proposed:
+        logs.append(
+          AgentCommandLog(
+            command=f"[edit proposed] {pe.path}",
+            exitCode=0,
+            output=f"awaiting user approval ({len(pe.newContent)} chars)",
+            error=None,
+          )
+        )
+      user_text = _strip_edit_tags(_strip_command_tags(response)).strip()
+      if not user_text:
+        user_text = (
+          "ファイル変更が提案されています。チャット内の差分を確認し、承認するとリモートに保存されます。"
+        )
+      return AiAssistResponse(
+        result=user_text,
+        proposedEdits=proposed,
+        needsEditApproval=True,
+        logs=logs,
+      )
+    rs = (response or "").strip()
+    dumpy = _response_looks_like_plain_file_dump(response)
+    py_shape = _response_has_python_file_shape(response)
+    user_edit = _user_message_suggests_file_edit(messages)
+    if (
+      effective_editor
+      and edit_plain_dump_retries < 3
+      and not proposed
+      and "<edit" not in (response or "").lower()
+      and (user_edit or len(rs) > 2800)
+      and (dumpy or py_shape)
+    ):
+      edit_plain_dump_retries += 1
+      messages.append({"role": "assistant", "content": response})
+      ep = effective_editor
+      messages.append(
+        {
+          "role": "user",
+          "content": (
+            "STOP. You pasted source code as plain assistant text. The IDE ignores that — it never applies to the file.\n"
+            f'Reply again with EXACTLY ONE block in this form (path must be "{ep}"):\n'
+            f'<edit path="{ep}">\n'
+            "... ENTIRE updated file as UTF-8 text ...\n"
+            "</edit>\n"
+            "Rules: no markdown code fences around the file; optional one short sentence outside the block; "
+            "the file inside must be complete and syntactically valid Python (fix any broken dicts you introduced)."
+          ),
+        }
+      )
+      continue
     cmds = _extract_commands_from_response(response)
     if not cmds:
       # まだ一度もコマンドを提案していない場合は、要約ではなく具体的コマンド提案を強制する
@@ -2787,11 +3300,12 @@ def _run_agent_loop(
           {
             "role": "user",
             "content": (
-              "You have not proposed any <command> yet.\n"
-              "Do not summarize or restate the plan. "
-              "Now output one or more <command>...</command> blocks with the next concrete shell commands "
-              "that will advance the user's task (such as running demo.py, checking imports, or installing "
-              "dependencies)."
+              "You did not include any <command> blocks.\n"
+              "If the user's request can be fully answered from the editor context and general knowledge "
+              "without inspecting the remote workspace, reply with a normal conversational answer and still "
+              "no <command>.\n"
+              "Otherwise, output one or more <command>...</command> blocks (one shell command per block, no && or ;) "
+              "with the next concrete commands that advance the task."
             ),
           }
         )
@@ -2832,7 +3346,10 @@ def _run_agent_loop(
           autoContinued=auto_continued,
           logs=logs,
         )
-      return AiAssistResponse(result=_strip_command_tags(response), logs=logs)
+      return AiAssistResponse(
+        result=_strip_edit_tags(_strip_command_tags(response)),
+        logs=logs,
+      )
 
     # 1つの <command> ブロックに複数コマンド（&& や ;）をつなげるのは禁止し、書き直しを促す
     if any(("&&" in cmd) or (";" in cmd) for cmd in cmds):
@@ -2844,6 +3361,27 @@ def _run_agent_loop(
             "For safety, do NOT chain multiple shell commands with '&&' or ';' inside a single <command>...</command> block.\n"
             "Rewrite your plan so that each <command> block contains exactly ONE shell command (no &&, no ;), "
             "and try again."
+          ),
+        }
+      )
+      continue
+
+    if any(_command_looks_like_bare_python_or_non_shell(cmd) for cmd in cmds):
+      messages.append({"role": "assistant", "content": response})
+      messages.append(
+        {
+          "role": "user",
+          "content": (
+            "At least one <command> block contains Python (or non-shell) code, not a shell command line. "
+            "Commands are executed by bash/sh — e.g. `plt.legend(...)` causes a syntax error.\n\n"
+            "Rules:\n"
+            "- Each <command> must be ONE valid shell command (what you would type in a terminal).\n"
+            "- To run Python, use e.g. <command>python3 your_script.py</command> or "
+            "<command>python3 -c \"import sys; print('ok')\"</command> (escape quotes carefully).\n"
+            "- For matplotlib edits (legend position, etc.), do NOT run Python one-liners unless needed; "
+            "prefer describing the exact code change for the user's file, or "
+            "<command>python3 plot_matrics_from_csv.py</command> after they save edits.\n"
+            "Rewrite your <command> blocks as proper shell only and try again."
           ),
         }
       )
@@ -3051,15 +3589,10 @@ def ai_assist(wid: str, sess: str, payload: AiAssistPayload):
   action = (payload.action or "").strip().lower()
   if action == "chat":
     mode = (payload.mode or "ask").strip().lower()
-    # 現在のエディタ内容を全チャットモードで共有できるようにコンテキストブロックを組み立てる
-    context_parts: List[str] = []
-    if payload.editorPath:
-      context_parts.append(f"Current file: {payload.editorPath}")
-    if payload.editorSelectedText:
-      context_parts.append(f"Selected text in editor:\n```\n{payload.editorSelectedText[:4000]}\n```")
-    if payload.editorContent and not payload.editorSelectedText:
-      context_parts.append(f"Current file content (for reference):\n```\n{payload.editorContent[:6000]}\n```")
-    context_block = "\n\n".join(context_parts) if context_parts else ""
+    context_block = _build_chat_editor_context_block(payload, mode=mode, thinking=thinking)
+    # Agent / Multi でエディタ全文を <edit> 返すには 1024 トークンでは足りず、途切れた「偽ダンプ」になり再プロンプトも効かない
+    if mode in ("agent", "multi") and (payload.editorPath or payload.editorContent):
+      chat_max_tokens = max(chat_max_tokens, 8192)
     # モデル選択:
     # - payload.model が指定されていればそれを優先
     # - Auto の場合でも hybridRouting が false のときは単一モデル（OLLAMA_MODEL or デフォルト）を使用
@@ -3144,14 +3677,19 @@ def ai_assist(wid: str, sess: str, payload: AiAssistPayload):
         "You can run safe shell commands using the <command>...</command> format to inspect the codebase or environment.\n"
         "You ARE actually connected to a real shell via this mechanism.\n"
         "Focus on gathering concrete evidence and summarizing it clearly for other models to review.\n"
+        "When editor context is attached, ground statements about code in that buffer and command output — avoid inventing symbols or paths.\n"
         "\n"
         "CRITICAL BEHAVIOR RULES:\n"
         "- When the user asks to run, verify, or delegate commands (e.g. environment setup, running scripts, checking versions), YOU must execute them using <command>...</command> instead of telling the user to run them.\n"
         "- Do NOT say things like 'I am an AI model and cannot run commands' or 'please run these commands yourself' — those are incorrect in this session.\n"
         "- Prefer sequences of concrete, safe commands (conda/pip installs, python -c checks, running demo scripts) wrapped in <command> blocks, and base your explanation on the actual outputs.\n"
+        "- Each <command> is ONE line executed by bash — never raw Python (e.g. plt.legend); use python3 script.py or python3 -c.\n"
+        "\n"
+        "If the user asks to change code and editor context shows a file: output ONE <edit path=\"session/relative\">...</edit> "
+        "with the FULL file body — do not paste the whole file as plain chat text.\n"
       )
       if context_block:
-        system_agent += "\n\n--- Editor context (for reference) ---\n" + context_block
+        system_agent += "\n\n--- Editor context (primary reference for open file + selection) ---\n" + context_block
       if thinking == "deep":
         system_agent += (
           "\n\n[Deep mode]\n"
@@ -3171,7 +3709,11 @@ def ai_assist(wid: str, sess: str, payload: AiAssistPayload):
         if role not in ("user", "assistant"):
           role = "user"
         agent_messages.append({"role": role, "content": (m.content or "").strip()})
+      ep_agent = _norm_editor_rel_for_agent(payload.editorPath)
       agent_user_content = payload.prompt.strip()
+      if payload.editorPath or payload.editorSelectedText or payload.editorContent:
+        agent_user_content = "[User request]\n" + agent_user_content
+      agent_user_content = _append_syncterm_edit_protocol_user_suffix(agent_user_content, ep_agent)
       agent_messages.append({"role": "user", "content": agent_user_content})
 
       # 代表モデルは models[0]
@@ -3185,7 +3727,10 @@ def ai_assist(wid: str, sess: str, payload: AiAssistPayload):
         representative_model,
         max_iterations=agent_max_iter,
         max_tokens=chat_max_tokens,
+        editor_rel_path=ep_agent,
       )
+      if agent_res.needsEditApproval and agent_res.proposedEdits:
+        return agent_res.model_copy(update={"debates": []})
 
       history = payload.history or []
       history = history[-max_history:]
@@ -3216,7 +3761,7 @@ def ai_assist(wid: str, sess: str, payload: AiAssistPayload):
 
       # Round 0: 代表モデル（唯一のエージェント）の一次回答のみ
       representative_model = models[0]
-      primary_answer = _strip_command_tags((agent_res.result or "").strip())
+      primary_answer = _strip_edit_tags(_strip_command_tags((agent_res.result or "").strip()))
       if not primary_answer:
         primary_answer = "Investigation completed, but the agent did not produce a narrative summary. Refer to the shared command logs."
       debate_turns.append(
@@ -3380,6 +3925,8 @@ def ai_assist(wid: str, sess: str, payload: AiAssistPayload):
         result=final_answer,
         command=getattr(agent_res, "command", None),
         needsApproval=getattr(agent_res, "needsApproval", False),
+        needsEditApproval=getattr(agent_res, "needsEditApproval", False),
+        proposedEdits=list(getattr(agent_res, "proposedEdits", []) or []),
         logs=getattr(agent_res, "logs", []),
         debates=[debate],
         truncated=getattr(agent_res, "truncated", False),
@@ -3395,8 +3942,38 @@ def ai_assist(wid: str, sess: str, payload: AiAssistPayload):
         "You CAN run real shell commands in this session. When the user asks to inspect files, run a script, or check the environment, "
         "use the format <command>SHELL_COMMAND</command> (e.g. <command>pwd</command>, <command>ls -la</command>) and base your answer on the output.\n"
         "Never claim you cannot run commands in this session. Do NOT run destructive commands (rm -rf, mkfs, shutdown, reboot, fork bombs, etc.).\n"
-        "In each <command>...</command> block, put exactly ONE shell command only (no '&&', no ';').\n"
+        "In each <command>...</command> block, put exactly ONE shell command only (no '&&', no ';'). "
+        "The line is passed to bash — NEVER put raw Python inside (e.g. plt.legend(...) will fail). "
+        "Use <command>python3 path/to/script.py</command> or <command>python3 -c \"...\"</command> for Python, or describe code edits without <command>.\n"
         "Reply in the same language as the user.\n"
+        "\n"
+        "File edits on the remote workspace (use instead of pasting code only in chat):\n"
+        "<edit path=\"session-relative/path/to/file.py\">\n"
+        "(complete new file content, UTF-8 text — full file body)\n"
+        "</edit>\n"
+        "path uses the same session-relative roots as the file tree (no leading /, no ..). "
+        "Do not <edit> .env, .ssh, or key files. Max size is limited; huge files: use <command> or split work. "
+        "Edits are NOT applied until the user approves the diff in the UI. "
+        "If you also need shell commands in the same turn, the session will ask the user to approve edits first; "
+        "after they accept or reject, they can continue the conversation for commands.\n"
+        "\n"
+        "CRITICAL — changing code in the attached workspace file:\n"
+        "- When the user asks to change/fix/update/move/adjust/add/remove anything in the project source "
+        "(including matplotlib style, legend position loc/bbox_to_anchor, axis labels, colors, etc.) "
+        "and editor context below includes that file: you MUST output exactly ONE <edit path=\"...\"> block "
+        "with the COMPLETE new UTF-8 file body.\n"
+        "- FORBIDDEN: pasting the entire rewritten file as normal assistant text, or only inside markdown "
+        "code fences, or sending a partial snippet when the task is to update the open file — those will NOT be applied.\n"
+        "- The path in <edit path=\"...\"> must match \"Current file (path)\" from the editor context "
+        "(session-relative, no leading slash, no ..).\n"
+        "- You may put one or two short sentences in the user's language before or after the <edit> block.\n"
+        "\n"
+        "Editor buffer (when attached — read this before replying):\n"
+        "- Use it as the primary source of truth for questions about the open file. Cite real identifiers "
+        "(functions, classes, variables, imports) from the buffer; do not substitute generic placeholders.\n"
+        "- If the user message is short or vague, infer intent from the file path, selection, and surrounding code.\n"
+        "- Do not ask the user to paste code that already appears in the buffer unless you need a different file.\n"
+        "- If the buffer is truncated or missing, say what you still need and use safe <command> to read files on the remote session.\n"
         "\n"
         "Execution policy:\n"
         "- Level 0 (read-only: ls, cat, rg, git status, etc.): allowed automatically when helpful.\n"
@@ -3405,19 +3982,18 @@ def ai_assist(wid: str, sess: str, payload: AiAssistPayload):
         "- Level 3 (environment changes: installs, deletes, git commit/reset, system changes): NEVER execute without explicit user approval.\n"
         "  For installs/updates (pip/conda/npm/apt etc.), propose the exact command and a sandbox/venv strategy, then wait for approval.\n"
         "\n"
-        "Collaboration style:\n"
-        "- When the request is ambiguous or large (big refactors, new tools, environment changes), ask 1–3 clarifying questions instead of guessing.\n"
-        "- Before running a series of commands or editing multiple files, show a short plan and ask whether to proceed.\n"
-        "- After each major step, briefly summarize what changed and ask whether to continue, instead of trying to solve everything in one shot.\n"
+        "Collaboration style (Cursor-like):\n"
+        "- Talk with the user naturally: explain, ask clarifying questions, and propose next steps — not only rigid status reports.\n"
+        "- When the request is ambiguous or large, ask 1–3 focused questions instead of guessing.\n"
+        "- Before risky or many-step work, outline a short plan and confirm if needed.\n"
+        "- For purely conceptual questions (concepts, reading code in context, small explanations), answer directly; "
+        "only use <command> when filesystem or runtime evidence on the remote machine is needed.\n"
         "\n"
-        "Response structure for agent/debug tasks:\n"
-        "- Understanding: what you think the user wants and what you observed.\n"
-        "- Plan: 1–3 concrete steps you intend to take.\n"
-        "- Action: what you actually did (commands, edits, inspections).\n"
-        "- Result / Next: what you found or changed, and the next options for the user.\n"
+        "Optional structure (use only when it helps readability for multi-step work):\n"
+        "brief plan → commands you run → what you learned → what you suggest next.\n"
       )
       if context_block:
-        system_prompt += "\n\n--- Editor context (use for code changes when relevant) ---\n" + context_block
+        system_prompt += "\n\n--- Editor context (primary; cite symbols from here) ---\n" + context_block
       if thinking == "deep":
         system_prompt += (
           "\n\n[Deep thinking mode]\n"
@@ -3429,7 +4005,9 @@ def ai_assist(wid: str, sess: str, payload: AiAssistPayload):
       elif thinking == "quick":
         system_prompt += (
           "\n\n[Quick mode]\n"
-          "Optimize for short, direct answers. Avoid running shell commands unless the user explicitly asks for them."
+          "Optimize for short, direct answers. Avoid shell commands unless clearly needed. "
+          "If the user wants a code change and the open file is in editor context, use one <edit> with the "
+          "full file — never stream a partial file rewrite as plain chat text."
         )
     elif mode == "plan":
       system_prompt = (
@@ -3481,9 +4059,12 @@ def ai_assist(wid: str, sess: str, payload: AiAssistPayload):
       if role not in ("user", "assistant"):
         role = "user"
       messages.append({"role": role, "content": (m.content or "").strip()})
+    ep_agent: Optional[str] = None
     user_content = payload.prompt.strip()
     if mode == "agent" and (payload.editorPath or payload.editorSelectedText or payload.editorContent):
       user_content = "[User request]\n" + user_content
+      ep_agent = _norm_editor_rel_for_agent(payload.editorPath)
+      user_content = _append_syncterm_edit_protocol_user_suffix(user_content, ep_agent)
     messages.append({"role": "user", "content": user_content})
     if mode == "agent":
       agent_res = _run_agent_loop(
@@ -3493,6 +4074,7 @@ def ai_assist(wid: str, sess: str, payload: AiAssistPayload):
         selected_model,
         max_iterations=agent_iterations,
         max_tokens=chat_max_tokens,
+        editor_rel_path=ep_agent,
       )
       return agent_res
     else:
@@ -3613,14 +4195,7 @@ def ai_stream(wid: str, sess: str, payload: AiAssistPayload):
   # chat アクションかつ Agent / Multi 以外 → 真のストリーミングで返す
   if action == "chat" and mode not in ("agent", "multi"):
     # ai_assist の chat 分岐と同じロジックでコンテキストとモデル選択を行う
-      context_parts: List[str] = []
-      if payload.editorPath:
-        context_parts.append(f"Current file: {payload.editorPath}")
-      if payload.editorSelectedText:
-        context_parts.append(f"Selected text in editor:\n```\n{payload.editorSelectedText[:4000]}\n```")
-      if payload.editorContent and not payload.editorSelectedText:
-        context_parts.append(f"Current file content (for reference):\n```\n{payload.editorContent[:6000]}\n```")
-      context_block = "\n\n".join(context_parts) if context_parts else ""
+      context_block = _build_chat_editor_context_block(payload, mode=mode, thinking=thinking)
 
       requested_model = (payload.model or "").strip() or None
       use_hybrid = bool(payload.hybridRouting)
@@ -3703,29 +4278,11 @@ def ai_stream(wid: str, sess: str, payload: AiAssistPayload):
       user_content = payload.prompt.strip()
       messages.append({"role": "user", "content": user_content})
 
-      def _iter_events_chat():
-        full_text = ""
-        truncated_flag = False
-        for ev in _stream_llm_messages(messages, max_tokens=chat_max_tokens, temperature=0.2, model=selected_model):
-          if ev.get("type") == "token" and ev.get("delta"):
-            full_text += str(ev.get("delta") or "")
-            yield f"data: {json.dumps({'type': 'token', 'delta': ev.get('delta')}, ensure_ascii=False)}\n\n"
-          elif ev.get("type") == "done":
-            result_text = str(ev.get("result") or "") or full_text
-            truncated_flag = bool(ev.get("truncated"))
-            done_ev = {
-              "type": "done",
-              "result": result_text,
-              "command": None,
-              "needsApproval": False,
-              "truncated": truncated_flag,
-              "autoContinued": False,
-              "logs": [],
-              "debates": [],
-            }
-            yield f"data: {json.dumps(done_ev, ensure_ascii=False)}\n\n"
-
-      return StreamingResponse(_iter_events_chat(), media_type="text/event-stream")
+      return StreamingResponse(
+        _iter_sse_chat_llm_events(messages, chat_max_tokens, 0.2, selected_model),
+        media_type="text/event-stream",
+        headers=dict(_AI_SSE_HEADERS),
+      )
 
   # Multi モードでは、代表エージェント + レビューモデル + モデレーターによるディベートを
   # ラウンド／ターン単位でストリーミングする。
@@ -3747,14 +4304,9 @@ def ai_stream(wid: str, sess: str, payload: AiAssistPayload):
         agent_iterations = 10
 
       # エディタコンテキストの組み立て（ai_assist と同じ）
-      context_parts: List[str] = []
-      if payload.editorPath:
-        context_parts.append(f"Current file: {payload.editorPath}")
-      if payload.editorSelectedText:
-        context_parts.append(f"Selected text in editor:\n```\n{payload.editorSelectedText[:4000]}\n```")
-      if payload.editorContent and not payload.editorSelectedText:
-        context_parts.append(f"Current file content (for reference):\n```\n{payload.editorContent[:6000]}\n```")
-      context_block = "\n\n".join(context_parts) if context_parts else ""
+      context_block = _build_chat_editor_context_block(payload, mode="multi", thinking=thinking)
+      if payload.editorPath or payload.editorContent:
+        chat_max_tokens = max(chat_max_tokens, 8192)
 
       # モデル集合の決定（ai_assist の multi と同じロジック）
       raw_models = (payload.model or "").strip()
@@ -3804,6 +4356,7 @@ def ai_stream(wid: str, sess: str, payload: AiAssistPayload):
         "Other models will only see your report and logs; they do NOT see the raw environment.\n"
         "You ARE actually connected to a real shell via this mechanism.\n"
         "Focus on gathering concrete evidence and summarizing it clearly for others to review.\n"
+        "When editor context is attached, ground statements about code in that buffer and command output — avoid inventing symbols or paths.\n"
         "\n"
         "CRITICAL:\n"
         "- You DO have access to the remote session via commands. Never say you cannot access the filesystem.\n"
@@ -3812,10 +4365,16 @@ def ai_stream(wid: str, sess: str, payload: AiAssistPayload):
         "- If the user delegates environment setup, dependency installation, or running demo scripts to you, plan the steps and then execute the necessary commands using <command>...</command>, asking for approval only when a command might be risky.\n"
         "- Prefer: <command>pwd</command>, <command>ls -la</command>, <command>git status</command>, conda/pip installs, python -c checks, etc.\n"
         "- When reporting files, paths, or versions, base your answer ONLY on command output. If a command failed, say so and try an alternative safe command.\n"
-        "- In each <command>...</command> block, put exactly ONE shell command only (no '&&', no ';').\n"
+        "- In each <command>...</command> block, put exactly ONE shell command only (no '&&', no ';'). "
+        "The line runs in bash — never put raw Python (e.g. plt.legend); use python3 -c or python3 script.py.\n"
+        "\n"
+        "File edits: If the user asks to change code and editor context includes a file, output exactly ONE "
+        "<edit path=\"session/relative/path\">...</edit> with the FULL new file body. "
+        "Do not paste a complete file replacement as plain chat text or markdown-only code — the IDE only "
+        "applies <edit> blocks (user approves a diff). Path must match \"Current file (path)\" without a leading slash.\n"
       )
       if context_block:
-        system_agent += "\n\n--- Editor context (for reference) ---\n" + context_block
+        system_agent += "\n\n--- Editor context (primary reference for open file + selection) ---\n" + context_block
       if thinking == "deep":
         system_agent += (
           "\n\n[Deep mode]\n"
@@ -3836,7 +4395,11 @@ def ai_stream(wid: str, sess: str, payload: AiAssistPayload):
         if role not in ("user", "assistant"):
           role = "user"
         agent_messages.append({"role": role, "content": (m.content or "").strip()})
+      ep_agent = _norm_editor_rel_for_agent(payload.editorPath)
       agent_user_content = payload.prompt.strip()
+      if payload.editorPath or payload.editorSelectedText or payload.editorContent:
+        agent_user_content = "[User request]\n" + agent_user_content
+      agent_user_content = _append_syncterm_edit_protocol_user_suffix(agent_user_content, ep_agent)
       agent_messages.append({"role": "user", "content": agent_user_content})
 
       # 代表エージェントの Agent ループ（ここは同期実行だが、完了次第すぐに debate_turn を流す）
@@ -3848,7 +4411,33 @@ def ai_stream(wid: str, sess: str, payload: AiAssistPayload):
         representative_model,
         max_iterations=agent_max_iter,
         max_tokens=chat_max_tokens,
+        editor_rel_path=ep_agent,
       )
+
+      if agent_res.needsEditApproval and agent_res.proposedEdits:
+        agent_text_early = _strip_edit_tags(_strip_command_tags((agent_res.result or "").strip()))
+        if not agent_text_early:
+          agent_text_early = (
+            "ファイル変更が提案されています。下の差分を確認し、承認または却下してください。"
+          )
+        chunk_sz = 80
+        for i in range(0, len(agent_text_early), chunk_sz):
+          ev_tok = {"type": "token", "delta": agent_text_early[i : i + chunk_sz]}
+          yield f"data: {json.dumps(ev_tok, ensure_ascii=False)}\n\n"
+        done_early = {
+          "type": "done",
+          "result": agent_text_early,
+          "command": getattr(agent_res, "command", None),
+          "needsApproval": getattr(agent_res, "needsApproval", False),
+          "needsEditApproval": True,
+          "proposedEdits": [e.model_dump() for e in agent_res.proposedEdits],
+          "truncated": getattr(agent_res, "truncated", False),
+          "autoContinued": getattr(agent_res, "autoContinued", False),
+          "logs": [l.model_dump() for l in getattr(agent_res, "logs", [])],
+          "debates": [],
+        }
+        yield f"data: {json.dumps(done_early, ensure_ascii=False)}\n\n"
+        return
 
       agent_logs = getattr(agent_res, "logs", []) or []
       if agent_logs:
@@ -3879,7 +4468,7 @@ def ai_stream(wid: str, sess: str, payload: AiAssistPayload):
       debate_turns: List[DebateTurn] = []
 
       # Round 0: 代表エージェントのレポートをまず流す
-      agent_text = _strip_command_tags((agent_res.result or "").strip())
+      agent_text = _strip_edit_tags(_strip_command_tags((agent_res.result or "").strip()))
       if not agent_text:
         agent_text = "Investigation completed, but the agent did not produce a narrative summary. Refer to the shared command logs."
       debate_turns.append(
@@ -4071,6 +4660,8 @@ def ai_stream(wid: str, sess: str, payload: AiAssistPayload):
         "result": final_answer,
         "command": getattr(agent_res, "command", None),
         "needsApproval": getattr(agent_res, "needsApproval", False),
+        "needsEditApproval": bool(getattr(agent_res, "needsEditApproval", False)),
+        "proposedEdits": [e.model_dump() for e in getattr(agent_res, "proposedEdits", [])],
         "truncated": getattr(agent_res, "truncated", False),
         "autoContinued": getattr(agent_res, "autoContinued", False),
         "logs": [l.model_dump() for l in getattr(agent_res, "logs", [])],
@@ -4078,7 +4669,7 @@ def ai_stream(wid: str, sess: str, payload: AiAssistPayload):
       }
       yield f"data: {json.dumps(done_ev, ensure_ascii=False)}\n\n"
 
-    return StreamingResponse(_iter_events_multi(), media_type="text/event-stream")
+    return StreamingResponse(_iter_events_multi(), media_type="text/event-stream", headers=dict(_AI_SSE_HEADERS))
 
   # Agent やコード生成系など、その他複雑なモードは既存の ai_assist を利用した疑似ストリーミングを継続
   resp = ai_assist(wid, sess, payload)
@@ -4098,6 +4689,8 @@ def ai_stream(wid: str, sess: str, payload: AiAssistPayload):
       "result": resp.result,
       "command": resp.command,
       "needsApproval": resp.needsApproval,
+      "needsEditApproval": bool(getattr(resp, "needsEditApproval", False)),
+      "proposedEdits": [e.model_dump() for e in getattr(resp, "proposedEdits", [])],
       "truncated": resp.truncated,
       "autoContinued": resp.autoContinued,
       "logs": [l.model_dump() for l in resp.logs] if hasattr(resp, "logs") else [],
@@ -4105,7 +4698,7 @@ def ai_stream(wid: str, sess: str, payload: AiAssistPayload):
     }
     yield f"data: {json.dumps(done_ev, ensure_ascii=False)}\n\n"
 
-  return StreamingResponse(_iter_events_fallback(), media_type="text/event-stream")
+  return StreamingResponse(_iter_events_fallback(), media_type="text/event-stream", headers=dict(_AI_SSE_HEADERS))
 
 
 @app.post("/watchers/{wid}/sessions/{sess}/ai-inline")

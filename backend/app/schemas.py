@@ -172,10 +172,20 @@ class DebateThread(BaseModel):
   turns: List[DebateTurn] = Field(default_factory=list)
 
 
+class ProposedAgentEdit(BaseModel):
+  """Agent の <edit> を即保存せず UI で承認するための提案。"""
+  path: str
+  previousContent: str = ""
+  newContent: str = ""
+
+
 class AiAssistResponse(BaseModel):
   result: str
   command: Optional[str] = None
   needsApproval: bool = False
+  # <edit> 提案があり、フロントで差分確認後に保存する必要がある
+  needsEditApproval: bool = False
+  proposedEdits: List[ProposedAgentEdit] = Field(default_factory=list)
   # モデルがトークン上限で打ち切られたかどうか（OpenAI / Ollama の finish_reason / done_reason ベース）
   truncated: bool = False
   # 自動で "Continue." を送って続きを連結した場合に True

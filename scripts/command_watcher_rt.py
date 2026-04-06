@@ -310,7 +310,8 @@ class SessionContext:
                 ls_file.write_text(f"ERROR:\n{proc.stderr}", encoding="utf-8")
             output_lines.append(f"__LS_DONE__::{rel}")
             output_lines.append(f"{EOC_MARKER_PREFIX}INTERNAL:{proc.returncode}")
-            return {"ls_result": ls_file.read_text(encoding="utf-8") if proc.returncode == 0 else ""}
+            # 失敗時もファイル本文を返す（ERROR: プレフィックス）。空文字だと Relay 側が成功した空ディレクトリと区別できずフォールバックしない。
+            return {"ls_result": ls_file.read_text(encoding="utf-8")}
 
         if cmd.startswith("_internal_stage_file_for_download::"):
             parts = cmd.split("::", 2)

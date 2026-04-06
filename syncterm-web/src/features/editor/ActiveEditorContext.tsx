@@ -13,6 +13,9 @@ interface ActiveEditorContextValue {
   registerAppendAtCursor: (fn: ((text: string) => void) | null) => void;
   applyToSelection: (text: string) => void;
   appendAtCursor: (text: string) => void;
+  /** AI チャットの「承認して保存」後にエディタ／タブの内容を同期する（EditorPanel が登録） */
+  registerFileAppliedFromAi: (fn: ((sessionRelPath: string, content: string) => void) | null) => void;
+  notifyFileAppliedFromAi: (sessionRelPath: string, content: string) => void;
 }
 
 const defaultState: ActiveEditorState = {
@@ -27,6 +30,7 @@ export function ActiveEditorProvider({ children }: { children: React.ReactNode }
   const [activeEditor, setState] = useState<ActiveEditorState>(defaultState);
   const applyRef = useRef<((text: string) => void) | null>(null);
   const appendRef = useRef<((text: string) => void) | null>(null);
+  const fileAppliedFromAiRef = useRef<((sessionRelPath: string, content: string) => void) | null>(null);
 
   const setActiveEditorState = useCallback((patch: Partial<ActiveEditorState>) => {
     setState((prev) => ({ ...prev, ...patch }));
@@ -48,13 +52,26 @@ export function ActiveEditorProvider({ children }: { children: React.ReactNode }
     appendRef.current?.(text);
   }, []);
 
+  const registerFileAppliedFromAi = useCallback(
+    (fn: ((sessionRelPath: string, content: string) => void) | null) => {
+      fileAppliedFromAiRef.current = fn;
+    },
+    []
+  );
+
+  const notifyFileAppliedFromAi = useCallback((sessionRelPath: string, content: string) => {
+    fileAppliedFromAiRef.current?.(sessionRelPath, content);
+  }, []);
+
   const value: ActiveEditorContextValue = {
     activeEditor,
     setActiveEditorState,
     registerApplyToSelection,
     registerAppendAtCursor,
     applyToSelection,
-    appendAtCursor
+    appendAtCursor,
+    registerFileAppliedFromAi,
+    notifyFileAppliedFromAi
   };
 
   return (

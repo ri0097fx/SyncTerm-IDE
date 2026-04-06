@@ -128,6 +128,87 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
   /** デバッグ: Preferences の Show command trace が ON のとき、フォルダツリー操作のログ（原因調査用） */
   const [fileTreeDebugLog, setFileTreeDebugLog] = useState<Array<{ op: string; params: string; result: string }>>([]);
 
+  /** デバッグ用: showCommandTrace が ON のとき API の入出力を console と fileTreeDebugLog に記録 */
+  const runWithTrace = useCallback(
+    async function runWithTrace<T>(
+      op: string,
+      params: Record<string, unknown>,
+      fn: () => Promise<T>
+    ): Promise<T> {
+      if (!preferences?.showCommandTrace) return fn();
+      const paramsStr = JSON.stringify(params);
+      console.log(`[FileTree] ${op}`, params);
+      setFileTreeDebugLog((prev) =>
+        prev.length >= FILE_TREE_DEBUG_MAX
+          ? [...prev.slice(1), { op, params: paramsStr, result: "..." }]
+          : [...prev, { op, params: paramsStr, result: "..." }]
+      );
+      try {
+        const res = await fn();
+        const resultStr = (() => {
+          if (Array.isArray(res)) {
+            const topSample = res
+              .slice(0, 3)
+              .map((x) =>
+                x && typeof x === "object" && "path" in x
+                  ? String((x as { path?: unknown }).path)
+                  : typeof x === "string"
+                  ? x
+                  : typeof x
+              )
+              .join(", ");
+            const first = res[0] as unknown;
+            const childrenInfo = (() => {
+              if (!first || typeof first !== "object") return "";
+              if (!("children" in first)) return "";
+              const ch = (first as { children?: unknown }).children;
+              if (!Array.isArray(ch)) return " children=[non-array]";
+              const chSample = ch
+                .slice(0, 4)
+                .map((x) =>
+                  x && typeof x === "object" && "path" in x
+                    ? String((x as { path?: unknown }).path)
+                    : typeof x
+                )
+                .join(", ");
+              return ` childrenLen=${ch.length}${chSample ? ` childrenSample=[${chSample}]` : ""}`;
+            })();
+            return `array(len=${res.length})${topSample ? ` sample=[${topSample}]` : ""}${childrenInfo}`;
+          }
+          if (typeof res === "object" && res !== null && "ok" in res) {
+            return `ok=${(res as { ok?: boolean }).ok} rt=${(res as { rt?: boolean }).rt}`;
+          }
+          if (typeof res === "object" && res !== null) {
+            try {
+              const s = JSON.stringify(res);
+              return s.length > 300 ? `${s.slice(0, 300)}…` : s;
+            } catch {
+              return "[object]";
+            }
+          }
+          return String(res);
+        })();
+        console.log(`[FileTree] ${op} result`, res);
+        setFileTreeDebugLog((prev) => {
+          const next = [...prev];
+          if (next.length) next[next.length - 1] = { ...next[next.length - 1], result: resultStr };
+          return next;
+        });
+        return res;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error(`[FileTree] ${op} error`, e);
+        setFileTreeDebugLog((prev) => {
+          const next = [...prev];
+          if (next.length) next[next.length - 1] = { ...next[next.length - 1], result: `ERROR: ${msg}` };
+          return next;
+        });
+        throw e;
+      }
+    },
+    [preferences?.showCommandTrace]
+  );
+
   useEffect(() => {
     // watcher/session 切替時に展開状態とインライン作成状態をクリア
     setOpenPaths(new Set(["/"]));
@@ -158,7 +239,11 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
       }
       setLoading(true);
       try {
-        const entries = await api.listFiles(currentWatcher.id, currentSession.name);
+        const entries = await runWithTrace(
+          "listFiles",
+          { watcherId: currentWatcher.id, session: currentSession.name, source: "relay" },
+          () => api.listFiles(currentWatcher.id, currentSession.name)
+        );
         setRoots(entries);
       } finally {
         setLoading(false);
@@ -174,16 +259,38 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
     setLoading(true);
     setTreeError(null);
     try {
-      // Refresh ボタンは relay mirror ではなく watcher から取得して「同期されない」問題を回避する
-      const entries = await api.listFiles(currentWatcher.id, currentSession.name, { source: "watcher" });
+      // Refresh は relay 側の session mirror を正として取得する。
+      // watcher 側は（RT 実行用に）commands.* しか持たない構成もあり、root を watcher 起点にするとツリーが欠落する。
+      const entries = await runWithTrace(
+        "listFiles",
+        { watcherId: currentWatcher.id, session: currentSession.name, source: "relay" },
+        () => api.listFiles(currentWatcher.id, currentSession.name)
+      );
       const merged = snapshot.size ? mergeChildrenFromSnapshot(entries, snapshot) : entries;
       setRoots(merged);
+
+      // 深い階層は root の listFiles だけでは更新されないので、展開中フォルダも再取得する
+      const expanded = Array.from(openPaths).filter((p) => p && p !== "/");
+      const maxRefresh = 30;
+      for (const p of expanded.slice(0, maxRefresh)) {
+        try {
+          const children = await runWithTrace(
+            "listChildren",
+            { watcherId: currentWatcher.id, session: currentSession.name, path: p },
+            () => api.listChildren(currentWatcher.id, currentSession.name, p)
+          );
+          setRoots((prev) => updateChildren(prev, p, children));
+        } catch (e) {
+          // 1 個の失敗で全体を止めない（原因は debug log に残る）
+          console.warn("[FileTree] refresh expanded failed", p, e);
+        }
+      }
     } catch (e) {
       setTreeError(e instanceof Error ? e.message : "Failed to refresh file tree");
     } finally {
       setLoading(false);
     }
-  }, [currentWatcher, currentSession, roots]);
+  }, [currentWatcher, currentSession, openPaths, roots, runWithTrace]);
 
   const updateChildren = (items: FileEntry[], path: string, children: FileEntry[]): FileEntry[] =>
     items.map((node) => {
@@ -204,7 +311,11 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
     setLoadingPath(entry.path);
     setTreeError(null);
     try {
-      const children = await api.listChildren(currentWatcher.id, currentSession.name, entry.path);
+      const children = await runWithTrace(
+        "listChildren",
+        { watcherId: currentWatcher.id, session: currentSession.name, path: entry.path },
+        () => api.listChildren(currentWatcher.id, currentSession.name, entry.path)
+      );
       setRoots((prev) => updateChildren(prev, entry.path, children));
     } catch (e) {
       setTreeError(e instanceof Error ? e.message : "Failed to expand directory/symlink");
@@ -329,46 +440,6 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
     setShowDeleteConfirm(true);
   };
 
-  /** デバッグ用: showCommandTrace が ON のとき API の入出力を console と fileTreeDebugLog に記録 */
-  const runWithTrace = useCallback(
-    async function runWithTrace<T>(
-      op: string,
-      params: Record<string, unknown>,
-      fn: () => Promise<T>
-    ): Promise<T> {
-      if (!preferences?.showCommandTrace) return fn();
-      const paramsStr = JSON.stringify(params);
-      console.log(`[FileTree] ${op}`, params);
-      setFileTreeDebugLog((prev) =>
-        prev.length >= FILE_TREE_DEBUG_MAX ? [...prev.slice(1), { op, params: paramsStr, result: "..." }] : [...prev, { op, params: paramsStr, result: "..." }]
-      );
-      try {
-        const res = await fn();
-        const resultStr =
-          typeof res === "object" && res !== null && "ok" in res
-            ? `ok=${(res as { ok?: boolean }).ok} rt=${(res as { rt?: boolean }).rt}`
-            : String(res);
-        console.log(`[FileTree] ${op} result`, res);
-        setFileTreeDebugLog((prev) => {
-          const next = [...prev];
-          if (next.length) next[next.length - 1] = { ...next[next.length - 1], result: resultStr };
-          return next;
-        });
-        return res;
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        console.error(`[FileTree] ${op} error`, e);
-        setFileTreeDebugLog((prev) => {
-          const next = [...prev];
-          if (next.length) next[next.length - 1] = { ...next[next.length - 1], result: `ERROR: ${msg}` };
-          return next;
-        });
-        throw e;
-      }
-    },
-    [preferences?.showCommandTrace]
-  );
-
   const runWithRefresh = async (fn: () => Promise<unknown>) => {
     if (!currentWatcher || !currentSession) return;
     setActionBusy(true);
@@ -437,6 +508,29 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
       const deleted = new Set(toDelete.map((e) => e.path));
       const next = clipboard.paths.filter((p) => !deleted.has(p));
       setClipboard(next.length ? { ...clipboard, paths: next } : null);
+    }
+  };
+
+  const handleCopyPath = async () => {
+    const entries = getContextEntries();
+    setContextMenu(null);
+    if (!entries.length) return;
+    const text = entries.map((e) => e.path).join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      try {
+        document.execCommand("copy");
+      } finally {
+        document.body.removeChild(ta);
+      }
     }
   };
 
@@ -698,6 +792,9 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
           <button type="button" onClick={handleCopy}>Copy</button>
           <button type="button" onClick={handleCut}>Cut</button>
           <button type="button" onClick={handlePaste} disabled={!canPaste}>Paste</button>
+          <button type="button" onClick={() => void handleCopyPath()} disabled={!contextEntries.length}>
+            Copy path
+          </button>
           <button type="button" onClick={openRename} disabled={!singleContextEntry}>Rename</button>
           {showDownload && <button type="button" onClick={handleDownload}>Download</button>}
           <div className="context-menu-sep" />

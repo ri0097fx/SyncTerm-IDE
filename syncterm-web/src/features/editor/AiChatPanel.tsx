@@ -14,10 +14,19 @@ import "prismjs/themes/prism-tomorrow.css";
 import { useSession } from "../session/SessionContext";
 import { usePreferences } from "../preferences/PreferencesContext";
 import { useActiveEditor } from "./ActiveEditorContext";
+import { createPatch } from "diff";
 import { api, type BuddyState } from "../../lib/api";
 
 type Message = { role: "user" | "assistant"; text: string; feedback?: "good" | "bad" };
 type PendingCommand = { command: string; chatId: string };
+type ProposedAgentEdit = { path: string; previousContent: string; newContent: string };
+type PendingProposedEditsState = { chatId: string; edits: ProposedAgentEdit[] };
+
+function proposedEditUnifiedDiff(edit: ProposedAgentEdit): string {
+  const oldH = edit.previousContent === "" ? "empty" : "previous";
+  const newH = edit.newContent === "" ? "empty" : "proposed";
+  return createPatch(edit.path || "file", edit.previousContent, edit.newContent, oldH, newH, { context: 4 });
+}
 const AUTO_MODEL = "__auto__";
 
 const CHAT_STORAGE_KEY = "syncterm-ai-chat";
@@ -227,10 +236,16 @@ function splitMarkdownCodeFences(text: string): MsgSegment[] {
   return out.length ? out : [{ kind: "text", text }];
 }
 
-export const AiChatPanel: React.FC = () => {
+type AiChatPanelProps = {
+  /** ActiveEditorContext より前にタブパスだけ分かっているときのフォールバック（editorPath API 用） */
+  fallbackEditorPath?: string | null;
+};
+
+export const AiChatPanel: React.FC<AiChatPanelProps> = ({ fallbackEditorPath = null }) => {
   const { currentWatcher, currentSession } = useSession();
   const { preferences, updatePreferences } = usePreferences();
-  const { activeEditor, applyToSelection, appendAtCursor } = useActiveEditor();
+  const { activeEditor, applyToSelection, appendAtCursor, notifyFileAppliedFromAi } = useActiveEditor();
+  const editorPathForAi = activeEditor.path ?? fallbackEditorPath ?? undefined;
   const [tab, setTab] = useState<"chat" | "assist" | "buddy" | "settings">("chat");
   const [chatIds, setChatIds] = useState<string[]>([]);
   const [activeChatId, setActiveChatId] = useState<string>("");
@@ -269,6 +284,8 @@ export const AiChatPanel: React.FC = () => {
   const [ensuringModel, setEnsuringModel] = useState<string | null>(null);
   const [installProgress, setInstallProgress] = useState<{ model: string; status: string; percent?: number } | null>(null);
   const [pendingCommand, setPendingCommand] = useState<PendingCommand | null>(null);
+  const [pendingProposedEdits, setPendingProposedEdits] = useState<PendingProposedEditsState | null>(null);
+  const [selectedProposedEditPaths, setSelectedProposedEditPaths] = useState<Set<string>>(() => new Set());
   const [chatView, setChatView] = useState<"messages" | "logs" | "debate">("messages");
   const [editingMessageIndex, setEditingMessageIndex] = useState<number | null>(null);
   const [editingMessageText, setEditingMessageText] = useState("");
@@ -352,10 +369,20 @@ export const AiChatPanel: React.FC = () => {
     models: string[];
     turns: { round: number; speaker: string; model: string; role: string; content: string }[];
   } | null>(null);
-  const scrollToBottom = () => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  const scrollToBottom = useCallback(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, []);
 
   useEffect(() => { chatsRef.current = chats; }, [chats]);
   useEffect(() => { activeChatIdRef.current = activeChatId; }, [activeChatId]);
+
+  useEffect(() => {
+    if (pendingProposedEdits?.edits?.length) {
+      setSelectedProposedEditPaths(new Set(pendingProposedEdits.edits.map((e) => e.path)));
+    } else {
+      setSelectedProposedEditPaths(new Set());
+    }
+  }, [pendingProposedEdits]);
 
   useEffect(() => {
     const el = chatInputRef.current;
@@ -567,7 +594,7 @@ export const AiChatPanel: React.FC = () => {
             history,
             model: buildModelForPayload(),
             mode: chatMode,
-            editorPath: activeEditor.path ?? undefined,
+            editorPath: editorPathForAi,
             editorSelectedText: activeEditor.selectedText ?? undefined,
             editorContent: activeEditor.content ?? undefined,
             thinking: thinkingMode,
@@ -676,6 +703,11 @@ export const AiChatPanel: React.FC = () => {
                   };
                 });
               }
+              if (ev.needsEditApproval && ev.proposedEdits && ev.proposedEdits.length > 0) {
+                setPendingProposedEdits({ chatId: mid, edits: ev.proposedEdits as ProposedAgentEdit[] });
+              } else {
+                setPendingProposedEdits(null);
+              }
               if (ev.needsApproval && ev.command) {
                 setPendingCommand({ command: ev.command, chatId: mid });
               } else {
@@ -705,7 +737,18 @@ export const AiChatPanel: React.FC = () => {
         setLoading(false);
       }
     },
-    [currentWatcher?.id, currentSession?.name, activeChatId, chats, selectedModel, chatMode, thinkingMode, activeEditor.path, activeEditor.selectedText, activeEditor.content]
+    [
+      currentWatcher?.id,
+      currentSession?.name,
+      activeChatId,
+      chats,
+      selectedModel,
+      chatMode,
+      thinkingMode,
+      editorPathForAi,
+      activeEditor.selectedText,
+      activeEditor.content
+    ]
   );
 
   const rerunMultiDebate = useCallback(
@@ -756,7 +799,7 @@ export const AiChatPanel: React.FC = () => {
         model: buildModelForPayload(),
         mode: chatMode,
         ...(chatMode === "agent" && {
-          editorPath: activeEditor.path ?? undefined,
+          editorPath: editorPathForAi,
           editorSelectedText: activeEditor.selectedText ?? undefined,
           editorContent: activeEditor.content ?? undefined
         }),
@@ -765,6 +808,11 @@ export const AiChatPanel: React.FC = () => {
         hybridRouting: preferences.aiHybridRouting || undefined
       });
       const reply = (res.result ?? "").trim();
+      if (res.needsEditApproval && res.proposedEdits?.length) {
+        setPendingProposedEdits({ chatId: mid, edits: res.proposedEdits });
+      } else {
+        setPendingProposedEdits(null);
+      }
       if (res.needsApproval && res.command) {
         // 同じコマンドを繰り返し提案している場合はループを防ぐ
         if (res.command.trim() === cmd.trim()) {
@@ -791,7 +839,18 @@ export const AiChatPanel: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [pendingCommand, currentWatcher?.id, currentSession?.name, selectedModel, chatMode, thinkingMode, activeEditor.path, activeEditor.selectedText, activeEditor.content]);
+  }, [
+    pendingCommand,
+    currentWatcher?.id,
+    currentSession?.name,
+    selectedModel,
+    chatMode,
+    thinkingMode,
+    editorPathForAi,
+    activeEditor.selectedText,
+    activeEditor.content,
+    preferences.aiHybridRouting
+  ]);
 
   const sendFeedback = useCallback(
     async (message: Message, rating: "good" | "bad") => {
@@ -837,11 +896,21 @@ export const AiChatPanel: React.FC = () => {
         history,
         model: buildModelForPayload(),
         mode: chatMode,
+        ...(chatMode === "agent" && {
+          editorPath: editorPathForAi,
+          editorSelectedText: activeEditor.selectedText ?? undefined,
+          editorContent: activeEditor.content ?? undefined
+        }),
         thinking: thinkingMode,
         persona: buildPersonaInstructions(),
         hybridRouting: preferences.aiHybridRouting || undefined
       });
       const reply = (res.result ?? "").trim();
+      if (res.needsEditApproval && res.proposedEdits?.length) {
+        setPendingProposedEdits({ chatId: mid, edits: res.proposedEdits });
+      } else {
+        setPendingProposedEdits(null);
+      }
       setChats((prev) => ({
         ...prev,
         [mid]: { ...prev[mid], messages: [...(prev[mid]?.messages ?? []), { role: "assistant", text: reply || "(no response)" }] }
@@ -855,7 +924,67 @@ export const AiChatPanel: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [pendingCommand, currentWatcher?.id, currentSession?.name, selectedModel, chatMode, thinkingMode]);
+  }, [
+    pendingCommand,
+    currentWatcher?.id,
+    currentSession?.name,
+    selectedModel,
+    chatMode,
+    thinkingMode,
+    editorPathForAi,
+    activeEditor.selectedText,
+    activeEditor.content,
+    preferences.aiHybridRouting
+  ]);
+
+  const rejectPendingProposedEdits = useCallback(() => {
+    setPendingProposedEdits(null);
+  }, []);
+
+  const acceptPendingProposedEdits = useCallback(async () => {
+    if (!pendingProposedEdits || !currentWatcher || !currentSession) return;
+    const toSave = pendingProposedEdits.edits.filter((e) => selectedProposedEditPaths.has(e.path));
+    if (!toSave.length) return;
+    const mid = pendingProposedEdits.chatId;
+    setLoading(true);
+    try {
+      for (const e of toSave) {
+        await api.saveFileContent(currentWatcher.id, currentSession.name, e.path, e.newContent);
+        notifyFileAppliedFromAi(e.path, e.newContent);
+      }
+      const savedList = toSave.map((e) => e.path).join(", ");
+      setChats((prev) => ({
+        ...prev,
+        [mid]: {
+          ...prev[mid],
+          messages: [
+            ...(prev[mid]?.messages ?? []),
+            { role: "assistant", text: `リモートに保存し、開いているエディタの内容を更新しました: ${savedList}` }
+          ]
+        }
+      }));
+      setPendingProposedEdits(null);
+      setTimeout(scrollToBottom, 50);
+    } catch (e) {
+      const errMsg = e instanceof Error ? e.message : "Save failed";
+      setChats((prev) => ({
+        ...prev,
+        [mid]: {
+          ...prev[mid],
+          messages: [...(prev[mid]?.messages ?? []), { role: "assistant", text: `ファイル保存エラー: ${errMsg}` }]
+        }
+      }));
+    } finally {
+      setLoading(false);
+    }
+  }, [
+    pendingProposedEdits,
+    selectedProposedEditPaths,
+    currentWatcher?.id,
+    currentSession?.name,
+    notifyFileAppliedFromAi,
+    scrollToBottom
+  ]);
 
   const sendBuddy = useCallback(
     async (text: string) => {
@@ -869,7 +998,7 @@ export const AiChatPanel: React.FC = () => {
       try {
         const modeForBuddy = buddyAllowCommands ? "agent" : "ask";
         const res = await api.runAiAssist(currentWatcher.id, currentSession.name, {
-          path: activeEditor.path ?? "",
+          path: editorPathForAi ?? "",
           action: "chat",
           prompt: userMessage,
           fileContent: activeEditor.content ?? "",
@@ -877,7 +1006,7 @@ export const AiChatPanel: React.FC = () => {
           model: buildModelForPayload(),
           mode: modeForBuddy,
           ...(modeForBuddy === "agent" && {
-            editorPath: activeEditor.path ?? undefined,
+            editorPath: editorPathForAi,
             editorSelectedText: activeEditor.selectedText ?? undefined,
             editorContent: activeEditor.content ?? undefined
           }),
@@ -901,7 +1030,7 @@ export const AiChatPanel: React.FC = () => {
       selectedModel,
       thinkingMode,
       buddyAllowCommands,
-      activeEditor.path,
+      editorPathForAi,
       activeEditor.selectedText,
       activeEditor.content
     ]
@@ -1041,7 +1170,7 @@ export const AiChatPanel: React.FC = () => {
     setAiError(null);
     try {
       const res = await api.runAiAssist(currentWatcher.id, currentSession.name, {
-        path: activeEditor.path ?? "",
+        path: editorPathForAi ?? "",
         action: aiAction,
         prompt: aiPrompt.trim() || "Improve this code",
         selectedText: activeEditor.selectedText,
@@ -1058,7 +1187,18 @@ export const AiChatPanel: React.FC = () => {
     } finally {
       setAiLoading(false);
     }
-  }, [currentWatcher?.id, currentSession?.name, activeEditor.path, activeEditor.selectedText, activeEditor.content, aiAction, aiPrompt, selectedModel, chatMode, thinkingMode]);
+  }, [
+    currentWatcher?.id,
+    currentSession?.name,
+    editorPathForAi,
+    activeEditor.selectedText,
+    activeEditor.content,
+    aiAction,
+    aiPrompt,
+    selectedModel,
+    chatMode,
+    thinkingMode
+  ]);
 
   const close = () => updatePreferences({ showAiChatPanel: false });
 
@@ -1832,16 +1972,77 @@ export const AiChatPanel: React.FC = () => {
               </div>
             );
             })}
+          {chatView === "messages" &&
+            pendingProposedEdits &&
+            pendingProposedEdits.chatId === activeChatId && (
+              <div className="ai-chat-msg ai-chat-msg-assistant ai-chat-edit-proposal-sticky">
+                <span className="ai-chat-msg-role">AI</span>
+                <div className="ai-chat-command-card">
+                  <div className="ai-chat-command-title">ファイル変更の承認</div>
+                  <p className="ai-chat-edit-proposal-hint">チェックしたファイルだけリモートに保存されます。</p>
+                  {pendingProposedEdits.edits.map((edit) => (
+                    <div key={edit.path} className="ai-chat-edit-proposal-file">
+                      <div className="ai-chat-edit-proposal-head">
+                        <label className="ai-chat-edit-proposal-label">
+                          <input
+                            type="checkbox"
+                            checked={selectedProposedEditPaths.has(edit.path)}
+                            onChange={() => {
+                              setSelectedProposedEditPaths((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(edit.path)) next.delete(edit.path);
+                                else next.add(edit.path);
+                                return next;
+                              });
+                            }}
+                          />
+                          <code>{edit.path}</code>
+                        </label>
+                      </div>
+                      <details open>
+                        <summary>差分（unified diff）</summary>
+                        <pre className="ai-chat-diff">{proposedEditUnifiedDiff(edit)}</pre>
+                      </details>
+                    </div>
+                  ))}
+                  <div className="ai-chat-command-actions">
+                    <button
+                      type="button"
+                      className="primary-button"
+                      onClick={() => void acceptPendingProposedEdits()}
+                      disabled={loading || selectedProposedEditPaths.size === 0}
+                    >
+                      承認して保存
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-button"
+                      style={{ width: "auto", padding: "0 0.6rem" }}
+                      onClick={rejectPendingProposedEdits}
+                      disabled={loading}
+                    >
+                      却下
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           {chatView === "logs" && (
             <div className="ai-chat-logs">
               {Array.isArray((chats[activeChatId] as any)?.logs) && (chats[activeChatId] as any).logs.length === 0 && (
-                <div className="ai-chat-inline-note">No agent commands have been executed yet.</div>
+                <div className="ai-chat-inline-note">No agent commands or file edits yet.</div>
               )}
               {Array.isArray((chats[activeChatId] as any)?.logs) &&
                 ((chats[activeChatId] as any).logs as AgentLogEntry[]).map((log, idx) => (
                 <div key={idx} className="ai-chat-log-entry">
                   <div className="ai-chat-log-header">
-                    <span className="ai-chat-log-label">Command</span>
+                    <span className="ai-chat-log-label">
+                      {log.command.trim().toLowerCase().startsWith("[edit proposed]")
+                        ? "Edit proposal"
+                        : log.command.trim().toLowerCase().startsWith("[edit]")
+                          ? "File edit"
+                          : "Command"}
+                    </span>
                     {typeof log.exitCode === "number" && (
                       <span className={`ai-chat-log-exit${log.exitCode === 0 ? " ok" : " ng"}`}>
                         exit {log.exitCode}
@@ -1849,7 +2050,7 @@ export const AiChatPanel: React.FC = () => {
                     )}
                   </div>
                   <pre className="ai-chat-command">
-                    <code>$ {log.command}</code>
+                    <code>{log.command.trim().toLowerCase().startsWith("[edit]") ? log.command : `$ ${log.command}`}</code>
                   </pre>
                   {log.error && (
                     <div className="ai-chat-log-error">
@@ -2226,12 +2427,12 @@ export const AiChatPanel: React.FC = () => {
           <div className="ai-assist-section">
             <div className="ai-chat-verify">
               <div className="ai-chat-verify-title">エディタのコードを AI で編集</div>
-              {activeEditor.path && (
+              {editorPathForAi && (
                 <div className="ai-chat-inline-note" style={{ marginBottom: "0.35rem" }}>
-                  対象: {activeEditor.path}
+                  対象: {editorPathForAi}
                 </div>
               )}
-              {!activeEditor.path && (
+              {!editorPathForAi && (
                 <div className="ai-chat-inline-note" style={{ marginBottom: "0.35rem" }}>
                   エディタでファイルを開いてから実行してください。
                 </div>
@@ -2350,7 +2551,7 @@ export const AiChatPanel: React.FC = () => {
                 <button
                   type="button"
                   className="primary-button"
-                  disabled={noSession || aiLoading || !activeEditor.path}
+                  disabled={noSession || aiLoading || !editorPathForAi}
                   onClick={() => void handleAiAssist()}
                 >
                   {aiLoading ? "Thinking..." : "AI Assist"}

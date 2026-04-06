@@ -6,6 +6,27 @@ import { usePreferences } from "../preferences/PreferencesContext";
 
 const MAX_TERMINAL_LINES = 5000;
 
+/** listChildren の path 用: セッションルート相対（先頭の / はセッション基点として除去） */
+function toSessionRelListPath(logicalDir: string): string {
+  let p = (logicalDir ?? "").trim().replace(/\\/g, "/");
+  while (p.startsWith("./")) p = p.slice(2);
+  if (!p || p === ".") return ".";
+  if (p.startsWith("/")) {
+    p = p.replace(/^\/+/, "");
+    return p || ".";
+  }
+  return p;
+}
+
+/** プロンプトの cwd を一覧 API に渡す値に変換（セッション外の OS 絶対パスはルートで列挙） */
+function cwdForTabCompleteListing(cwd: string): string {
+  let s = (cwd ?? "").trim().replace(/\\/g, "/");
+  if (!s || s === ".") return ".";
+  while (s.startsWith("./")) s = s.slice(2);
+  if (s.startsWith("/")) return ".";
+  return s || ".";
+}
+
 export const TerminalPanel: React.FC = () => {
   const { preferences } = usePreferences();
   const { currentWatcher, currentSession } = useSession();
@@ -138,12 +159,31 @@ export const TerminalPanel: React.FC = () => {
     const before = match?.[1] ?? "";
     const token = match?.[2] ?? "";
     if (!token && !before) return;
+    const isAbsolute = token.startsWith("/");
     const hasSlash = token.includes("/");
-    const parentPath = hasSlash ? token.replace(/\/[^/]*$/, "") : currentDirPath;
-    const prefix = hasSlash ? token.replace(/^.*\//, "") : token;
-    const apiParent = (parentPath || "").trim() || "/";
+    let parentPath: string;
+    let prefix: string;
+    if (isAbsolute) {
+      const lastSlash = token.lastIndexOf("/");
+      if (lastSlash <= 0) {
+        parentPath = "/";
+        prefix = token.slice(1);
+      } else {
+        parentPath = token.slice(0, lastSlash);
+        prefix = token.slice(lastSlash + 1);
+      }
+    } else if (hasSlash) {
+      parentPath = token.replace(/\/[^/]*$/, "");
+      prefix = token.replace(/^.*\//, "");
+    } else {
+      parentPath = cwdForTabCompleteListing(currentDirPath);
+      prefix = token;
+    }
+    const apiParent = toSessionRelListPath(parentPath);
     try {
-      const entries = await api.listChildren(currentWatcher.id, currentSession.name, apiParent);
+      const entries = await api.listChildren(currentWatcher.id, currentSession.name, apiParent, {
+        source: "watcher"
+      });
       const candidates = entries.filter(
         (e) => e.name && e.name.startsWith(prefix) && !e.name.startsWith(".")
       );
@@ -163,7 +203,14 @@ export const TerminalPanel: React.FC = () => {
         const exact = candidates.find((c) => c.name === common);
         namePart = exact?.kind === "dir" ? `${common}/` : common;
       }
-      const completion = hasSlash && parentPath ? `${parentPath}/${namePart}` : namePart;
+      let completion: string;
+      if (isAbsolute) {
+        completion = parentPath === "/" ? `/${namePart}` : `${parentPath}/${namePart}`;
+      } else if (hasSlash && parentPath) {
+        completion = `${parentPath}/${namePart}`;
+      } else {
+        completion = namePart;
+      }
       setInput(before + completion);
     } catch {
       // ignore

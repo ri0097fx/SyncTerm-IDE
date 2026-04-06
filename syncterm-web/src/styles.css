@@ -551,6 +551,60 @@ body {
   align-items: center;
 }
 
+.ai-chat-diff {
+  margin: 0.35rem 0 0;
+  padding: 0.4rem 0.5rem;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.35);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  white-space: pre;
+  overflow: auto;
+  max-height: 12rem;
+}
+
+.ai-chat-edit-proposal-file {
+  margin-top: 0.45rem;
+  border-top: 1px solid color-mix(in srgb, var(--color-pane-border, #374151) 80%, transparent);
+  padding-top: 0.35rem;
+}
+
+.ai-chat-edit-proposal-file summary {
+  cursor: pointer;
+  font-size: 0.82rem;
+  user-select: none;
+}
+
+.ai-chat-edit-proposal-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.2rem;
+}
+
+.ai-chat-edit-proposal-hint {
+  font-size: 0.78rem;
+  margin: 0 0 0.35rem;
+  opacity: 0.88;
+}
+
+.ai-chat-edit-proposal-label {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+/* 会話ログの直後（メッセージエリア下部）に置いた承認カード */
+.ai-chat-edit-proposal-sticky {
+  margin-top: 0.5rem;
+  padding-top: 0.45rem;
+  border-top: 1px solid color-mix(in srgb, var(--color-pane-border, #374151) 85%, transparent);
+}
+
 .ai-chat-logs {
   display: flex;
   flex-direction: column;

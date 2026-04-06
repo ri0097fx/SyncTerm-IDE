@@ -55,7 +55,8 @@ export interface SyncApi {
   listChildren(
     watcherId: string,
     session: string,
-    path: string
+    path: string,
+    options?: { source?: "relay" | "watcher" }
   ): Promise<FileEntry[]>;
   createSymlink(
     watcherId: string,
@@ -149,6 +150,8 @@ export interface SyncApi {
     result: string;
     command?: string;
     needsApproval?: boolean;
+    needsEditApproval?: boolean;
+    proposedEdits?: { path: string; previousContent: string; newContent: string }[];
     logs?: { command: string; exitCode?: number; output?: string; error?: string }[];
     debates?: {
       id: string;
@@ -184,6 +187,8 @@ export interface SyncApi {
       result?: string;
       command?: string;
       needsApproval?: boolean;
+      needsEditApproval?: boolean;
+      proposedEdits?: { path: string; previousContent: string; newContent: string }[];
       truncated?: boolean;
       autoContinued?: boolean;
       logs?: { command: string; exitCode?: number; output?: string; error?: string }[];
@@ -215,7 +220,8 @@ export interface SyncApi {
   getAiInlineCompletion(
     watcherId: string,
     session: string,
-    payload: { path: string; prefix: string; suffix: string; language?: string; model?: string }
+    payload: { path: string; prefix: string; suffix: string; language?: string; model?: string },
+    options?: { signal?: AbortSignal }
   ): Promise<{ completion: string }>;
 
   getRunnerConfig(watcherId: string, session: string): Promise<RunnerConfig | null>;
@@ -271,6 +277,8 @@ async function http<T>(path: string, init?: RequestInit): Promise<T> {
       "Content-Type": "application/json",
       ...(init?.headers || {})
     },
+    // FolderTree などで「更新しても変わらない」症状が出る場合に備えて、GET も含めキャッシュを避ける
+    cache: "no-store",
     ...init
   });
   if (!res.ok) {
@@ -418,12 +426,17 @@ class HttpSyncApi implements SyncApi {
   async listChildren(
     watcherId: string,
     session: string,
-    path: string
+    path: string,
+    options?: { source?: "relay" | "watcher" }
   ): Promise<FileEntry[]> {
+    const src = options?.source;
+    const q =
+      `path=${encodeURIComponent(path)}` +
+      (src ? `&source=${encodeURIComponent(src)}` : "");
     return http<FileEntry[]>(
       `/watchers/${encodeURIComponent(watcherId)}/sessions/${encodeURIComponent(
         session
-      )}/files/children?path=${encodeURIComponent(path)}`
+      )}/files/children?${q}`
     );
   }
 
@@ -676,8 +689,22 @@ class HttpSyncApi implements SyncApi {
       persona?: string;
     },
     options?: { signal?: AbortSignal }
-  ): Promise<{ result: string; command?: string; needsApproval?: boolean; logs?: { command: string; exitCode?: number; output?: string; error?: string }[] }> {
-    return http<{ result: string; command?: string; needsApproval?: boolean; logs?: { command: string; exitCode?: number; output?: string; error?: string }[] }>(
+  ): Promise<{
+    result: string;
+    command?: string;
+    needsApproval?: boolean;
+    needsEditApproval?: boolean;
+    proposedEdits?: { path: string; previousContent: string; newContent: string }[];
+    logs?: { command: string; exitCode?: number; output?: string; error?: string }[];
+  }> {
+    return http<{
+      result: string;
+      command?: string;
+      needsApproval?: boolean;
+      needsEditApproval?: boolean;
+      proposedEdits?: { path: string; previousContent: string; newContent: string }[];
+      logs?: { command: string; exitCode?: number; output?: string; error?: string }[];
+    }>(
       `/watchers/${encodeURIComponent(watcherId)}/sessions/${encodeURIComponent(session)}/ai-assist`,
       {
         method: "POST",
@@ -712,6 +739,8 @@ class HttpSyncApi implements SyncApi {
       result?: string;
       command?: string;
       needsApproval?: boolean;
+      needsEditApproval?: boolean;
+      proposedEdits?: { path: string; previousContent: string; newContent: string }[];
       truncated?: boolean;
       autoContinued?: boolean;
       logs?: { command: string; exitCode?: number; output?: string; error?: string }[];
@@ -807,13 +836,15 @@ class HttpSyncApi implements SyncApi {
   async getAiInlineCompletion(
     watcherId: string,
     session: string,
-    payload: { path: string; prefix: string; suffix: string; language?: string; model?: string }
+    payload: { path: string; prefix: string; suffix: string; language?: string; model?: string },
+    options?: { signal?: AbortSignal }
   ): Promise<{ completion: string }> {
     return http<{ completion: string }>(
       `/watchers/${encodeURIComponent(watcherId)}/sessions/${encodeURIComponent(session)}/ai-inline`,
       {
         method: "POST",
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
+        signal: options?.signal
       }
     );
   }

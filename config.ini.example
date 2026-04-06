@@ -33,3 +33,9 @@ relay_local_port = 8001
 #
 # モデルを載せるデバイス: cpu または gpu（未指定時は cpu）
 # device = cpu
+#
+# LLM への HTTP 待ち上限（秒）。長い推論・大きな出力では 1800 程度を推奨（既定 1800）。
+# llm_http_timeout = 1800
+#
+# AI チャット SSE のキープアライブ間隔（秒）。プロキシやトンネルのアイドル切断対策。0 以下で無効（既定 20）。
+# sse_keepalive_seconds = 20

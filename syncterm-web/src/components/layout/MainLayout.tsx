@@ -220,7 +220,7 @@ export const MainLayout: React.FC = () => {
                               flexDirection: "column"
                             }}
                           >
-                            <AiChatPanel />
+                            <AiChatPanel fallbackEditorPath={activeEditorPath} />
                           </div>
                         )}
                       </>
@@ -234,7 +234,7 @@ export const MainLayout: React.FC = () => {
                     ) : showGpuPanel ? (
                       <GpuStatusPanel />
                     ) : (
-                      <AiChatPanel />
+                      <AiChatPanel fallbackEditorPath={activeEditorPath} />
                     )}
                   </div>
                 </>

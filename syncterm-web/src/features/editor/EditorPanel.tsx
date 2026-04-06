@@ -27,6 +27,10 @@ interface EditorPanelProps {
   onCloseFile: (path: string) => void;
 }
 
+function normalizeSessionPathKey(p: string): string {
+  return p.replace(/\\/g, "/").replace(/^\/+/, "");
+}
+
 function getSetiIconClassForPath(path: string): string {
   const name = path.split("/").filter(Boolean).pop() ?? path;
   const lower = name.toLowerCase();
@@ -167,11 +171,14 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [loadingPath, setLoadingPath] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const inlineAbortRef = React.useRef<AbortController | null>(null);
+  const inlineLastReqAtRef = React.useRef<number>(0);
   const [saveBadge, setSaveBadge] = useState<"saved" | "error" | null>(null);
   const [editorInstance, setEditorInstance] = useState<MonacoEditorType.IStandaloneCodeEditor | null>(null);
   const [monacoInstance, setMonacoInstance] = useState<Monaco | null>(null);
   const inlineReqSeqRef = useRef(0);
-  const { setActiveEditorState, registerApplyToSelection, registerAppendAtCursor } = useActiveEditor();
+  const { setActiveEditorState, registerApplyToSelection, registerAppendAtCursor, registerFileAppliedFromAi } =
+    useActiveEditor();
   const isImageFile = !!filePath && isImagePath(filePath);
   const file = filePath ? filesByPath[filePath] ?? null : null;
   const filesByPathRef = useRef<Record<string, OpenFile>>({});
@@ -185,6 +192,34 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
     watcherIdRef.current = currentWatcher?.id;
     sessionNameRef.current = currentSession?.name;
   }, [filesByPath, filePath, currentWatcher?.id, currentSession?.name]);
+
+  useEffect(() => {
+    registerFileAppliedFromAi((savedPath, newContent) => {
+      const n = normalizeSessionPathKey(savedPath);
+      setFilesByPath((prev) => {
+        const key = Object.keys(prev).find((k) => normalizeSessionPathKey(k) === n);
+        if (!key) return prev;
+        const cur = prev[key];
+        return {
+          ...prev,
+          [key]: {
+            ...cur,
+            content: newContent,
+            isDirty: false,
+            isChunked: false,
+            hasMore: false,
+            nextOffset: undefined,
+            totalSize: undefined
+          }
+        };
+      });
+      const active = filePathRef.current;
+      if (active && normalizeSessionPathKey(active) === n) {
+        setActiveEditorState({ content: newContent });
+      }
+    });
+    return () => registerFileAppliedFromAi(null);
+  }, [registerFileAppliedFromAi, setActiveEditorState]);
 
   // watcher/session が変わったらタブキャッシュをクリア
   useEffect(() => {
@@ -283,6 +318,10 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
     setIsSaving(true);
     setSaveBadge(null);
     try {
+      // 保存を優先するため、inline completion の in-flight リクエストは中断
+      try {
+        inlineAbortRef.current?.abort();
+      } catch {}
       await api.saveFileContent(watcherId, sessionName, activeFile.path, contentToSave);
       setFilesByPath((prev) => ({
         ...prev,
@@ -468,6 +507,13 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
         _token: unknown
       ) => {
         if (disposed || file.isChunked) return { items: [] };
+        if (isSaving) return { items: [] };
+
+        // 貼り付け直後などの連打を抑制
+        const now = Date.now();
+        if (now - inlineLastReqAtRef.current < 800) return { items: [] };
+        inlineLastReqAtRef.current = now;
+
         const prefix = m.getValueInRange(
           new monacoInstance.Range(1, 1, position.lineNumber, position.column)
         );
@@ -480,21 +526,35 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
           )
         );
         if (prefix.trim().length < 2) return { items: [] };
+
+        // 大きすぎるコンテキストは送らない（貼り付けで prefixLen が激増して詰まるのを防ぐ）
+        const MAX_PREFIX = 2200;
+        const MAX_SUFFIX = 800;
+        const prefixTrimmed = prefix.length > MAX_PREFIX ? prefix.slice(-MAX_PREFIX) : prefix;
+        const suffixTrimmed = suffix.length > MAX_SUFFIX ? suffix.slice(0, MAX_SUFFIX) : suffix;
+
         const reqId = ++inlineReqSeqRef.current;
         const log = import.meta.env?.DEV ? console.log : () => {};
         try {
-          log("[inline] requesting", { path: file.path, prefixLen: prefix.length });
+          // in-flight をキャンセルして最新のみ残す
+          try {
+            inlineAbortRef.current?.abort();
+          } catch {}
+          const ctrl = new AbortController();
+          inlineAbortRef.current = ctrl;
+
+          log("[inline] requesting", { path: file.path, prefixLen: prefixTrimmed.length });
           const model = getStoredAiModel(currentWatcher.id, currentSession.name) ?? undefined;
           const out = await api.getAiInlineCompletion(currentWatcher.id, currentSession.name, {
             path: file.path,
-            prefix,
-            suffix,
+            prefix: prefixTrimmed,
+            suffix: suffixTrimmed,
             language,
             model
-          });
+          }, { signal: ctrl.signal });
           if (disposed || reqId !== inlineReqSeqRef.current) return { items: [] };
           const raw = (out.completion || "").trim();
-          const text = sanitizeInlineCompletion(raw, prefix);
+          const text = sanitizeInlineCompletion(raw, prefixTrimmed);
           if (!text) {
             if (raw && import.meta.env?.DEV) console.warn("[inline] sanitize dropped", { raw: raw.slice(0, 80) });
             return { items: [] };
@@ -535,6 +595,7 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
   // Trigger inline suggestions after typing so ghost text appears.
   useEffect(() => {
     if (!editorInstance || !file || file.isChunked) return;
+    if (isSaving) return;
     const model = editorInstance.getModel();
     if (!model) return;
 
@@ -552,7 +613,7 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
       if (timer) clearTimeout(timer);
       disposable.dispose();
     };
-  }, [editorInstance, file?.path, file?.isChunked]);
+  }, [editorInstance, file?.path, file?.isChunked, isSaving]);
 
   // Prevent tooltip text from blocking clicks on find-widget close button.
   useEffect(() => {
@@ -591,7 +652,7 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
     lineNumbers: preferences.editorLineNumbers ? "on" : "off",
     smoothScrolling: true,
     tabCompletion: "on",
-    inlineSuggest: { enabled: true },
+    inlineSuggest: { enabled: !isSaving },
     quickSuggestions: { other: true, comments: false, strings: true },
     suggestOnTriggerCharacters: true,
     acceptSuggestionOnCommitCharacter: true,
