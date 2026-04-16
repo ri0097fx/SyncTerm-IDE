@@ -1,4 +1,10 @@
 import type {
+  ExtensionApiInstalledResponse,
+  ExtensionApiListResponse,
+  ExtensionApiSessionStateResponse,
+  ExtensionCatalogEntry,
+  ExtensionInstallState,
+  ExtensionSessionState,
   FileEntry,
   RunnerConfig,
   SessionInfo,
@@ -117,6 +123,21 @@ export interface SyncApi {
     path: string,
     signal?: AbortSignal
   ): Promise<Blob>;
+  listExtensionCatalog(): Promise<ExtensionApiListResponse>;
+  listInstalledExtensions(): Promise<ExtensionApiInstalledResponse>;
+  installExtension(extensionId: string): Promise<{ apiVersion: number; ok: boolean; item?: ExtensionInstallState }>;
+  uninstallExtension(extensionId: string): Promise<{ apiVersion: number; ok: boolean; removed: boolean }>;
+  getSessionExtensionState(watcherId: string, session: string): Promise<ExtensionApiSessionStateResponse>;
+  enableSessionExtension(
+    watcherId: string,
+    session: string,
+    extensionId: string
+  ): Promise<{ apiVersion: number; ok: boolean; state: ExtensionSessionState }>;
+  disableSessionExtension(
+    watcherId: string,
+    session: string,
+    extensionId: string
+  ): Promise<{ apiVersion: number; ok: boolean; state: ExtensionSessionState }>;
   getAiModels(watcherId: string, session: string): Promise<{ installed: string[]; suggested: string[]; recommended?: string[]; provider?: string }>;
   ensureAiModel(watcherId: string, session: string, model: string): Promise<{ ok: boolean }>;
   /** モデル pull の進捗をストリーム。onProgress に { status, percent?, error? } が渡る。*/
@@ -587,12 +608,77 @@ class HttpSyncApi implements SyncApi {
     const ctrl = new AbortController();
     const timeoutId = setTimeout(() => ctrl.abort(), 28000);
     try {
-      const res = await fetch(url, { signal: signal ?? ctrl.signal });
+      const res = await fetch(url, { signal: signal ?? ctrl.signal, cache: "no-store" });
       if (!res.ok) throw new Error(`file-raw ${res.status}`);
       return res.blob();
     } finally {
       clearTimeout(timeoutId);
     }
+  }
+
+  async listExtensionCatalog(): Promise<ExtensionApiListResponse> {
+    const data = await http<{ apiVersion: number; items: ExtensionCatalogEntry[] }>("/extensions/catalog");
+    return {
+      apiVersion: data.apiVersion ?? 1,
+      items: Array.isArray(data.items) ? data.items : []
+    };
+  }
+
+  async listInstalledExtensions(): Promise<ExtensionApiInstalledResponse> {
+    const data = await http<{ apiVersion: number; items: ExtensionInstallState[] }>("/extensions/installed");
+    return {
+      apiVersion: data.apiVersion ?? 1,
+      items: Array.isArray(data.items) ? data.items : []
+    };
+  }
+
+  async installExtension(extensionId: string): Promise<{ apiVersion: number; ok: boolean; item?: ExtensionInstallState }> {
+    return http<{ apiVersion: number; ok: boolean; item?: ExtensionInstallState }>("/extensions/install", {
+      method: "POST",
+      body: JSON.stringify({ extensionId })
+    });
+  }
+
+  async uninstallExtension(extensionId: string): Promise<{ apiVersion: number; ok: boolean; removed: boolean }> {
+    return http<{ apiVersion: number; ok: boolean; removed: boolean }>("/extensions/uninstall", {
+      method: "POST",
+      body: JSON.stringify({ extensionId })
+    });
+  }
+
+  async getSessionExtensionState(
+    watcherId: string,
+    session: string
+  ): Promise<ExtensionApiSessionStateResponse> {
+    const data = await http<{ apiVersion: number; state: ExtensionSessionState }>(
+      `/watchers/${encodeURIComponent(watcherId)}/sessions/${encodeURIComponent(session)}/extensions/state`
+    );
+    return {
+      apiVersion: data.apiVersion ?? 1,
+      state: data.state ?? { sessionKey: `${watcherId}/${session}`, enabled: {}, order: [], updatedAt: Date.now() / 1000 }
+    };
+  }
+
+  async enableSessionExtension(
+    watcherId: string,
+    session: string,
+    extensionId: string
+  ): Promise<{ apiVersion: number; ok: boolean; state: ExtensionSessionState }> {
+    return http<{ apiVersion: number; ok: boolean; state: ExtensionSessionState }>(
+      `/watchers/${encodeURIComponent(watcherId)}/sessions/${encodeURIComponent(session)}/extensions/enable`,
+      { method: "POST", body: JSON.stringify({ extensionId }) }
+    );
+  }
+
+  async disableSessionExtension(
+    watcherId: string,
+    session: string,
+    extensionId: string
+  ): Promise<{ apiVersion: number; ok: boolean; state: ExtensionSessionState }> {
+    return http<{ apiVersion: number; ok: boolean; state: ExtensionSessionState }>(
+      `/watchers/${encodeURIComponent(watcherId)}/sessions/${encodeURIComponent(session)}/extensions/disable`,
+      { method: "POST", body: JSON.stringify({ extensionId }) }
+    );
   }
 
   async getAiModels(

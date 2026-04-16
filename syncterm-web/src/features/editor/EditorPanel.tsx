@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import MonacoEditor from "@monaco-editor/react";
 import type { Monaco } from "@monaco-editor/react";
 import type { editor as MonacoEditorType, IDisposable } from "monaco-editor";
@@ -9,6 +9,7 @@ import { isImagePath } from "../../lib/fileType";
 import { detectEditorLanguage, INLINE_COMPLETION_LANGUAGES } from "../../lib/editorLanguage";
 import { usePreferences } from "../preferences/PreferencesContext";
 import { useActiveEditor } from "./ActiveEditorContext";
+import { ExtensionPanelHost } from "../extensions/ExtensionPanelHost";
 
 interface OpenFile {
   path: string;
@@ -20,11 +21,23 @@ interface OpenFile {
   totalSize?: number;
 }
 
+interface DockedPanel {
+  extensionId: string;
+  id: string;
+  title: string;
+  model?: unknown;
+}
+
 interface EditorPanelProps {
   filePath: string | null;
   openFilePaths: string[];
+  treeReopenTick?: number;
   onSelectFile: (path: string) => void;
   onCloseFile: (path: string) => void;
+  dockedPanels?: DockedPanel[];
+  activeDockedPanelId?: string | null;
+  onSelectDockedPanel?: (panelId: string | null) => void;
+  onToggleDock?: (panelId: string) => void;
 }
 
 function normalizeSessionPathKey(p: string): string {
@@ -72,37 +85,55 @@ function getSetiIconClassForPath(path: string): string {
 }
 
 function configureMonacoThemes(monaco: Monaco) {
-  monaco.editor.defineTheme("spyder-dark-bright", {
-    base: "vs-dark",
-    inherit: false,
-    rules: [
+  const sharedRules = [
       { token: "", foreground: "F5F7FA" },
       { token: "comment", foreground: "9AA7B0" },
       { token: "keyword", foreground: "C577F1" },
       { token: "keyword.operator.logical", foreground: "C577F1" },
       { token: "keyword.operator.word", foreground: "C577F1" },
+      { token: "keyword.control", foreground: "C577F1" },
       { token: "operator", foreground: "FFFFFF" },
       { token: "delimiter", foreground: "FFFFFF" },
+      { token: "brackets", foreground: "FFFFFF" },
+      { token: "delimiter.bracket", foreground: "FFFFFF" },
+      { token: "delimiter.parenthesis", foreground: "FFFFFF" },
+      { token: "delimiter.square", foreground: "FFFFFF" },
+      { token: "delimiter.curly", foreground: "FFFFFF" },
+      { token: "delimiter.bracket.python", foreground: "FFFFFF" },
+      { token: "delimiter.parenthesis.python", foreground: "FFFFFF" },
+      { token: "delimiter.square.python", foreground: "FFFFFF" },
+      { token: "delimiter.curly.python", foreground: "FFFFFF" },
       { token: "punctuation", foreground: "FFFFFF" },
       { token: "string", foreground: "B2F187", fontStyle: "italic" },
       { token: "string.escape", foreground: "B2F187" },
       { token: "string.interpolated", foreground: "B2F187" },
       { token: "number", foreground: "FFDD1A" },
       { token: "regexp", foreground: "B2F187" },
-      { token: "type", foreground: "5CE1FA" },
+      { token: "type", foreground: "F5F7FA" },
+      { token: "type.defaultLibrary", foreground: "F5F7FA" },
       { token: "class", foreground: "5CE1FA", fontStyle: "bold" },
+      { token: "entity.name.type", foreground: "5CE1FA", fontStyle: "bold" },
+      // def func(): の関数名は明るい水色
       { token: "function", foreground: "5CE1FA", fontStyle: "bold" },
+      { token: "entity.name.function", foreground: "5CE1FA", fontStyle: "bold" },
+      { token: "function.defaultLibrary", foreground: "E1A66E" },
+      { token: "support.function", foreground: "E1A66E" },
+      { token: "support.function.builtin", foreground: "E1A66E" },
+      { token: "constant.language", foreground: "E1A66E" },
+      { token: "constant.language.boolean", foreground: "E1A66E" },
       { token: "variable", foreground: "F5F7FA" },
       { token: "variable.readonly", foreground: "F5F7FA" },
       { token: "parameter", foreground: "F5F7FA" },
       { token: "property", foreground: "F5F7FA" },
+      { token: "identifier", foreground: "F5F7FA" },
       { token: "constant", foreground: "E1A66E" },
       { token: "predefined", foreground: "E1A66E" },
-      { token: "decorator", foreground: "F57380", fontStyle: "italic" }
-    ],
-    colors: {
-      "editor.background": "#19232D",
-      "editor.foreground": "#F5F7FA",
+      { token: "decorator", foreground: "F57380", fontStyle: "italic" },
+      { token: "tag", foreground: "F57380", fontStyle: "italic" },
+      { token: "variable.language.self", foreground: "F57380", fontStyle: "italic" },
+      { token: "variable.language.self.python", foreground: "F57380", fontStyle: "italic" }
+  ];
+  const sharedColors = {
       "editorLineNumber.foreground": "#9AA7B0",
       "editorLineNumber.activeForeground": "#F5F7FA",
       "editor.lineHighlightBackground": "#22303D",
@@ -110,11 +141,189 @@ function configureMonacoThemes(monaco: Monaco) {
       "editor.selectionBackground": "#2F587A",
       "editor.selectionForeground": "#FFFFFF",
       "editor.inactiveSelectionBackground": "#2F587A99",
-      "editorCursor.foreground": "#FFFFFF",
-      "editorBracketMatch.background": "#2F587A55",
-      "editorBracketMatch.border": "#41515E"
+      "editorCursor.foreground": "#00E5FF",
+      "editorCursor.background": "#00E5FF",
+      "editor.selectionHighlightBackground": "#00000000",
+      "editor.selectionHighlightBorder": "#00000000",
+      "editor.wordHighlightBackground": "#00000000",
+      "editor.wordHighlightStrongBackground": "#00000000",
+      "editor.wordHighlightBorder": "#00000000",
+      "editor.wordHighlightStrongBorder": "#00000000",
+      // 括弧色が token ルールよりこちらで上書きされるケースがあるため、BracketHighlight 側も白で統一
+      "editorBracketHighlight.foreground1": "#FFFFFF",
+      "editorBracketHighlight.foreground2": "#FFFFFF",
+      "editorBracketHighlight.foreground3": "#FFFFFF",
+      "editorBracketHighlight.foreground4": "#FFFFFF",
+      "editorBracketHighlight.foreground5": "#FFFFFF",
+      "editorBracketHighlight.foreground6": "#FFFFFF",
+      "editorBracketHighlight.unexpectedBracket.foreground": "#E47C7C",
+      "editorBracketMatch.background": "#00000000",
+      "editorBracketMatch.border": "#00000000"
+  };
+
+  monaco.editor.defineTheme("syncterm-dark-bright", {
+    base: "vs-dark",
+    inherit: true,
+    rules: sharedRules,
+    colors: {
+      ...sharedColors,
+      "editor.background": "#0F172A",
+      "editor.foreground": "#F5F7FA",
     }
   });
+
+  monaco.editor.defineTheme("syncterm-light-bright", {
+    base: "vs",
+    inherit: true,
+    rules: sharedRules,
+    colors: {
+      ...sharedColors,
+      "editor.background": "#FFFFFF",
+      "editor.foreground": "#0F172A",
+      "editorLineNumber.foreground": "#64748B",
+      "editorLineNumber.activeForeground": "#0F172A",
+      "editor.lineHighlightBackground": "#E2E8F0",
+      "editor.selectionBackground": "#BFDBFE",
+      "editor.inactiveSelectionBackground": "#DBEAFE",
+      "editorBracketMatch.background": "#00000000",
+      "editorBracketMatch.border": "#00000000"
+    }
+  });
+
+  monaco.editor.defineTheme("spyder-dark-bright", {
+    base: "vs-dark",
+    inherit: true,
+    rules: [
+      ...sharedRules
+    ],
+    colors: {
+      ...sharedColors,
+      "editor.background": "#19232D",
+      "editor.foreground": "#F5F7FA"
+    }
+  });
+
+  const builtinNames = [
+    "abs", "all", "any", "bool", "bytearray", "bytes", "callable", "chr", "dict", "dir",
+    "enumerate", "filter", "float", "format", "frozenset", "getattr", "hasattr", "hash", "hex",
+    "id", "input", "int", "isinstance", "issubclass", "iter", "len", "list", "map", "max", "memoryview",
+    "min", "next", "object", "oct", "open", "ord", "pow", "print", "property", "range", "repr",
+    "reversed", "round", "set", "setattr", "slice", "sorted", "staticmethod", "str", "sum", "super",
+    "tuple", "type", "vars", "zip"
+  ];
+  const selfLikeNames = ["self", "cls"];
+  const booleanLiterals = ["True", "False"];
+  const pythonKeywords = [
+    "None", "_", "and", "as", "assert", "async", "await", "break", "case", "class", "continue", "def",
+    "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import", "in", "is",
+    "lambda", "match", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while", "with", "yield"
+  ];
+  const pythonTokenizerRoot: any[] = [
+    { include: "@whitespace" },
+    { include: "@numbers" },
+    { include: "@strings" },
+    [/\b(async)(\s+)(def)(\s+)([a-zA-Z_]\w*)/, ["keyword", "white", "keyword", "white", "entity.name.function"]],
+    [/\b(def)(\s+)([a-zA-Z_]\w*)/, ["keyword", "white", "entity.name.function"]],
+    [/\b(class)(\s+)([a-zA-Z_]\w*)/, ["keyword", "white", "entity.name.type"]],
+    [/[,:;]/, "delimiter"],
+    [/[{}\[\]()]/, "@brackets"],
+    [/@[a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)*/, "decorator"],
+    [
+      /[a-zA-Z_]\w*/,
+      {
+        cases: {
+          "_": "identifier",
+          "@selfLikeNames": "variable.language.self",
+          "@booleanLiterals": "constant.language.boolean",
+          "@builtins": "support.function.builtin",
+          "@keywords": "keyword",
+          "@default": "identifier"
+        }
+      }
+    ]
+  ];
+  monaco.languages.setMonarchTokensProvider("python", {
+    defaultToken: "",
+    tokenPostfix: ".python",
+    keywords: pythonKeywords,
+    builtins: builtinNames,
+    selfLikeNames,
+    booleanLiterals,
+    brackets: [
+      { open: "{", close: "}", token: "delimiter.curly" },
+      { open: "[", close: "]", token: "delimiter.bracket" },
+      { open: "(", close: ")", token: "delimiter.parenthesis" }
+    ],
+    tokenizer: {
+      root: pythonTokenizerRoot,
+      whitespace: [
+        [/\s+/, "white"],
+        [/(^#.*$)/, "comment"],
+        [/'''/, "string", "@endDocString"],
+        [/"""/, "string", "@endDblDocString"]
+      ],
+      endDocString: [
+        [/[^']+/, "string"],
+        [/\\'/, "string"],
+        [/'''/, "string", "@popall"],
+        [/'/, "string"]
+      ],
+      endDblDocString: [
+        [/[^"]+/, "string"],
+        [/\\"/, "string"],
+        [/"""/, "string", "@popall"],
+        [/"/, "string"]
+      ],
+      numbers: [
+        [/-?0x([abcdef]|[ABCDEF]|\d)+[lL]?/, "number.hex"],
+        [/-?(\d*\.)?\d+([eE][+\-]?\d+)?[jJ]?[lL]?/, "number"]
+      ],
+      strings: [
+        [/'$/, "string.escape", "@popall"],
+        [/f'{1,3}/, "string.escape", "@fStringBody"],
+        [/'/, "string.escape", "@stringBody"],
+        [/"$/, "string.escape", "@popall"],
+        [/f"{1,3}/, "string.escape", "@fDblStringBody"],
+        [/"/, "string.escape", "@dblStringBody"]
+      ],
+      fStringBody: [
+        [/[^\\'\{\}]+$/, "string", "@popall"],
+        [/[^\\'\{\}]+/, "string"],
+        // `{` の直後で `'` にぶつかって分割されると色が崩れるため、`{` だけで式状態へ入り `}` まで一括で string 扱い
+        [/\{/, "string", "@fStringExpr"],
+        [/\\./, "string"],
+        [/'/, "string.escape", "@popall"],
+        [/\\$/, "string"]
+      ],
+      stringBody: [
+        [/[^\\']+$/, "string", "@popall"],
+        [/[^\\']+/, "string"],
+        [/\\./, "string"],
+        [/'/, "string.escape", "@popall"],
+        [/\\$/, "string"]
+      ],
+      fDblStringBody: [
+        [/[^\\"\{\}]+$/, "string", "@popall"],
+        [/[^\\"\{\}]+/, "string"],
+        [/\{/, "string", "@fStringExpr"],
+        [/\\./, "string"],
+        [/"/, "string.escape", "@popall"],
+        [/\\$/, "string"]
+      ],
+      dblStringBody: [
+        [/[^\\"]+$/, "string", "@popall"],
+        [/[^\\"]+/, "string"],
+        [/\\./, "string"],
+        [/"/, "string.escape", "@popall"],
+        [/\\$/, "string"]
+      ],
+      // f-string 補間 `{ ... }` 内は全体を文字列色に統一（`log['key']` などの内側クォートも含む）
+      fStringExpr: [
+        [/[^}]+/, "string"],
+        [/\}/, "string", "@pop"]
+      ]
+    }
+  } as any);
 }
 
 function trimEchoedPrefix(prefix: string, completion: string): string {
@@ -162,8 +371,13 @@ function sanitizeInlineCompletion(raw: string, prefix: string): string {
 export const EditorPanel: React.FC<EditorPanelProps> = ({
   filePath,
   openFilePaths,
+  treeReopenTick = 0,
   onSelectFile,
-  onCloseFile
+  onCloseFile,
+  dockedPanels = [],
+  activeDockedPanelId = null,
+  onSelectDockedPanel,
+  onToggleDock
 }) => {
   const { currentWatcher, currentSession } = useSession();
   const { preferences } = usePreferences();
@@ -177,6 +391,7 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
   const [editorInstance, setEditorInstance] = useState<MonacoEditorType.IStandaloneCodeEditor | null>(null);
   const [monacoInstance, setMonacoInstance] = useState<Monaco | null>(null);
   const inlineReqSeqRef = useRef(0);
+  const lastHandledTreeReopenByPathRef = useRef<Record<string, number>>({});
   const { setActiveEditorState, registerApplyToSelection, registerAppendAtCursor, registerFileAppliedFromAi } =
     useActiveEditor();
   const isImageFile = !!filePath && isImagePath(filePath);
@@ -291,6 +506,81 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
     };
     void load();
   }, [currentWatcher, currentSession, filePath, file]);
+
+  const reloadCurrentFileFromServer = useCallback(async (ifDirty: "skip" | "confirm") => {
+    const w = watcherIdRef.current;
+    const s = sessionNameRef.current;
+    const path = filePathRef.current;
+    if (!w || !s || !path || isImagePath(path)) return;
+    const cur = filesByPathRef.current[path];
+    if (!cur) return;
+    if (cur.isDirty) {
+      if (ifDirty === "skip") return;
+      if (!window.confirm("未保存の変更を破棄してディスクから再読み込みしますか？")) return;
+    }
+    setError(null);
+    setLoadingPath(path);
+    try {
+      if (cur.isChunked) {
+        const first = await api.fetchFileChunk(w, s, path, 0);
+        setFilesByPath((prev) => ({
+          ...prev,
+          [path]: {
+            path,
+            content: first.content,
+            isDirty: false,
+            isChunked: true,
+            nextOffset: first.nextOffset,
+            hasMore: first.hasMore,
+            totalSize: first.totalSize
+          }
+        }));
+      } else {
+        try {
+          const content = await api.fetchFileContent(w, s, path);
+          setFilesByPath((prev) => ({
+            ...prev,
+            [path]: { path, content, isDirty: false, isChunked: false }
+          }));
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : "";
+          if (msg.includes("HTTP 413")) {
+            const first = await api.fetchFileChunk(w, s, path, 0);
+            setFilesByPath((prev) => ({
+              ...prev,
+              [path]: {
+                path,
+                content: first.content,
+                isDirty: false,
+                isChunked: true,
+                nextOffset: first.nextOffset,
+                hasMore: first.hasMore,
+                totalSize: first.totalSize
+              }
+            }));
+          } else {
+            throw e;
+          }
+        }
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "再読み込みに失敗しました");
+    } finally {
+      setLoadingPath((prev) => (prev === path ? null : prev));
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!filePath) return;
+    if (!treeReopenTick) {
+      lastHandledTreeReopenByPathRef.current[filePath] = 0;
+      return;
+    }
+    const prev = lastHandledTreeReopenByPathRef.current[filePath] ?? 0;
+    if (treeReopenTick <= prev) return;
+    lastHandledTreeReopenByPathRef.current[filePath] = treeReopenTick;
+    void reloadCurrentFileFromServer("skip");
+  }, [filePath, treeReopenTick, reloadCurrentFileFromServer]);
 
   const handleChange = (value: string | undefined) => {
     if (!filePath) return;
@@ -494,6 +784,7 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
 
   // AI inline completion provider (ghost text). 複数言語に登録して言語不一致で呼ばれないことを防ぐ。
   useEffect(() => {
+    if (!preferences.showAiChatPanel) return;
     if (!editorInstance || !monacoInstance || !file || !currentWatcher || !currentSession) return;
     const model = editorInstance.getModel();
     if (!model) return;
@@ -590,10 +881,11 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
       disposed = true;
       disposables.forEach((d) => d.dispose());
     };
-  }, [editorInstance, monacoInstance, file?.path, file?.isChunked, currentWatcher?.id, currentSession?.name]);
+  }, [editorInstance, monacoInstance, file?.path, file?.isChunked, currentWatcher?.id, currentSession?.name, preferences.showAiChatPanel]);
 
   // Trigger inline suggestions after typing so ghost text appears.
   useEffect(() => {
+    if (!preferences.showAiChatPanel) return;
     if (!editorInstance || !file || file.isChunked) return;
     if (isSaving) return;
     const model = editorInstance.getModel();
@@ -613,7 +905,7 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
       if (timer) clearTimeout(timer);
       disposable.dispose();
     };
-  }, [editorInstance, file?.path, file?.isChunked, isSaving]);
+  }, [editorInstance, file?.path, file?.isChunked, isSaving, preferences.showAiChatPanel]);
 
   // Prevent tooltip text from blocking clicks on find-widget close button.
   useEffect(() => {
@@ -652,7 +944,7 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
     lineNumbers: preferences.editorLineNumbers ? "on" : "off",
     smoothScrolling: true,
     tabCompletion: "on",
-    inlineSuggest: { enabled: !isSaving },
+    inlineSuggest: { enabled: preferences.showAiChatPanel && !isSaving },
     quickSuggestions: { other: true, comments: false, strings: true },
     suggestOnTriggerCharacters: true,
     acceptSuggestionOnCommitCharacter: true,
@@ -661,51 +953,81 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
     renderLineHighlight: "line",
     automaticLayout: true,
     scrollBeyondLastLine: false,
-    bracketPairColorization: { enabled: false },
+    selectionHighlight: false,
+    occurrencesHighlight: "off",
+    cursorStyle: "line",
+    overtypeCursorStyle: "line",
+    // line-thin では幅指定が効きにくいため line + 幅広で固定
+    cursorWidth: 2,
+    bracketPairColorization: { enabled: true },
     guides: { bracketPairs: false }
   } as any;
 
-  if (preferences.editorTheme === "spyder") {
-    monacoOptions["semanticHighlighting.enabled"] = true;
-  }
+  // semantic token が優先されると独自トークン色が反映されにくいため無効化
+  monacoOptions["semanticHighlighting.enabled"] = false;
+
+  useEffect(() => {
+    if (!monacoInstance) return;
+    configureMonacoThemes(monacoInstance);
+    const nextTheme =
+      preferences.editorTheme === "spyder"
+        ? "spyder-dark-bright"
+        : preferences.editorTheme === "vs-light"
+        ? "syncterm-light-bright"
+        : "syncterm-dark-bright";
+    monacoInstance.editor.setTheme(nextTheme);
+  }, [monacoInstance, preferences.editorTheme]);
 
   return (
     <div className="pane pane-right">
       <div className="pane-header">
         <span className="pane-title">
-          Editor {file ? ` — ${file.path}${file.isDirty ? " *" : ""}` : ""}
+          {activeDockedPanelId
+            ? (dockedPanels.find((p) => p.id === activeDockedPanelId)?.title ?? "Extension")
+            : <>Editor {file ? ` — ${file.path}${file.isDirty ? " *" : ""}` : ""}</>}
         </span>
-        <div className="pane-header-actions">
-          {saveBadge && (
-            <span className={`save-badge ${saveBadge === "saved" ? "ok" : "ng"}`}>
-              {saveBadge === "saved" ? "Saved" : "Save failed"}
-            </span>
-          )}
-          <button
-            className="primary-button"
-            disabled={!file || !!file.isChunked || isImageFile || isSaving}
-            onClick={handleSave}
-            title={file?.isChunked ? "Chunkモードでは保存できません" : isImageFile ? "画像は右側プレビューペインで表示されます" : "保存"}
-          >
-            {isSaving ? "Saving..." : "Save"}
-          </button>
-          {file?.isChunked && (
+        {!activeDockedPanelId && (
+          <div className="pane-header-actions">
+            {saveBadge && (
+              <span className={`save-badge ${saveBadge === "saved" ? "ok" : "ng"}`}>
+                {saveBadge === "saved" ? "Saved" : "Save failed"}
+              </span>
+            )}
+            <button
+              type="button"
+              className="primary-button"
+              disabled={!file || isImageFile || loadingPath === filePath}
+              onClick={() => void reloadCurrentFileFromServer("confirm")}
+              title="ディスク上の内容を再取得（未保存の変更がある場合は確認します）"
+            >
+              再読み込み
+            </button>
             <button
               className="primary-button"
-              disabled={!file.hasMore}
-              onClick={handleLoadMore}
-              title="次のチャンクを読み込む"
+              disabled={!file || !!file.isChunked || isImageFile || isSaving}
+              onClick={handleSave}
+              title={file?.isChunked ? "Chunkモードでは保存できません" : isImageFile ? "画像は右側プレビューペインで表示されます" : "保存"}
             >
-              Load More
+              {isSaving ? "Saving..." : "Save"}
             </button>
-          )}
-        </div>
+            {file?.isChunked && (
+              <button
+                className="primary-button"
+                disabled={!file.hasMore}
+                onClick={handleLoadMore}
+                title="次のチャンクを読み込む"
+              >
+                Load More
+              </button>
+            )}
+          </div>
+        )}
       </div>
       <div className="pane-body editor-body">
-        {openFilePaths.length > 0 && (
+        {(openFilePaths.length > 0 || dockedPanels.length > 0) && (
           <div className="editor-tabs">
             {openFilePaths.map((path) => {
-              const isActive = path === filePath;
+              const isActive = path === filePath && !activeDockedPanelId;
               const name = path.split("/").filter(Boolean).pop() ?? path;
               const iconClass = getSetiIconClassForPath(path);
               return (
@@ -713,7 +1035,7 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
                   key={path}
                   type="button"
                   className={`editor-tab${isActive ? " active" : ""}`}
-                  onClick={() => onSelectFile(path)}
+                  onClick={() => { onSelectDockedPanel?.(null); onSelectFile(path); }}
                   title={path}
                 >
                   {!isImagePath(path) && (
@@ -735,9 +1057,41 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
                 </button>
               );
             })}
+            {dockedPanels.length > 0 && openFilePaths.length > 0 && (
+              <span className="editor-tab-separator" />
+            )}
+            {dockedPanels.map((panel) => {
+              const isActive = activeDockedPanelId === panel.id;
+              return (
+                <button
+                  key={`ext:${panel.id}`}
+                  type="button"
+                  className={`editor-tab editor-tab-ext${isActive ? " active" : ""}`}
+                  onClick={() => onSelectDockedPanel?.(panel.id)}
+                  title={`Extension: ${panel.title}`}
+                >
+                  <span className="editor-tab-icon editor-tab-ext-icon">
+                    <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M3 2h10v12H3V2z" stroke="currentColor" strokeWidth="1.2"/><path d="M6 5h4M6 8h4M6 11h2" stroke="currentColor" strokeWidth="1" strokeLinecap="round"/></svg>
+                  </span>
+                  <span className="editor-tab-label">{panel.title}</span>
+                  <span
+                    className="editor-tab-close"
+                    onClick={(e) => { e.stopPropagation(); onToggleDock?.(panel.id); }}
+                    aria-label={`Undock ${panel.title}`}
+                    title="Move back to Preview"
+                  >
+                    ×
+                  </span>
+                </button>
+              );
+            })}
           </div>
         )}
-        {file ? (
+        {activeDockedPanelId ? (
+          <div className="editor-ext-content">
+            <ExtensionPanelHost panelId={activeDockedPanelId} isDockedToEditor onToggleDock={() => onToggleDock?.(activeDockedPanelId)} />
+          </div>
+        ) : file ? (
           <>
             {file.isChunked && (
               <div className="pane-empty" style={{ paddingTop: 0 }}>
@@ -750,7 +1104,13 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
               className="editor-monaco"
               language={detectEditorLanguage(file.path)}
               beforeMount={configureMonacoThemes}
-              theme={preferences.editorTheme === "spyder" ? "spyder-dark-bright" : preferences.editorTheme}
+              theme={
+                preferences.editorTheme === "spyder"
+                  ? "spyder-dark-bright"
+                  : preferences.editorTheme === "vs-light"
+                  ? "syncterm-light-bright"
+                  : "syncterm-dark-bright"
+              }
               value={file.content}
               onChange={(value) => handleChange(value)}
               onMount={(editor, monaco) => {

@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState } from "react";
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import type { RunnerConfig, SessionInfo, WatcherInfo } from "../../types/domain";
 import { api } from "../../lib/api";
 
@@ -94,28 +94,36 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     void loadRunner();
   }, [currentWatcherId, currentSessionName]);
 
-  const currentWatcher = watchers.find((w) => w.id === currentWatcherId);
-  const currentSession = sessions.find(
-    (s) => s.watcherId === currentWatcherId && s.name === currentSessionName
+  const currentWatcher = useMemo(
+    () => watchers.find((w) => w.id === currentWatcherId),
+    [watchers, currentWatcherId],
+  );
+  const currentSession = useMemo(
+    () => sessions.find((s) => s.watcherId === currentWatcherId && s.name === currentSessionName),
+    [sessions, currentWatcherId, currentSessionName],
   );
 
-  const value: SessionState = {
+  const setWatcher = useCallback((id: string) => {
+    setCurrentWatcherId(id);
+    setCurrentSessionName(undefined);
+  }, []);
+
+  const setSession = useCallback((name: string) => setCurrentSessionName(name), []);
+
+  const refreshWatchers = useCallback(() => { void loadWatchers(); }, []);
+
+  const value = useMemo<SessionState>(() => ({
     watchers,
     sessions,
     currentWatcher,
     currentSession,
     runnerConfig,
     loading,
-    setWatcher: (id) => {
-      setCurrentWatcherId(id);
-      setCurrentSessionName(undefined);
-    },
-    setSession: (name) => setCurrentSessionName(name),
-    refreshWatchers: () => {
-      void loadWatchers();
-    },
-    refreshSessions
-  };
+    setWatcher,
+    setSession,
+    refreshWatchers,
+    refreshSessions,
+  }), [watchers, sessions, currentWatcher, currentSession, runnerConfig, loading, setWatcher, setSession, refreshWatchers, refreshSessions]);
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
 };

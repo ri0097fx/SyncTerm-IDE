@@ -1,0 +1,789 @@
+[
+  {
+    "manifest": {
+      "id": "devtools.json-lab",
+      "name": "JSON Lab",
+      "version": "0.3.0",
+      "publisher": "syncterm",
+      "description": "JSON整形/検証/履歴スロット付きの実用JSONワークベンチ。",
+      "longDescription": "Format/Minify/Sort/Validateを切り替え、サンプルスロットと履歴を使ってAPI payloadを素早く検証できるJSONユーティリティ。",
+      "categories": ["DevTools"],
+      "tags": ["json", "formatter", "developer"],
+      "icon": "JS",
+      "previewTitle": "実パネル相当: JSONワークベンチ（検証・履歴）",
+      "previewBullets": [
+        "Format / Minify / Sort / Validate を即時実行",
+        "3つのサンプルスロットを切替",
+        "操作前データを履歴として保持"
+      ],
+      "previewMock": [
+        "slot:2 valid:yes history:4",
+        "Validation: OK",
+        "{ \"api\":\"v1\", \"ok\":true }"
+      ],
+      "repository": null,
+      "runtime": "sandbox-runtime",
+      "permissions": ["storage"],
+      "entry": "builtin:devtools.json-lab",
+      "activationEvents": ["onCommand:devtools.json-lab.open"],
+      "contributes": {}
+    },
+    "source": "local",
+    "downloadUrl": null
+  },
+  {
+    "manifest": {
+      "id": "devtools.regex-lab",
+      "name": "Regex Lab",
+      "version": "0.3.0",
+      "publisher": "syncterm",
+      "description": "flags切替・対象テキスト切替・group表示に対応したRegex検証パネル。",
+      "longDescription": "Regexパターンのプリセット、flagsトグル、対象テキストセット、最初のmatch group確認を1画面で行える軽量プレイグラウンド。",
+      "categories": ["DevTools"],
+      "tags": ["regex", "tester"],
+      "icon": "RX",
+      "previewTitle": "実パネル相当: Pattern/Flags/Matchesビュー",
+      "previewBullets": [
+        "flags(i/g)をその場でトグル",
+        "dataset/logsの2種類を即切替",
+        "先頭一致のgroup情報を表示"
+      ],
+      "previewMock": [
+        "Pattern: /ERR_[0-9]+/i",
+        "First match groups: [\"ERR_502\"]",
+        "Matches: ERR_502_TIMEOUT"
+      ],
+      "repository": null,
+      "runtime": "sandbox-runtime",
+      "permissions": [],
+      "entry": "builtin:devtools.regex-lab",
+      "activationEvents": ["onCommand:devtools.regex-lab.open"],
+      "contributes": {}
+    },
+    "source": "local",
+    "downloadUrl": null
+  },
+  {
+    "manifest": {
+      "id": "devtools.diff-notes",
+      "name": "Diff Notes",
+      "version": "0.3.0",
+      "publisher": "syncterm",
+      "description": "優先度・完了状態・検索を備えたレビュー用チェックリスト。",
+      "longDescription": "差分レビュー中の気づきを priority/done 付きで管理し、検索やクリア操作で高速に整理できるノート拡張。",
+      "categories": ["DevTools"],
+      "tags": ["diff", "review", "notes"],
+      "icon": "DF",
+      "previewTitle": "実パネル相当: 優先度付きDiff Notes",
+      "previewBullets": [
+        "high/medium/low 優先度を保持",
+        "チェックボックス式の完了管理",
+        "キーワード検索で絞り込み"
+      ],
+      "previewMock": [
+        "[ ] (high) API changed #1",
+        "[x] (medium) UI touched #2",
+        "filter: api"
+      ],
+      "repository": null,
+      "runtime": "sandbox-runtime",
+      "permissions": ["storage"],
+      "entry": "builtin:devtools.diff-notes",
+      "activationEvents": ["onCommand:devtools.diff-notes.open"],
+      "contributes": {}
+    },
+    "source": "local",
+    "downloadUrl": null
+  },
+  {
+    "manifest": {
+      "id": "devtools.api-status",
+      "name": "API Status Monitor",
+      "version": "0.3.0",
+      "publisher": "syncterm",
+      "description": "複数エンドポイントの状態・遅延・失敗回数を追跡するモニター。",
+      "longDescription": "監視対象を追加しながら、各endpointのOK/NG・latency・failure countを一覧化できる簡易API監視パネル。",
+      "categories": ["DevTools"],
+      "tags": ["api", "health", "ops"],
+      "icon": "AP",
+      "previewTitle": "実パネル相当: Endpoint監視カード",
+      "previewBullets": [
+        "複数endpointの同時チェック",
+        "latency / fail count を蓄積",
+        "Refresh/Reset/Endpoint追加アクション"
+      ],
+      "previewMock": [
+        "OK /health latency=42ms fail=0",
+        "NG /debug/rt latency=173ms fail=2",
+        "up: 2/3"
+      ],
+      "repository": null,
+      "runtime": "sandbox-runtime",
+      "permissions": [],
+      "entry": "builtin:devtools.api-status",
+      "activationEvents": ["onCommand:devtools.api-status.open"],
+      "contributes": {}
+    },
+    "source": "local",
+    "downloadUrl": null
+  },
+  {
+    "manifest": {
+      "id": "productivity.pomodoro",
+      "name": "Pomodoro Timer Pro",
+      "version": "0.3.0",
+      "publisher": "syncterm",
+      "description": "実時間カウント・開始停止・フォーカス/休憩切替に対応したPomodoro。",
+      "longDescription": "1秒単位のタイマー、Start/Pause/Reset、focus/breakモード、完了セッション記録を備えた実用集中タイマー。",
+      "categories": ["Productivity"],
+      "tags": ["pomodoro", "focus", "timer"],
+      "icon": "PM",
+      "previewTitle": "実パネル相当: 実タイマーPomodoro",
+      "previewBullets": [
+        "Start/Pause/Resetの即操作",
+        "25/50 focus と 5/15 break を切替",
+        "完了セッション数を自動更新"
+      ],
+      "previewMock": [
+        "state: running",
+        "remaining: 24:18",
+        "completed: 3"
+      ],
+      "repository": null,
+      "runtime": "sandbox-runtime",
+      "permissions": ["storage"],
+      "entry": "builtin:productivity.pomodoro",
+      "activationEvents": ["onCommand:productivity.pomodoro.open"],
+      "contributes": {}
+    },
+    "source": "local",
+    "downloadUrl": null
+  },
+  {
+    "manifest": {
+      "id": "productivity.kanban-lite",
+      "name": "Kanban Lite",
+      "version": "0.3.0",
+      "publisher": "syncterm",
+      "description": "追加/移動/完了率表示付きの軽量カンバン。",
+      "longDescription": "TODO/DOING/DONEの3レーンでカードを回し、進捗率やDone整理まで含めて実務利用できるカンバン拡張。",
+      "categories": ["Productivity"],
+      "tags": ["kanban", "tasks"],
+      "icon": "KB",
+      "previewTitle": "実パネル相当: 進捗率付きKanban",
+      "previewBullets": [
+        "カード追加とTODO→DOING→DONE移動",
+        "Back to TODO / Clear Done を搭載",
+        "doneRateを統計表示"
+      ],
+      "previewMock": [
+        "todo:2 doing:1 done:3 doneRate:50%",
+        "TODO: Write tests",
+        "DONE: Deploy backend"
+      ],
+      "repository": null,
+      "runtime": "sandbox-runtime",
+      "permissions": [],
+      "entry": "builtin:productivity.kanban-lite",
+      "activationEvents": ["onCommand:productivity.kanban-lite.open"],
+      "contributes": {}
+    },
+    "source": "local",
+    "downloadUrl": null
+  },
+  {
+    "manifest": {
+      "id": "productivity.scratchpad",
+      "name": "Scratchpad",
+      "version": "0.3.0",
+      "publisher": "syncterm",
+      "description": "複数ドキュメント・タグ付きで使えるScratchpad。",
+      "longDescription": "メモをdoc単位で切り替え、タグ付けしながら保存できる軽量ノート拡張。時刻追記やTODO追記をワンクリック実行。",
+      "categories": ["Productivity"],
+      "tags": ["memo", "notes"],
+      "icon": "SC",
+      "previewTitle": "実パネル相当: 複数メモScratchpad",
+      "previewBullets": [
+        "メモドキュメントを複数保持",
+        "タグ付けとDoc切替をサポート",
+        "timestamp/TODO追記を即実行"
+      ],
+      "previewMock": [
+        "doc: notes-2026/4/16 tags: work,idea",
+        "note@14:43:01",
+        "TODO: "
+      ],
+      "repository": null,
+      "runtime": "sandbox-runtime",
+      "permissions": ["storage"],
+      "entry": "builtin:productivity.scratchpad",
+      "activationEvents": ["onCommand:productivity.scratchpad.open"],
+      "contributes": {}
+    },
+    "source": "local",
+    "downloadUrl": null
+  },
+  {
+    "manifest": {
+      "id": "productivity.habit-tracker",
+      "name": "Habit Tracker",
+      "version": "0.3.0",
+      "publisher": "syncterm",
+      "description": "日次チェック・連続日数・ベスト記録を管理するHabitトラッカー。",
+      "longDescription": "doneToday管理、連続日数(streak)計算、best streak保存、直近ログ表示を備えた習慣管理パネル。",
+      "categories": ["Productivity"],
+      "tags": ["habit", "streak"],
+      "icon": "HB",
+      "previewTitle": "実パネル相当: Habitログ + 連続日数",
+      "previewBullets": [
+        "today完了を1クリック記録",
+        "streak/best/pointsを同時表示",
+        "直近7日ログを表示"
+      ],
+      "previewMock": [
+        "points: 18 streak: 5 best: 9",
+        "doneToday: yes",
+        "2026-04-16 +done"
+      ],
+      "repository": null,
+      "runtime": "sandbox-runtime",
+      "permissions": ["storage"],
+      "entry": "builtin:productivity.habit-tracker",
+      "activationEvents": ["onCommand:productivity.habit-tracker.open"],
+      "contributes": {}
+    },
+    "source": "local",
+    "downloadUrl": null
+  },
+  {
+    "manifest": {
+      "id": "game.puzzle-2048-lite",
+      "name": "2048 Lite",
+      "version": "0.3.0",
+      "publisher": "syncterm",
+      "description": "Directional 4x4 2048 implementation with merge logic and game-over detection.",
+      "longDescription": "Full grid-based 2048 gameplay: directional slides, tile merging, random spawns, score/best tracking, and end-state validation.",
+      "categories": ["Game"],
+      "tags": ["puzzle", "2048"],
+      "icon": "20",
+      "previewTitle": "実プレイと同型: 4×4 タイル・公式配色グリッド",
+      "previewBullets": [
+        "Slide left/right/up/down + Undo",
+        "2048到達時のContinue切替",
+        "score/best/movesを保存"
+      ],
+      "previewMock": [
+        "  .   2   .   4",
+        "  2   4   8  16",
+        "  .   .   4   8",
+        "  .   .   .   2"
+      ],
+      "repository": null,
+      "runtime": "sandbox-runtime",
+      "permissions": ["storage"],
+      "entry": "builtin:game.puzzle-2048-lite",
+      "activationEvents": ["onCommand:game.puzzle-2048-lite.open"],
+      "contributes": {}
+    },
+    "source": "local",
+    "downloadUrl": null
+  },
+  {
+    "manifest": {
+      "id": "game.arcade-snake-lite",
+      "name": "Snake Lite",
+      "version": "0.3.0",
+      "publisher": "syncterm",
+      "description": "Grid-based snake with direction control, collision checks, and food spawning.",
+      "longDescription": "Playable snake implementation on a 12x12 board with head/body rendering, wall/self collision, growth, score and best score.",
+      "categories": ["Game"],
+      "tags": ["arcade", "snake"],
+      "icon": "SN",
+      "previewTitle": "実プレイと同型: 12×12 グリッド・頭／体／エサ・次ヘッド枠",
+      "previewBullets": [
+        "自動進行 + 矢印で方向転換",
+        "Food spawn / 成長 / 速度レベル",
+        "壁・自己衝突でゲーム終了"
+      ],
+      "previewMock": [
+        "············",
+        "····■□□··●··",
+        "············"
+      ],
+      "repository": null,
+      "runtime": "sandbox-runtime",
+      "permissions": ["storage"],
+      "entry": "builtin:game.arcade-snake-lite",
+      "activationEvents": ["onCommand:game.arcade-snake-lite.open"],
+      "contributes": {}
+    },
+    "source": "local",
+    "downloadUrl": null
+  },
+  {
+    "manifest": {
+      "id": "game.board-othello-mini",
+      "name": "Othello Mini",
+      "version": "0.3.0",
+      "publisher": "syncterm",
+      "description": "8x8 Othello board with legal-move calculation and flip rules.",
+      "longDescription": "Turn-based Othello logic with valid move generation, directional flips, pass handling, and live black/white counts.",
+      "categories": ["Game"],
+      "tags": ["board", "othello"],
+      "icon": "OT",
+      "previewTitle": "実プレイと同型: 8×8 緑盤・石・合法手ヒント",
+      "previewBullets": [
+        "合法手のみ配置可能",
+        "終局時に勝敗を明示",
+        "vsAI時の先後カラー切替"
+      ],
+      "previewMock": [
+        "  a b c d e f g h",
+        "1 . . . . . . . .",
+        "4 . . . W B . . .",
+        "5 . . . B W . . ."
+      ],
+      "repository": null,
+      "runtime": "sandbox-runtime",
+      "permissions": [],
+      "entry": "builtin:game.board-othello-mini",
+      "activationEvents": ["onCommand:game.board-othello-mini.open"],
+      "contributes": {}
+    },
+    "source": "local",
+    "downloadUrl": null
+  },
+  {
+    "manifest": {
+      "id": "game.word-wordsprint",
+      "name": "Word Sprint",
+      "version": "0.3.0",
+      "publisher": "syncterm",
+      "description": "Word scramble challenge with option picks, streaks, and lives.",
+      "longDescription": "Round-based word game: scrambled words, multiple-choice answers, streak bonuses, penalties, lives, and best-score retention.",
+      "categories": ["Game"],
+      "tags": ["word", "typing"],
+      "icon": "WD",
+      "previewTitle": "実プレイと同型: チップ表示の並び替え＋3択カード",
+      "previewBullets": [
+        "3択ラウンド + タイムリミット",
+        "連続正解でストリーク加点",
+        "語彙拡張とライフ制"
+      ],
+      "previewMock": [
+        "Scrambled: enxtisnoe",
+        "Pick: extension / runtime / widget",
+        "score: 38  lives: 2"
+      ],
+      "repository": null,
+      "runtime": "sandbox-runtime",
+      "permissions": ["storage"],
+      "entry": "builtin:game.word-wordsprint",
+      "activationEvents": ["onCommand:game.word-wordsprint.open"],
+      "contributes": {}
+    },
+    "source": "local",
+    "downloadUrl": null
+  },
+  {
+    "manifest": {
+      "id": "game.puzzle-tetris",
+      "name": "Tetris",
+      "version": "0.3.0",
+      "publisher": "syncterm",
+      "description": "Falling-block puzzle with move/rotate/drop and line clear scoring.",
+      "longDescription": "Classic-style Tetris gameplay with tetromino spawn, movement, rotation, hard drop, line clearing, and best score tracking.",
+      "categories": ["Game"],
+      "tags": ["puzzle", "tetris", "blocks"],
+      "icon": "TT",
+      "previewTitle": "実プレイと同型: 10×20・7-bag・Hold/Next・色付きブロック",
+      "previewBullets": [
+        "グリッド線・ゴースト・ホールドを含む本番UIと同じ見た目",
+        "矢印・Space・C（Hold）・P（Pause）に対応",
+        "wall kick回転・連続消去スコア"
+      ],
+      "previewMock": [
+        "····□□····",
+        "·····□····",
+        "·····□····",
+        "■■■■··■■■■"
+      ],
+      "repository": null,
+      "runtime": "sandbox-runtime",
+      "permissions": ["storage"],
+      "entry": "builtin:game.puzzle-tetris",
+      "activationEvents": ["onCommand:game.puzzle-tetris.open"],
+      "contributes": {}
+    },
+    "source": "local",
+    "downloadUrl": null
+  },
+  {
+    "manifest": {
+      "id": "game.puzzle-minesweeper",
+      "name": "Minesweeper",
+      "version": "0.3.0",
+      "publisher": "syncterm",
+      "description": "Classic minesweeper with cursor movement, reveal, and flag controls.",
+      "longDescription": "Grid-based minesweeper implementation with flood reveal, mine counter, flagging, win/lose detection, and keyboard-friendly cursor controls.",
+      "categories": ["Game"],
+      "tags": ["puzzle", "minesweeper", "logic"],
+      "icon": "MS",
+      "previewTitle": "実プレイと同型: 9×9・数字色・旗・カーソル枠",
+      "previewBullets": [
+        "初手安全 + chord open",
+        "Beginner/Intermediate/Expert + Custom",
+        "タイマーとレベル別ベスト記録"
+      ],
+      "previewMock": [
+        "   0 1 2 3 4 5 6 7 8",
+        " 0 [□] □  □  □  □  □  □  □  □ ",
+        " 1  □  1  ·  ·  1  □  □  □  □ "
+      ],
+      "repository": null,
+      "runtime": "sandbox-runtime",
+      "permissions": ["storage"],
+      "entry": "builtin:game.puzzle-minesweeper",
+      "activationEvents": ["onCommand:game.puzzle-minesweeper.open"],
+      "contributes": {}
+    },
+    "source": "local",
+    "downloadUrl": null
+  },
+  {
+    "manifest": {
+      "id": "game.puzzle-sudoku-pro",
+      "name": "Sudoku Pro",
+      "version": "0.4.0",
+      "publisher": "syncterm",
+      "description": "難易度選択付きの本格9x9数独。",
+      "longDescription": "Easy/Normal/Hardの問題生成、カーソル移動、数字入力、ヒント、誤り数表示を備えた本格的な数独拡張。",
+      "categories": ["Game"],
+      "tags": ["puzzle", "sudoku", "logic"],
+      "icon": "SD",
+      "previewTitle": "実プレイと同型: 9x9数独 + 3x3ブロック強調",
+      "previewBullets": [
+        "3x3太線とカーソル強調を反映",
+        "一意解保証の難易度生成",
+        "誤り数・タイマー・ベスト表示"
+      ],
+      "previewMock": ["5 . . | . 7 . | . . .", ". . . | 1 . . | . . 9", ". . . | . . . | . 6 ."],
+      "repository": null,
+      "runtime": "sandbox-runtime",
+      "permissions": ["storage"],
+      "entry": "builtin:game.puzzle-sudoku-pro",
+      "activationEvents": ["onCommand:game.puzzle-sudoku-pro.open"],
+      "contributes": {}
+    },
+    "source": "local",
+    "downloadUrl": null
+  },
+  {
+    "manifest": {
+      "id": "game.board-chess-pro",
+      "name": "Chess Pro",
+      "version": "0.4.0",
+      "publisher": "syncterm",
+      "description": "合法手判定・AI難易度付きチェス。",
+      "longDescription": "駒ごとの合法手、手番管理、王手回避判定、vsAI/2Pモード、難易度切替を備えたチェス拡張。",
+      "categories": ["Game"],
+      "tags": ["board", "chess", "strategy"],
+      "icon": "CH",
+      "previewTitle": "実プレイと同型: 座標付き8x8チェス盤 + AI",
+      "previewBullets": [
+        "座標ラベルと合法手ハイライト",
+        "白黒駒の視認性を強化",
+        "checkmate/stalemate判定を表示"
+      ],
+      "previewMock": ["r n b q k b n r", "p p p p p p p p", ". . . . . . . ."],
+      "repository": null,
+      "runtime": "sandbox-runtime",
+      "permissions": ["storage"],
+      "entry": "builtin:game.board-chess-pro",
+      "activationEvents": ["onCommand:game.board-chess-pro.open"],
+      "contributes": {}
+    },
+    "source": "local",
+    "downloadUrl": null
+  },
+  {
+    "manifest": {
+      "id": "game.board-shogi-lite",
+      "name": "Shogi Lite",
+      "version": "0.4.0",
+      "publisher": "syncterm",
+      "description": "打ち駒付き将棋ライト実装。",
+      "longDescription": "9x9盤、成り対応、持ち駒ドロップ、vsAI/2Pモードと難易度切替を備えた将棋拡張。",
+      "categories": ["Game"],
+      "tags": ["board", "shogi", "strategy"],
+      "icon": "SG",
+      "previewTitle": "実プレイと同型: 9x9将棋盤 + 先後持ち駒",
+      "previewBullets": [
+        "先後で向き・枠を変えた駒表示",
+        "持ち駒トレイからドロップ選択",
+        "二歩などの主要打ち駒制約対応"
+      ],
+      "previewMock": ["l n s g k g s n l", ". r . . . . . b .", "p p p p p p p p p"],
+      "repository": null,
+      "runtime": "sandbox-runtime",
+      "permissions": ["storage"],
+      "entry": "builtin:game.board-shogi-lite",
+      "activationEvents": ["onCommand:game.board-shogi-lite.open"],
+      "contributes": {}
+    },
+    "source": "local",
+    "downloadUrl": null
+  },
+  {
+    "manifest": {
+      "id": "game.puzzle-puyo-burst",
+      "name": "Puyo Burst",
+      "version": "0.4.0",
+      "publisher": "syncterm",
+      "description": "連鎖消しが楽しい落ち物パズル。",
+      "longDescription": "6x12盤でペア落下、回転、連結4消し、連鎖倍率、速度上昇を備えた本格系パズル。",
+      "categories": ["Game"],
+      "tags": ["puzzle", "arcade", "falling-block"],
+      "icon": "PY",
+      "previewTitle": "実プレイと同型: 6x12連鎖盤 + 発光演出",
+      "previewBullets": [
+        "左右移動・回転・ハードドロップ",
+        "4連結消去と拡張連鎖スコア",
+        "Nextペア表示 + 高速化テンポ"
+      ],
+      "previewMock": ["..1...", "..12..", ".233..", ".244.."],
+      "repository": null,
+      "runtime": "sandbox-runtime",
+      "permissions": ["storage"],
+      "entry": "builtin:game.puzzle-puyo-burst",
+      "activationEvents": ["onCommand:game.puzzle-puyo-burst.open"],
+      "contributes": {}
+    },
+    "source": "local",
+    "downloadUrl": null
+  },
+  {
+    "manifest": {
+      "id": "game.card-solitaire-klondike",
+      "name": "Solitaire Klondike",
+      "version": "0.4.0",
+      "publisher": "syncterm",
+      "description": "クラシックなクロンダイクソリティア。",
+      "longDescription": "山札/捨て札/組札/7列タブローを備えたクロンダイク。引く・移す・組札化をパネル操作で実行可能。",
+      "categories": ["Game"],
+      "tags": ["card", "solitaire", "klondike"],
+      "icon": "SO",
+      "previewTitle": "実プレイと同型: カード重なり付きソリティア盤面",
+      "previewBullets": [
+        "Draw 1/3 切替に対応",
+        "タブロー複数枚ラン移動",
+        "Foundation⇄Tableauの戻し操作"
+      ],
+      "previewMock": ["Stock: 24  Waste: QH", "F: S1 H0 D0 C0", "T1: ##, 7C, 6H"],
+      "repository": null,
+      "runtime": "sandbox-runtime",
+      "permissions": ["storage"],
+      "entry": "builtin:game.card-solitaire-klondike",
+      "activationEvents": ["onCommand:game.card-solitaire-klondike.open"],
+      "contributes": {}
+    },
+    "source": "local",
+    "downloadUrl": null
+  },
+  {
+    "manifest": {
+      "id": "game.board-connect-four",
+      "name": "Connect Four",
+      "version": "0.1.0",
+      "publisher": "syncterm",
+      "description": "縦4連を競う定番ボードゲーム。",
+      "longDescription": "7x6盤で赤/黄ディスクを落として4連を作るコネクトフォー。1P vs AI / 2P切替、クリック操作とキーボード入力に対応。",
+      "categories": ["Game"],
+      "tags": ["board", "connect4", "strategy"],
+      "icon": "C4",
+      "previewTitle": "実プレイと同型: 7x6盤・列クリックでドロップ",
+      "previewBullets": [
+        "列をクリックしてディスクを落下",
+        "AI対戦 / 2P を切替可能",
+        "1-7キーでの高速入力対応"
+      ],
+      "previewMock": [".......", "...R...", "..RY...", ".RYY..."],
+      "repository": null,
+      "runtime": "sandbox-runtime",
+      "permissions": ["storage"],
+      "entry": "builtin:game.board-connect-four",
+      "activationEvents": ["onCommand:game.board-connect-four.open"],
+      "contributes": {}
+    },
+    "source": "local",
+    "downloadUrl": null
+  },
+  {
+    "manifest": {
+      "id": "productivity.calendar-planner",
+      "name": "Calendar Planner",
+      "version": "0.4.0",
+      "publisher": "syncterm",
+      "description": "曜日ごとの予定を軽快に管理。",
+      "longDescription": "曜日切替、イベント追加、日次計画の再整理をすばやく行えるサイドパネル型カレンダープランナー。",
+      "categories": ["Productivity"],
+      "tags": ["calendar", "planning", "schedule"],
+      "icon": "CP",
+      "previewTitle": "実パネル相当: チェック付き日次アジェンダ",
+      "previewBullets": ["曜日切替", "時刻付きイベント追加", "完了チェックで進捗管理"],
+      "previewMock": ["[ ] 09:30 Standup #1", "[x] 13:00 Deep Work #2", "done: 1/2"],
+      "repository": null,
+      "runtime": "sandbox-runtime",
+      "permissions": ["storage"],
+      "entry": "builtin:productivity.calendar-planner",
+      "activationEvents": ["onCommand:productivity.calendar-planner.open"],
+      "contributes": {}
+    },
+    "source": "local",
+    "downloadUrl": null
+  },
+  {
+    "manifest": {
+      "id": "productivity.goal-tracker-pro",
+      "name": "Goal Tracker Pro",
+      "version": "0.4.0",
+      "publisher": "syncterm",
+      "description": "目標と進捗率を可視化。",
+      "longDescription": "複数ゴールを登録し、進捗率を更新・集計。週次レビュー前の目標管理に最適化。",
+      "categories": ["Productivity"],
+      "tags": ["goals", "progress", "planning"],
+      "icon": "GT",
+      "previewTitle": "実パネル相当: Goal Dashboard",
+      "previewBullets": ["進捗の増減(+/-)に対応", "完了目標のArchive", "平均進捗を自動集計"],
+      "previewMock": ["1. Ship extension pack [45%]", "2. Test AI game modes [20%]", "avgProgress: 33%"],
+      "repository": null,
+      "runtime": "sandbox-runtime",
+      "permissions": ["storage"],
+      "entry": "builtin:productivity.goal-tracker-pro",
+      "activationEvents": ["onCommand:productivity.goal-tracker-pro.open"],
+      "contributes": {}
+    },
+    "source": "local",
+    "downloadUrl": null
+  },
+  {
+    "manifest": {
+      "id": "productivity.time-blocker",
+      "name": "Time Blocker",
+      "version": "0.4.0",
+      "publisher": "syncterm",
+      "description": "時間ブロック方式で集中計画。",
+      "longDescription": "1日の時間帯をブロック単位で登録・整列して、集中時間の確保を支援する拡張。",
+      "categories": ["Productivity"],
+      "tags": ["time", "focus", "blocks"],
+      "icon": "TB",
+      "previewTitle": "実パネル相当: Focus時間ブロック",
+      "previewBullets": ["時間帯ブロック追加", "自動ソート", "総フォーカス時間表示"],
+      "previewMock": ["09:00-10:30 Code", "14:00-15:00 Review", "focusHours: 150m"],
+      "repository": null,
+      "runtime": "sandbox-runtime",
+      "permissions": ["storage"],
+      "entry": "builtin:productivity.time-blocker",
+      "activationEvents": ["onCommand:productivity.time-blocker.open"],
+      "contributes": {}
+    },
+    "source": "local",
+    "downloadUrl": null
+  },
+  {
+    "manifest": {
+      "id": "productivity.weekly-review",
+      "name": "Weekly Review",
+      "version": "0.4.0",
+      "publisher": "syncterm",
+      "description": "週次ふりかえりテンプレート。",
+      "longDescription": "Wins/Learns/Nextを整理し、継続改善ループを回すための週次レビュー専用パネル。",
+      "categories": ["Productivity"],
+      "tags": ["review", "retro", "weekly"],
+      "icon": "WR",
+      "previewTitle": "実パネル相当: Weekly Review + Summary",
+      "previewBullets": ["Wins/Learns/Next管理", "Summary生成", "週次振り返りの定型化"],
+      "previewMock": ["Wins: Fixed runtime bug", "Learns: Need stronger tests", "Summary: 1 wins / 1 learns / 1 next"],
+      "repository": null,
+      "runtime": "sandbox-runtime",
+      "permissions": ["storage"],
+      "entry": "builtin:productivity.weekly-review",
+      "activationEvents": ["onCommand:productivity.weekly-review.open"],
+      "contributes": {}
+    },
+    "source": "local",
+    "downloadUrl": null
+  },
+  {
+    "manifest": {
+      "id": "productivity.meeting-notes",
+      "name": "Meeting Notes",
+      "version": "0.4.0",
+      "publisher": "syncterm",
+      "description": "会議メモを構造化して蓄積。",
+      "longDescription": "アジェンダ/決定事項/アクションアイテムのテンプレートを起点に会議ログを継続的に残せる拡張。",
+      "categories": ["Productivity"],
+      "tags": ["meeting", "notes", "team"],
+      "icon": "MN",
+      "previewTitle": "実パネル相当: 複数会議ノート",
+      "previewBullets": ["会議ドキュメントを複数保持", "テンプレート/タイムスタンプ追記", "会議ごとの切替表示"],
+      "previewMock": ["meeting: Weekly Sync", "Agenda", "- 14:30:12 "],
+      "repository": null,
+      "runtime": "sandbox-runtime",
+      "permissions": ["storage"],
+      "entry": "builtin:productivity.meeting-notes",
+      "activationEvents": ["onCommand:productivity.meeting-notes.open"],
+      "contributes": {}
+    },
+    "source": "local",
+    "downloadUrl": null
+  },
+  {
+    "manifest": {
+      "id": "productivity.notion-notes",
+      "name": "Notion Notes",
+      "version": "1.0.0",
+      "publisher": "syncterm",
+      "description": "ブロックベースのリッチなノート。Notion風のページ管理。",
+      "longDescription": "見出し・段落・ToDo・引用・コード・箇条書きなどのブロックで構成されるノートを複数ページで管理。ピン留め・複製・ページ切替が可能。",
+      "categories": ["Productivity"],
+      "tags": ["notion", "notes", "blocks", "pages", "todo"],
+      "icon": "NN",
+      "previewTitle": "ブロックベースのリッチノート",
+      "previewBullets": ["見出し/段落/ToDo/引用/コード等のブロック", "複数ページ管理・ピン留め", "ブロック並べ替え・編集・削除"],
+      "previewMock": ["📝 Welcome", "# Welcome to Notion Notes", "☑ Try adding blocks"],
+      "repository": null,
+      "runtime": "sandbox-runtime",
+      "permissions": ["storage"],
+      "entry": "builtin:productivity.notion-notes",
+      "activationEvents": ["onCommand:productivity.notion-notes.open"],
+      "contributes": {}
+    },
+    "source": "local",
+    "downloadUrl": null
+  },
+  {
+    "manifest": {
+      "id": "productivity.paper-manager",
+      "name": "Paper Manager",
+      "version": "1.0.0",
+      "publisher": "syncterm",
+      "description": "論文を高度に管理。タグ・評価・ステータス・メモで整理。",
+      "longDescription": "ダウンロードした論文のメタデータ（タイトル・著者・年・会議名・タグ・ステータス・評価・メモ）を登録し、フィルタ・ソートで素早くアクセス。",
+      "categories": ["Productivity"],
+      "tags": ["paper", "research", "academic", "management"],
+      "icon": "PM",
+      "previewTitle": "論文管理ダッシュボード",
+      "previewBullets": ["タイトル/著者/年/会議名で登録", "タグ・ステータス・レーティング管理", "フィルタ/ソートで高速検索"],
+      "previewMock": ["📚 3 papers | 1 read | 1 reading", "★★★★★ Attention Is All You Need"],
+      "repository": null,
+      "runtime": "sandbox-runtime",
+      "permissions": ["storage"],
+      "entry": "builtin:productivity.paper-manager",
+      "activationEvents": ["onCommand:productivity.paper-manager.open"],
+      "contributes": {}
+    },
+    "source": "local",
+    "downloadUrl": null
+  }
+]

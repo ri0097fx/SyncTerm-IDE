@@ -15,6 +15,7 @@
 - **セッション作成**: SessionBar で新規セッション名を入力して「作成」で Relay 上にセッションを追加可能。
 - **画像プレビュー・画像タブ**: 画像を Blob 取得でプレビュー。画像用タブを Editor と分離して表示。
 - **config.ini.example / .env.tunnel.example**: 個人情報を含まない設定例を追加。`config.ini` は .gitignore でリポジトリに含めない運用を推奨。
+- **拡張機能の追加/改善**: Marketplace 拡張群を拡張し、`Connect Four` を新規追加。あわせて `Sudoku Pro` の配色とハイライトを調整し、視認性を改善。
 
 ### Changed
 - **デスクトップ版廃止**: Python/Tkinter のデスクトップ版を廃止。旧コードは `desktop_legacy/` に退避（main.py, gui_app.py, components/, sync_services/, config.py, command_watcher.py, watcher_manager.sh 等）。新規・通常利用は Web 版のみ。

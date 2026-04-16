@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SessionBar } from "../../features/session/SessionBar";
 import { FileTreePanel } from "../../features/file-tree/FileTreePanel";
 import { EditorPanel } from "../../features/editor/EditorPanel";
@@ -7,13 +7,26 @@ import { TerminalPanel } from "../../features/terminal/TerminalPanel";
 import { GpuStatusPanel } from "../../features/terminal/GpuStatusPanel";
 import { AiChatPanel } from "../../features/editor/AiChatPanel";
 import { ActiveEditorProvider } from "../../features/editor/ActiveEditorContext";
+import { ExtensionPanelHost } from "../../features/extensions/ExtensionPanelHost";
+import { useExtensionRuntime } from "../../features/extensions/ExtensionRuntimeContext";
 import { isImagePath } from "../../lib/fileType";
 import { usePreferences } from "../../features/preferences/PreferencesContext";
 
+const DOCK_STORAGE_KEY = "syncterm.dockedExtensions";
+function loadDockedSet(): Set<string> {
+  try { const raw = localStorage.getItem(DOCK_STORAGE_KEY); return raw ? new Set(JSON.parse(raw) as string[]) : new Set(); } catch { return new Set(); }
+}
+function saveDockedSet(s: Set<string>) {
+  try { localStorage.setItem(DOCK_STORAGE_KEY, JSON.stringify([...s])); } catch { /* ignore */ }
+}
+
 export const MainLayout: React.FC = () => {
   const { preferences } = usePreferences();
+  const { panels: runtimePanels, activePanelId } = useExtensionRuntime();
   const [activeEditorPath, setActiveEditorPath] = useState<string | null>(null);
   const [openEditorPaths, setOpenEditorPaths] = useState<string[]>([]);
+  const [editorPathReopenTick, setEditorPathReopenTick] = useState<Record<string, number>>({});
+  const openEditorPathsRef = useRef<Set<string>>(new Set());
   const [activeImagePath, setActiveImagePath] = useState<string | null>(null);
   const [openImagePaths, setOpenImagePaths] = useState<string[]>([]);
   const [leftPaneWidth, setLeftPaneWidth] = useState(320);
@@ -21,18 +34,77 @@ export const MainLayout: React.FC = () => {
   const [previewPaneWidth, setPreviewPaneWidth] = useState(360);
   const dragModeRef = useRef<"vertical" | "horizontal" | "preview" | null>(null);
   const mainRef = useRef<HTMLDivElement | null>(null);
+
+  const [dockedToEditor, setDockedToEditor] = useState<Set<string>>(loadDockedSet);
+  const [activeDockedPanelId, setActiveDockedPanelId] = useState<string | null>(null);
+
+  const toggleDock = useCallback((panelId: string) => {
+    setDockedToEditor((prev) => {
+      const next = new Set(prev);
+      if (next.has(panelId)) {
+        next.delete(panelId);
+        if (activeDockedPanelId === panelId) setActiveDockedPanelId(null);
+      } else {
+        next.add(panelId);
+        setActiveDockedPanelId(panelId);
+      }
+      saveDockedSet(next);
+      return next;
+    });
+  }, [activeDockedPanelId]);
+
+  const editorDockedPanels = useMemo(() => runtimePanels.filter((p) => dockedToEditor.has(p.id)), [runtimePanels, dockedToEditor]);
+  const previewOnlyPanels = useMemo(() => runtimePanels.filter((p) => !dockedToEditor.has(p.id)), [runtimePanels, dockedToEditor]);
+
   const showImagePreviewPane = openImagePaths.length > 0;
   const showGpuPanel = preferences.showGpuPanel;
   const showAiChatPanel = preferences.showAiChatPanel;
-  const showPreviewPane = showImagePreviewPane || showGpuPanel || showAiChatPanel;
-  const [previewTab, setPreviewTab] = useState<"image" | "gpu" | "ai">("image");
+  const showExtensionPanel = previewOnlyPanels.length > 0;
+  const showPreviewPane = showImagePreviewPane || showGpuPanel || showAiChatPanel || showExtensionPanel;
+  const showPreviewTabs =
+    [showImagePreviewPane, showGpuPanel, showAiChatPanel, showExtensionPanel].filter(Boolean).length >= 2 ||
+    previewOnlyPanels.length >= 2;
+  const [previewTab, setPreviewTab] = useState<string>("image");
+
+  useEffect(() => {
+    if (activePanelId && !dockedToEditor.has(activePanelId)) {
+      setPreviewTab(`ext:${activePanelId}`);
+    }
+  }, [activePanelId, dockedToEditor]);
+
+  useEffect(() => {
+    const available: string[] = [];
+    if (showImagePreviewPane) available.push("image");
+    if (showGpuPanel) available.push("gpu");
+    if (showAiChatPanel) available.push("ai");
+    for (const p of previewOnlyPanels) available.push(`ext:${p.id}`);
+    if (available.length === 0) return;
+    if (!available.includes(previewTab)) {
+      setPreviewTab(available[0]);
+    }
+  }, [previewTab, previewOnlyPanels, showAiChatPanel, showGpuPanel, showImagePreviewPane]);
+
+  useEffect(() => {
+    if (activeDockedPanelId && !editorDockedPanels.some((p) => p.id === activeDockedPanelId)) {
+      setActiveDockedPanelId(null);
+    }
+  }, [activeDockedPanelId, editorDockedPanels]);
+
+  useEffect(() => {
+    openEditorPathsRef.current = new Set(openEditorPaths);
+  }, [openEditorPaths]);
 
   const handleOpenFile = (path: string) => {
     if (isImagePath(path)) {
       setOpenImagePaths((prev) => (prev.includes(path) ? prev : [...prev, path]));
       setActiveImagePath(path);
     } else {
-      setOpenEditorPaths((prev) => (prev.includes(path) ? prev : [...prev, path]));
+      if (openEditorPathsRef.current.has(path)) {
+        setEditorPathReopenTick((t) => ({ ...t, [path]: (t[path] ?? 0) + 1 }));
+      } else {
+        openEditorPathsRef.current.add(path);
+        setOpenEditorPaths((prev) => (prev.includes(path) ? prev : [...prev, path]));
+      }
       setActiveEditorPath(path);
     }
   };
@@ -46,6 +118,12 @@ export const MainLayout: React.FC = () => {
   };
 
   const handleCloseEditorFile = (path: string) => {
+    openEditorPathsRef.current.delete(path);
+    setEditorPathReopenTick((t) => {
+      if (!(path in t)) return t;
+      const { [path]: _, ...rest } = t;
+      return rest;
+    });
     setOpenEditorPaths((prev) => {
       const idx = prev.indexOf(path);
       if (idx < 0) return prev;
@@ -124,8 +202,13 @@ export const MainLayout: React.FC = () => {
                 <EditorPanel
                   filePath={activeEditorPath}
                   openFilePaths={openEditorPaths}
+                  treeReopenTick={activeEditorPath ? editorPathReopenTick[activeEditorPath] ?? 0 : 0}
                   onSelectFile={handleSelectEditorFile}
                   onCloseFile={handleCloseEditorFile}
+                  dockedPanels={editorDockedPanels}
+                  activeDockedPanelId={activeDockedPanelId}
+                  onSelectDockedPanel={setActiveDockedPanelId}
+                  onToggleDock={toggleDock}
                 />
                 <div
                   className="splitter splitter-horizontal"
@@ -151,7 +234,7 @@ export const MainLayout: React.FC = () => {
                     className="image-preview-pane preview-pane-slot"
                     style={{ width: previewPaneWidth, minWidth: previewPaneWidth, flex: "0 0 auto" }}
                   >
-                    {[showImagePreviewPane, showGpuPanel, showAiChatPanel].filter(Boolean).length >= 2 ? (
+                    {showPreviewTabs ? (
                       <>
                         <div className="editor-tabs image-preview-tabs">
                           {showImagePreviewPane && (
@@ -181,6 +264,17 @@ export const MainLayout: React.FC = () => {
                               <span className="editor-tab-label">AI</span>
                             </button>
                           )}
+                          {showExtensionPanel &&
+                            previewOnlyPanels.map((panel) => (
+                              <button
+                                key={panel.id}
+                                type="button"
+                                className={`editor-tab${previewTab === `ext:${panel.id}` ? " active" : ""}`}
+                                onClick={() => setPreviewTab(`ext:${panel.id}`)}
+                              >
+                                <span className="editor-tab-label">{panel.title}</span>
+                              </button>
+                            ))}
                         </div>
                         {showImagePreviewPane && (
                           <div
@@ -223,6 +317,20 @@ export const MainLayout: React.FC = () => {
                             <AiChatPanel fallbackEditorPath={activeEditorPath} />
                           </div>
                         )}
+                        {showExtensionPanel &&
+                          previewOnlyPanels.map((panel) => (
+                            <div
+                              key={panel.id}
+                              style={{
+                                display: previewTab === `ext:${panel.id}` ? "flex" : "none",
+                                flex: 1,
+                                minHeight: 0,
+                                flexDirection: "column"
+                              }}
+                            >
+                              <ExtensionPanelHost panelId={panel.id} isDockedToEditor={false} onToggleDock={() => toggleDock(panel.id)} />
+                            </div>
+                          ))}
                       </>
                     ) : showImagePreviewPane ? (
                       <ImagePreviewPanel
@@ -233,8 +341,10 @@ export const MainLayout: React.FC = () => {
                       />
                     ) : showGpuPanel ? (
                       <GpuStatusPanel />
-                    ) : (
+                    ) : showAiChatPanel ? (
                       <AiChatPanel fallbackEditorPath={activeEditorPath} />
+                    ) : (
+                      <ExtensionPanelHost panelId={activePanelId ?? previewOnlyPanels[0]?.id ?? null} isDockedToEditor={false} onToggleDock={() => { const id = activePanelId ?? previewOnlyPanels[0]?.id; if (id) toggleDock(id); }} />
                     )}
                   </div>
                 </>

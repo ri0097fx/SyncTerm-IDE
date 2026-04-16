@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -110,6 +110,57 @@ class MovePathPayload(BaseModel):
 class UploadFilePayload(BaseModel):
   path: str
   contentBase64: str
+
+
+class ExtensionManifestModel(BaseModel):
+  id: str
+  name: str
+  version: str
+  publisher: str
+  description: str = ""
+  longDescription: Optional[str] = None
+  categories: List[str] = Field(default_factory=list)
+  tags: List[str] = Field(default_factory=list)
+  icon: Optional[str] = None
+  previewTitle: Optional[str] = None
+  previewBullets: List[str] = Field(default_factory=list)
+  previewMock: List[str] = Field(default_factory=list)
+  repository: Optional[str] = None
+  runtime: str = "manifest-only"
+  permissions: List[str] = Field(default_factory=list)
+  entry: Optional[str] = None
+  entryCode: Optional[str] = None
+  activationEvents: List[str] = Field(default_factory=list)
+  contributes: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ExtensionCatalogEntryModel(BaseModel):
+  manifest: ExtensionManifestModel
+  source: str = "local"
+  downloadUrl: Optional[str] = None
+
+
+class ExtensionInstallStateModel(BaseModel):
+  extensionId: str
+  installedVersion: str
+  installedAt: float
+  enabled: bool = True
+  pinned: bool = False
+
+
+class ExtensionSessionStateModel(BaseModel):
+  sessionKey: str
+  enabled: Dict[str, bool] = Field(default_factory=dict)
+  order: List[str] = Field(default_factory=list)
+  updatedAt: float = 0
+
+
+class ExtensionInstallPayload(BaseModel):
+  extensionId: str
+
+
+class ExtensionTogglePayload(BaseModel):
+  extensionId: str
 
 
 class ChatMessage(BaseModel):

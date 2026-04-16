@@ -1,6 +1,10 @@
 import React from "react";
 import { useSession } from "./SessionContext";
+import { ExtensionCommandPaletteModal } from "../extensions/ExtensionCommandPaletteModal";
 import { usePreferences } from "../preferences/PreferencesContext";
+import { MarketplaceModal } from "../extensions/MarketplaceModal";
+import { useExtensionRuntime } from "../extensions/ExtensionRuntimeContext";
+import { QuickToggle } from "../extensions/QuickToggle";
 import { api } from "../../lib/api";
 
 type RtStatus = {
@@ -11,6 +15,8 @@ type RtStatus = {
 
 export const SessionBar: React.FC = () => {
   const [showPrefs, setShowPrefs] = React.useState(false);
+  const [showMarketplace, setShowMarketplace] = React.useState(false);
+  const [showCommandPalette, setShowCommandPalette] = React.useState(false);
   const [cleanupMessage, setCleanupMessage] = React.useState<string | null>(null);
   const [showRtDiagnostic, setShowRtDiagnostic] = React.useState(false);
   const [rtStatus, setRtStatus] = React.useState<RtStatus | null>(null);
@@ -24,6 +30,7 @@ export const SessionBar: React.FC = () => {
   const [createSessionError, setCreateSessionError] = React.useState<string | null>(null);
   const { watchers, sessions, currentWatcher, currentSession, setWatcher, setSession, refreshWatchers, refreshSessions, runnerConfig } =
     useSession();
+  const { commands } = useExtensionRuntime();
   const { preferences, updatePreferences, resetPreferences } = usePreferences();
 
   const handleRtDiagnostic = async () => {
@@ -215,6 +222,24 @@ export const SessionBar: React.FC = () => {
               AI
             </button>
           )}
+          <button
+            className="icon-button"
+            style={{ width: "auto", padding: "0 0.5rem", marginLeft: "0.25rem" }}
+            onClick={() => setShowMarketplace(true)}
+            title="拡張機能マーケットプレイス"
+          >
+            Extensions
+          </button>
+          <QuickToggle disabled={!currentWatcher || !currentSession} />
+          <button
+            className="icon-button"
+            style={{ width: "auto", padding: "0 0.5rem", marginLeft: "0.25rem" }}
+            onClick={() => setShowCommandPalette(true)}
+            title="有効化済み拡張のコマンドを実行"
+            disabled={commands.length === 0}
+          >
+            Commands
+          </button>
           {cleanupMessage && (
             <span className="session-bar-message" style={{ marginLeft: "0.5rem", fontSize: "0.85rem", opacity: 0.9 }}>
               {cleanupMessage}
@@ -239,6 +264,8 @@ export const SessionBar: React.FC = () => {
         </div>
       </header>
 
+      <MarketplaceModal open={showMarketplace} onClose={() => setShowMarketplace(false)} />
+      <ExtensionCommandPaletteModal open={showCommandPalette} onClose={() => setShowCommandPalette(false)} />
       {showRtDiagnostic && (
         <div className="modal-overlay" onClick={() => { setShowRtDiagnostic(false); setRtStatus(null); setRtDiagnosticError(null); setDebugRtResult(null); setAiTestResult(null); setAiInlineTestResult(null); }}>
           <div className="modal-card preferences-modal" style={{ maxWidth: "420px" }} onClick={(e) => e.stopPropagation()}>

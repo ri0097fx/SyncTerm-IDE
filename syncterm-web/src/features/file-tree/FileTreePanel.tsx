@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
+import JSZip from "jszip";
 import { useSession } from "../session/SessionContext";
 import { usePreferences } from "../preferences/PreferencesContext";
 import type { FileEntry } from "../../types/domain";
@@ -16,6 +17,14 @@ function baseName(path: string): string {
 function joinPath(dir: string, name: string): string {
   if (!dir) return name;
   return dir + "/" + name;
+}
+
+function pathDepth(path: string): number {
+  return path.replace(/\\/g, "/").split("/").filter(Boolean).length;
+}
+
+function stripLeadingSlash(path: string): string {
+  return path.replace(/\\/g, "/").replace(/^\/+/, "");
 }
 
 function findEntryByPath(entries: FileEntry[], path: string): FileEntry | undefined {
@@ -356,11 +365,20 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
   const getSelectedPaths = useCallback(() => Array.from(selectedPaths), [selectedPaths]);
   const getContextEntries = useCallback((): FileEntry[] => {
     const entry = contextMenu?.entry ?? null;
-    if (entry) return [entry];
+    if (entry) {
+      // 右クリック対象が既に選択集合に含まれる場合は複数選択を優先する。
+      if (selectedPaths.has(entry.path)) {
+        const selected = getSelectedPaths()
+          .map((p) => findEntryByPath(roots, p))
+          .filter((e): e is FileEntry => e != null);
+        if (selected.length > 0) return selected;
+      }
+      return [entry];
+    }
     return getSelectedPaths()
       .map((p) => findEntryByPath(roots, p))
       .filter((e): e is FileEntry => e != null);
-  }, [contextMenu?.entry, roots, getSelectedPaths]);
+  }, [contextMenu?.entry, roots, getSelectedPaths, selectedPaths]);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -574,24 +592,102 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
     if (clipboard.kind === "cut") setClipboard(null);
   };
 
+  const collectDownloadTargets = useCallback(
+    async (entries: FileEntry[]): Promise<Array<{ sessionPath: string; archivePath: string }>> => {
+      if (!currentWatcher || !currentSession) return [];
+      const rootsSorted = [...entries].sort((a, b) => pathDepth(a.path) - pathDepth(b.path));
+      const filteredRoots: FileEntry[] = [];
+      for (const e of rootsSorted) {
+        if (!filteredRoots.some((p) => e.path === p.path || e.path.startsWith(`${p.path}/`))) {
+          filteredRoots.push(e);
+        }
+      }
+
+      const out: Array<{ sessionPath: string; archivePath: string }> = [];
+      const added = new Set<string>();
+      const visitedDirs = new Set<string>();
+
+      const walk = async (entry: FileEntry, zipBase: string): Promise<void> => {
+        if (entry.kind === "file") {
+          if (added.has(entry.path)) return;
+          added.add(entry.path);
+          out.push({ sessionPath: entry.path, archivePath: zipBase });
+          return;
+        }
+        if (visitedDirs.has(entry.path)) return;
+        visitedDirs.add(entry.path);
+        const children = await runWithTrace(
+          "listChildren(download)",
+          { watcherId: currentWatcher.id, session: currentSession.name, path: entry.path },
+          () => api.listChildren(currentWatcher.id, currentSession.name, entry.path)
+        );
+        for (const child of children) {
+          const childZipPath = zipBase ? `${zipBase}/${child.name}` : child.name;
+          await walk(child, childZipPath);
+        }
+      };
+
+      for (const root of filteredRoots) {
+        const rootName = baseName(root.path) || "root";
+        await walk(root, rootName);
+      }
+      return out;
+    },
+    [currentWatcher, currentSession, runWithTrace]
+  );
+
   const handleDownload = async () => {
-    const entries = getContextEntries().filter((e) => e.kind === "file");
+    const entries = getContextEntries();
     setContextMenu(null);
     if (!entries.length || !currentWatcher || !currentSession) return;
     try {
-      for (let i = 0; i < entries.length; i++) {
-        const path = entries[i].path;
-        const blob = await api.getRawFileBlob(currentWatcher.id, currentSession.name, path);
+      setActionBusy(true);
+      setTreeError(null);
+
+      // 単一ファイルは従来通り直接保存（高速）
+      if (entries.length === 1 && entries[0]?.kind === "file") {
+        const path = entries[0].path;
+        const blob = await runWithTrace(
+          "getRawFileBlob(download)",
+          { watcherId: currentWatcher.id, session: currentSession.name, path },
+          () => api.getRawFileBlob(currentWatcher.id, currentSession.name, path)
+        );
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
         a.download = baseName(path);
         a.click();
         URL.revokeObjectURL(url);
-        if (i < entries.length - 1) await new Promise((r) => setTimeout(r, 200));
+        return;
       }
+
+      const targets = await collectDownloadTargets(entries);
+      if (!targets.length) {
+        setTreeError("ダウンロード対象のファイルが見つかりませんでした。");
+        return;
+      }
+      const zip = new JSZip();
+      for (const t of targets) {
+        const blob = await runWithTrace(
+          "getRawFileBlob(download)",
+          { watcherId: currentWatcher.id, session: currentSession.name, path: t.sessionPath },
+          () => api.getRawFileBlob(currentWatcher.id, currentSession.name, t.sessionPath)
+        );
+        zip.file(stripLeadingSlash(t.archivePath), blob);
+      }
+      const zipBlob = await zip.generateAsync({ type: "blob" });
+      const now = new Date();
+      const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}-${String(now.getHours()).padStart(2, "0")}${String(now.getMinutes()).padStart(2, "0")}${String(now.getSeconds()).padStart(2, "0")}`;
+      const url = URL.createObjectURL(zipBlob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `syncterm-download-${stamp}.zip`;
+      a.click();
+      URL.revokeObjectURL(url);
     } catch (err) {
       setTreeError(err instanceof Error ? err.message : "Download failed");
+    } finally {
+      setActionBusy(false);
     }
   };
 
@@ -638,13 +734,17 @@ export const FileTreePanel: React.FC<Props> = ({ onOpenFile }) => {
   const onContextMenuOpen = (e: React.MouseEvent, entry: FileEntry | null) => {
     e.preventDefault();
     e.stopPropagation();
+    if (entry && !selectedPaths.has(entry.path)) {
+      setSelectedPaths(new Set([entry.path]));
+      setLastSelectedPath(entry.path);
+    }
     setContextMenu({ x: e.clientX, y: e.clientY, entry });
   };
 
   const canPaste = !!clipboard?.paths?.length && !!currentWatcher && !!currentSession;
   const contextEntries = getContextEntries();
   const singleContextEntry = contextEntries.length === 1 ? contextEntries[0] : null;
-  const showDownload = contextEntries.some((e) => e.kind === "file");
+  const showDownload = contextEntries.some((e) => e.kind === "file" || e.kind === "dir" || e.kind === "symlink");
 
   const handleDragStart = useCallback(
     (paths: string[]) => {

@@ -41,6 +41,11 @@ from .schemas import (
   DebateThread,
   DebateTurn,
   DeletePathPayload,
+  ExtensionCatalogEntryModel,
+  ExtensionInstallPayload,
+  ExtensionInstallStateModel,
+  ExtensionSessionStateModel,
+  ExtensionTogglePayload,
   FileChunkModel,
   FileContentPayload,
   FileEntryModel,
@@ -319,9 +324,16 @@ _AI_SSE_HEADERS = {
   "X-Accel-Buffering": "no",
 }
 
+EXTENSIONS_ROOT = BASE_PATH / "extensions"
+# 擬似マーケットのカタログは backend/extensions/catalog.json を正とする。
+# 互換のため、旧配置(BASE_PATH/extensions/catalog.json)にもフォールバックする。
+EXTENSIONS_CATALOG_PATH = BASE_PATH / "backend" / "extensions" / "catalog.json"
+EXTENSIONS_CATALOG_LEGACY_PATH = EXTENSIONS_ROOT / "catalog.json"
+EXTENSIONS_INSTALLED_PATH = EXTENSIONS_ROOT / ".installed.json"
 # Ensure session/registry dirs exist at startup (e.g. after deploy)
 SESSIONS_ROOT.mkdir(parents=True, exist_ok=True)
 REGISTRY_ROOT.mkdir(parents=True, exist_ok=True)
+EXTENSIONS_ROOT.mkdir(parents=True, exist_ok=True)
 MAX_FILE_BYTES = 2_000_000  # full-load limit for editor (2MB)
 MAX_CHUNK_BYTES = 300_000   # chunk endpoint limit per request
 MAX_LOG_CHUNK_BYTES = 1_000_000
@@ -569,6 +581,124 @@ def _cleanup_old_staged_files():
     pass
 
 
+def _session_extensions_state_path(wid: str, sess: str) -> Path:
+  return SESSIONS_ROOT / wid / sess / ".extensions.json"
+
+
+def _default_extension_session_state(wid: str, sess: str) -> ExtensionSessionStateModel:
+  return ExtensionSessionStateModel(
+    sessionKey=f"{wid}/{sess}",
+    enabled={},
+    order=[],
+    updatedAt=time.time(),
+  )
+
+
+def _read_json_file(path: Path, default: Any) -> Any:
+  if not path.exists():
+    return default
+  try:
+    return json.loads(path.read_text("utf-8"))
+  except Exception:
+    return default
+
+
+def _write_json_file(path: Path, payload: Any):
+  path.parent.mkdir(parents=True, exist_ok=True)
+  path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _load_extension_catalog() -> List[ExtensionCatalogEntryModel]:
+  raw = _read_json_file(EXTENSIONS_CATALOG_PATH, [])
+  if not raw:
+    raw = _read_json_file(EXTENSIONS_CATALOG_LEGACY_PATH, [])
+  if isinstance(raw, dict):
+    raw = raw.get("items", [])
+  if not isinstance(raw, list):
+    return []
+  out: List[ExtensionCatalogEntryModel] = []
+  for item in raw:
+    try:
+      out.append(ExtensionCatalogEntryModel.model_validate(item))
+    except Exception:
+      continue
+  return out
+
+
+def _load_installed_extensions() -> Dict[str, ExtensionInstallStateModel]:
+  raw = _read_json_file(EXTENSIONS_INSTALLED_PATH, {})
+  if not isinstance(raw, dict):
+    return {}
+  out: Dict[str, ExtensionInstallStateModel] = {}
+  for ext_id, payload in raw.items():
+    try:
+      if isinstance(payload, dict):
+        payload["extensionId"] = payload.get("extensionId") or ext_id
+      out[ext_id] = ExtensionInstallStateModel.model_validate(payload)
+    except Exception:
+      continue
+  return out
+
+
+def _save_installed_extensions(items: Dict[str, ExtensionInstallStateModel]):
+  payload = {k: v.model_dump() for k, v in items.items()}
+  _write_json_file(EXTENSIONS_INSTALLED_PATH, payload)
+
+
+_session_ext_lock = threading.Lock()
+
+
+def _load_session_extensions_state(wid: str, sess: str) -> ExtensionSessionStateModel:
+  root = session_root(wid, sess)
+  p = root / ".extensions.json"
+  raw = _read_json_file(p, None)
+  if not isinstance(raw, dict):
+    return _default_extension_session_state(wid, sess)
+  try:
+    state = ExtensionSessionStateModel.model_validate(raw)
+  except Exception:
+    return _default_extension_session_state(wid, sess)
+  if not state.sessionKey:
+    state.sessionKey = f"{wid}/{sess}"
+  return state
+
+
+def _save_session_extensions_state(wid: str, sess: str, state: ExtensionSessionStateModel):
+  p = _session_extensions_state_path(wid, sess)
+  state.updatedAt = time.time()
+  _write_json_file(p, state.model_dump())
+
+
+def _remove_extension_from_all_sessions(extension_id: str):
+  try:
+    for wid_dir in SESSIONS_ROOT.iterdir() if SESSIONS_ROOT.exists() else []:
+      if not wid_dir.is_dir():
+        continue
+      for sess_dir in wid_dir.iterdir():
+        if not sess_dir.is_dir():
+          continue
+        p = sess_dir / ".extensions.json"
+        raw = _read_json_file(p, None)
+        if not isinstance(raw, dict):
+          continue
+        try:
+          state = ExtensionSessionStateModel.model_validate(raw)
+        except Exception:
+          continue
+        changed = False
+        if extension_id in state.enabled:
+          state.enabled.pop(extension_id, None)
+          changed = True
+        if extension_id in state.order:
+          state.order = [eid for eid in state.order if eid != extension_id]
+          changed = True
+        if changed:
+          state.updatedAt = time.time()
+          _write_json_file(p, state.model_dump())
+  except Exception:
+    pass
+
+
 app = FastAPI(title="SyncTerm Web Backend")
 
 app.add_middleware(
@@ -661,6 +791,92 @@ def fetch_url(url: str, max_chars: int = 8000):
 def health():
   """デプロイ確認用: このバックエンドがファイル操作ルート (POST /files 等) を持つか返す"""
   return {"status": "ok", "file_ops": True}
+
+
+@app.get("/extensions/catalog")
+def get_extensions_catalog():
+  items = _load_extension_catalog()
+  return {"apiVersion": 1, "items": [i.model_dump() for i in items]}
+
+
+@app.get("/extensions/installed")
+def get_extensions_installed():
+  installed = _load_installed_extensions()
+  rows = sorted(installed.values(), key=lambda x: x.extensionId)
+  return {"apiVersion": 1, "items": [row.model_dump() for row in rows]}
+
+
+@app.post("/extensions/install")
+def install_extension(body: ExtensionInstallPayload):
+  extension_id = (body.extensionId or "").strip()
+  if not extension_id:
+    raise HTTPException(status_code=400, detail="extensionId is required")
+  catalog = _load_extension_catalog()
+  target = next((item for item in catalog if item.manifest.id == extension_id), None)
+  if target is None:
+    raise HTTPException(status_code=404, detail="extension not found in catalog")
+  installed = _load_installed_extensions()
+  prev = installed.get(extension_id)
+  state = ExtensionInstallStateModel(
+    extensionId=extension_id,
+    installedVersion=target.manifest.version,
+    installedAt=time.time(),
+    enabled=prev.enabled if prev is not None else True,
+    pinned=prev.pinned if prev is not None else False,
+  )
+  installed[extension_id] = state
+  _save_installed_extensions(installed)
+  return {"apiVersion": 1, "ok": True, "item": state.model_dump()}
+
+
+@app.post("/extensions/uninstall")
+def uninstall_extension(body: ExtensionInstallPayload):
+  extension_id = (body.extensionId or "").strip()
+  if not extension_id:
+    raise HTTPException(status_code=400, detail="extensionId is required")
+  installed = _load_installed_extensions()
+  existed = installed.pop(extension_id, None) is not None
+  _save_installed_extensions(installed)
+  if existed:
+    _remove_extension_from_all_sessions(extension_id)
+  return {"apiVersion": 1, "ok": True, "removed": existed}
+
+
+@app.get("/watchers/{wid}/sessions/{sess}/extensions/state")
+def get_session_extensions_state(wid: str, sess: str):
+  state = _load_session_extensions_state(wid, sess)
+  return {"apiVersion": 1, "state": state.model_dump()}
+
+
+@app.post("/watchers/{wid}/sessions/{sess}/extensions/enable")
+def enable_session_extension(wid: str, sess: str, body: ExtensionTogglePayload):
+  extension_id = (body.extensionId or "").strip()
+  if not extension_id:
+    raise HTTPException(status_code=400, detail="extensionId is required")
+  installed = _load_installed_extensions()
+  if extension_id not in installed:
+    raise HTTPException(status_code=409, detail="extension is not installed")
+  with _session_ext_lock:
+    state = _load_session_extensions_state(wid, sess)
+    state.enabled[extension_id] = True
+    if extension_id not in state.order:
+      state.order.append(extension_id)
+    _save_session_extensions_state(wid, sess, state)
+  return {"apiVersion": 1, "ok": True, "state": state.model_dump()}
+
+
+@app.post("/watchers/{wid}/sessions/{sess}/extensions/disable")
+def disable_session_extension(wid: str, sess: str, body: ExtensionTogglePayload):
+  extension_id = (body.extensionId or "").strip()
+  if not extension_id:
+    raise HTTPException(status_code=400, detail="extensionId is required")
+  with _session_ext_lock:
+    state = _load_session_extensions_state(wid, sess)
+    state.enabled[extension_id] = False
+    if extension_id not in state.order:
+      state.order.append(extension_id)
+    _save_session_extensions_state(wid, sess, state)
+  return {"apiVersion": 1, "ok": True, "state": state.model_dump()}
 
 
 @app.get("/watchers", response_model=List[WatcherModel])
@@ -896,11 +1112,17 @@ def get_file_children(
 
 
 @app.get("/watchers/{wid}/sessions/{sess}/file")
-def get_file_content(wid: str, sess: str, path: str = Query(..., description="absolute-ish path like /src/main.py")):
+def get_file_content(
+  wid: str,
+  sess: str,
+  response: Response,
+  path: str = Query(..., description="absolute-ish path like /src/main.py"),
+):
   root = session_root(wid, sess)
   rel = normalize_rel_path(path)
   target = resolve_session_file(root, path)
   use_watcher = path_has_symlink_component(root, rel)
+  response.headers["Cache-Control"] = "no-store"
   if use_watcher or (not target.exists()) or (not target.is_file()):
     # symlink / watcher-only path fallback
     return {"path": path, "content": fetch_file_via_watcher(root, rel, wid=wid, sess=sess)}
@@ -921,10 +1143,12 @@ def get_file_content(wid: str, sess: str, path: str = Query(..., description="ab
 def get_file_chunk(
   wid: str,
   sess: str,
+  response: Response,
   path: str = Query(...),
   offset: int = Query(0, ge=0),
   length: int = Query(MAX_CHUNK_BYTES, ge=1, le=MAX_CHUNK_BYTES),
 ):
+  response.headers["Cache-Control"] = "no-store"
   root = session_root(wid, sess)
   rel = normalize_rel_path(path)
   target = resolve_session_file(root, path)
